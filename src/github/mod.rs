@@ -1,3 +1,2 @@
+#[allow(dead_code)]
 pub mod auth;
-
-pub use auth::*;

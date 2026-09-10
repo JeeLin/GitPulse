@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+
 pub use types::*;
 
 fn config_dir() -> PathBuf {
@@ -14,6 +15,7 @@ fn config_dir() -> PathBuf {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct Config {
     pub scan_dirs: Vec<PathBuf>,
     pub groups: HashMap<String, Vec<PathBuf>>,
@@ -34,7 +36,8 @@ impl Config {
         }
     }
 
-    pub fn save(&self) -> Result<()> {
+    #[allow(dead_code)]
+pub fn save(&self) -> Result<()> {
         let dir = config_dir();
         fs::create_dir_all(&dir)?;
         

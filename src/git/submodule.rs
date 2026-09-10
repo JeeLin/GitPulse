@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-use super::RepoInfo;
+use super::status::RepoInfo;
 
 #[derive(Debug, Clone)]
 pub struct SubmoduleInfo {

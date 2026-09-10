@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 use tokio::process::Command;
 
-use super::RepoInfo;
+use super::status::RepoInfo;
 
 pub type BatchResult = Vec<(String, Result<()>)>;
 

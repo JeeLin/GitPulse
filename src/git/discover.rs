@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::fs;
 
-use super::RepoInfo;
+use super::status::RepoInfo;
 
 pub fn discover_repos(dirs: &[PathBuf]) -> Result<Vec<RepoInfo>> {
     let mut repos = Vec::new();
@@ -32,7 +32,7 @@ fn discover_in_dir(dir: &Path, repos: &mut Vec<RepoInfo>) -> Result<()> {
     
     // Check if this directory is a git repository
     if dir.join(".git").exists() {
-        if let Ok(repo_info) = super::query_status(dir) {
+        if let Ok(repo_info) = super::status::query_status(dir) {
             repos.push(repo_info);
         }
         // Don't recurse into git repos
