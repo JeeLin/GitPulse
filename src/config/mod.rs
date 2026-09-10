@@ -1,0 +1,59 @@
+pub mod types;
+
+use anyhow::Result;
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+
+pub use types::*;
+
+pub struct Config {
+    pub scan_dirs: Vec<PathBuf>,
+    pub groups: HashMap<String, Vec<PathBuf>>,
+    pub theme: Theme,
+    pub github: Option<GitHubConfig>,
+}
+
+impl Config {
+    pub fn load() -> Result<Self> {
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("gitpulse");
+        
+        let config_file = config_dir.join("config.toml");
+        
+        if config_file.exists() {
+            let content = fs::read_to_string(&config_file)?;
+            let parsed: ConfigFile = toml::from_str(&content)?;
+            Ok(parsed.into())
+        } else {
+            Ok(Self::default())
+        }
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("gitpulse");
+        
+        fs::create_dir_all(&config_dir)?;
+        
+        let config_file = config_dir.join("config.toml");
+        let file_config: ConfigFile = self.clone().into();
+        let content = toml::to_string_pretty(&file_config)?;
+        fs::write(config_file, content)?;
+        
+        Ok(())
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            scan_dirs: Vec::new(),
+            groups: HashMap::new(),
+            theme: Theme::Dark,
+            github: None,
+        }
+    }
+}
