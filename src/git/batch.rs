@@ -6,67 +6,36 @@ use super::RepoInfo;
 
 pub type BatchResult = Vec<(String, Result<()>)>;
 
-pub async fn batch_pull(
-    repos: &[RepoInfo],
-    progress: impl Fn(usize, &str),
-) -> BatchResult {
-    let mut results = BatchResult::new();
-    
-    for (i, repo) in repos.iter().enumerate() {
-        progress(i, &repo.name);
-        
-        let result = pull_repo(&repo.path).await;
-        results.push((repo.name.clone(), result));
-    }
-    
-    results
+macro_rules! batch_async {
+    ($repos:expr, $progress:expr, $op:expr) => {{
+        let mut results = BatchResult::new();
+        for (i, repo) in $repos.iter().enumerate() {
+            $progress(i, &repo.name);
+            let result = $op(&repo.path).await;
+            results.push((repo.name.clone(), result));
+        }
+        results
+    }};
 }
 
-pub async fn batch_fetch(
-    repos: &[RepoInfo],
-    progress: impl Fn(usize, &str),
-) -> BatchResult {
-    let mut results = BatchResult::new();
-    
-    for (i, repo) in repos.iter().enumerate() {
-        progress(i, &repo.name);
-        
-        let result = fetch_repo(&repo.path).await;
-        results.push((repo.name.clone(), result));
-    }
-    
-    results
+pub async fn batch_pull(repos: &[RepoInfo], progress: impl Fn(usize, &str)) -> BatchResult {
+    batch_async!(repos, progress, pull_repo)
 }
 
-pub async fn batch_stash(
-    repos: &[RepoInfo],
-    progress: impl Fn(usize, &str),
-) -> BatchResult {
-    let mut results = BatchResult::new();
-    
-    for (i, repo) in repos.iter().enumerate() {
-        progress(i, &repo.name);
-        
-        let result = stash_repo(&repo.path).await;
-        results.push((repo.name.clone(), result));
-    }
-    
-    results
+pub async fn batch_fetch(repos: &[RepoInfo], progress: impl Fn(usize, &str)) -> BatchResult {
+    batch_async!(repos, progress, fetch_repo)
 }
 
-pub fn batch_clean(
-    repos: &[RepoInfo],
-    progress: impl Fn(usize, &str),
-) -> BatchResult {
+pub async fn batch_stash(repos: &[RepoInfo], progress: impl Fn(usize, &str)) -> BatchResult {
+    batch_async!(repos, progress, stash_repo)
+}
+
+pub fn batch_clean(repos: &[RepoInfo], progress: impl Fn(usize, &str)) -> BatchResult {
     let mut results = BatchResult::new();
-    
     for (i, repo) in repos.iter().enumerate() {
         progress(i, &repo.name);
-        
-        let result = clean_repo(&repo.path);
-        results.push((repo.name.clone(), result));
+        results.push((repo.name.clone(), clean_repo(&repo.path)));
     }
-    
     results
 }
 

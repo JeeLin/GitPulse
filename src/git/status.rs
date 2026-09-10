@@ -98,31 +98,25 @@ fn get_dirty_stats(repo: &git2::Repository) -> Result<DirtyStats> {
 }
 
 fn get_ahead_behind(repo: &git2::Repository) -> Result<(usize, usize)> {
-    let head = match repo.head() {
-        Ok(head) => head,
-        Err(_) => return Ok((0, 0)),
-    };
+    let head = repo.head().ok();
+    let head_oid = head.as_ref().and_then(|h| h.target());
+    let branch_name = head.as_ref().and_then(|h| h.shorthand());
     
-    let head_oid = match head.target() {
-        Some(oid) => oid,
-        None => return Ok((0, 0)),
-    };
-    
-    let branch_name = match head.shorthand() {
-        Some(name) => name,
-        None => return Ok((0, 0)),
+    let (head_oid, branch_name) = match (head_oid, branch_name) {
+        (Some(oid), Some(name)) => (oid, name),
+        _ => return Ok((0, 0)),
     };
     
     let upstream_name = format!("refs/remotes/origin/{}", branch_name);
+    let upstream = repo.refname_to_id(&upstream_name).ok();
     
-    let upstream = match repo.refname_to_id(&upstream_name) {
-        Ok(oid) => oid,
-        Err(_) => return Ok((0, 0)),
-    };
-    
-    let (ahead, behind) = repo.graph_ahead_behind(head_oid, upstream)?;
-    
-    Ok((ahead, behind))
+    match upstream {
+        Some(upstream_oid) => {
+            let (ahead, behind) = repo.graph_ahead_behind(head_oid, upstream_oid)?;
+            Ok((ahead, behind))
+        }
+        None => Ok((0, 0)),
+    }
 }
 
 fn get_last_commit(repo: &git2::Repository) -> Result<CommitInfo> {
