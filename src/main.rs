@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod git;
 mod github;
+mod notifications;
 mod ui;
 
 use anyhow::Result;
