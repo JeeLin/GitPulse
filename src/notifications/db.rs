@@ -18,7 +18,7 @@ impl NotificationDb {
     }
 
     /// 初始化数据库表结构
-    pub fn init(&self) -> Result<()> {
+    pub fn init(&mut self) -> Result<()> {
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS notifications (
