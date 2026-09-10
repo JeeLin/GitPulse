@@ -4,6 +4,7 @@ mod db;
 mod git;
 mod github;
 mod notifications;
+mod branches;
 mod ui;
 
 use anyhow::Result;
