@@ -1,0 +1,11 @@
+[tools]
+rust = "1.98.1"
+
+[tasks]
+build = "cargo build"
+check = "cargo check"
+clippy = "cargo clippy -- -D warnings"
+fmt = "cargo fmt"
+test = "cargo test"
+clean = "cargo clean"
+run = "cargo run"

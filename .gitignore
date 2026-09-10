@@ -1,0 +1,54 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# IDE
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.tsbuildinfo
+
+# Worktrees
+.worktrees/
+
+# AI agent context
+.cursorrules
+
+# Dev flow / milestones (local only)
+.dev-flow/
+
+# Local analysis documents
+local/
+.mnemon/
+
+# Legacy source backup (reference only, not tracked)
+bak/
