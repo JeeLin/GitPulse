@@ -3,11 +3,12 @@ name: CI
 on:
   push:
     tags: ['v*']
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ── 格式检查 + Clippy Lint ──────────────────────────────────────────
+  # ── 格式检查 + Clippy Lint（平台无关，只需一次）──────────────────
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
@@ -26,9 +27,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
 
-      # git2-rs 需要 libssl-dev（HTTPS 支持）
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -40,7 +40,7 @@ jobs:
       - name: Clippy lint
         run: cargo clippy --all-targets -- -D warnings
 
-  # ── 测试 ──────────────────────────────────────────────────────────────
+  # ── 测试（平台无关，只需一次）─────────────────────────────────────
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -57,7 +57,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install system dependencies
         run: |
@@ -67,16 +67,42 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets
 
-  # ── 构建（依赖 check + test 通过）──────────────────────────────────
+  # ── 多平台构建（5 平台矩阵）──────────────────────────────────────
+  # linux-amd64   → ubuntu-latest (x86_64 原生)
+  # linux-arm64   → ubuntu-24.04-arm (aarch64 原生)
+  # mac-amd64     → macos-latest (arm64 runner 交叉编译 x86_64)
+  # mac-arm64     → macos-latest (arm64 原生)
+  # windows-amd64 → windows-latest
   build:
-    name: Build
+    name: Build (${{ matrix.arch }})
     needs: [check, test]
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            arch: linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            arch: linux-arm64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            arch: mac-amd64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            arch: mac-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            arch: windows-amd64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo registry & build
         uses: actions/cache@v4
@@ -85,12 +111,138 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install system dependencies
+      # Linux：安装 git2-rs 依赖（libssl + libssh2）
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
 
+      # macOS：安装 openssl（git2-rs 需要）
+      - name: Install OpenSSL (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install pkg-config openssl
+          P=$(brew --prefix openssl)
+          echo "OPENSSL_ROOT_DIR=$P" >> "$GITHUB_ENV"
+          echo "OPENSSL_LIB_DIR=$P/lib" >> "$GITHUB_ENV"
+          echo "OPENSSL_INCLUDE_DIR=$P/include" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$P/lib/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+
+      # Windows：通过 choco 安装 OpenSSL
+      - name: Install OpenSSL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install --no-progress openssl
+          # 探测 OpenSSL 安装位置
+          $roots = @(
+            "${env:ProgramFiles}\OpenSSL",
+            "${env:ProgramFiles}\OpenSSL-Win64"
+          )
+          $root = $null
+          foreach ($r in $roots) {
+            if (Test-Path "$r\include\openssl\ssl.h") { $root = $r; break }
+          }
+          if (-not $root) {
+            $root = Get-ChildItem "${env:ProgramFiles}" -Directory -Filter "OpenSSL*" -ErrorAction SilentlyContinue |
+              Where-Object { Test-Path "$($_.FullName)\include\openssl\ssl.h" } |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $root) { throw "OpenSSL not found" }
+          $sslLibDir = $null
+          foreach ($sub in @("", "VC\x64\MD")) {
+            $d = Join-Path $root "lib\$sub"
+            if (-not (Test-Path $d)) { continue }
+            $libs = Get-ChildItem $d -Filter "*.lib" -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match '^(lib)?(ssl|crypto)\.lib$' }
+            $ssl = $libs | Where-Object { $_.Name -match '^(lib)?ssl\.lib$' }
+            $crypto = $libs | Where-Object { $_.Name -match '^(lib)?crypto\.lib$' }
+            if ($ssl -and $crypto) { $sslLibDir = $d; break }
+          }
+          if (-not $sslLibDir) { throw "OpenSSL import libs not found" }
+          "OPENSSL_ROOT=$root" >> $env:GITHUB_ENV
+          "OPENSSL_LIB_DIR=$sslLibDir" >> $env:GITHUB_ENV
+          "OPENSSL_INCLUDE_DIR=$root\include" >> $env:GITHUB_ENV
+
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Windows：打包为 .exe
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $src = "target/${{ matrix.target }}/release/gitpulse.exe"
+          $dst = "gitpulse-${{ matrix.arch }}.exe"
+          Copy-Item $src $dst
+
+      # Unix：打包为 tarball
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../gitpulse-${{ matrix.arch }}.tar.gz gitpulse
+          cd ../../..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitpulse-${{ matrix.arch }}
+          path: |
+            gitpulse-${{ matrix.arch }}.tar.gz
+            gitpulse-${{ matrix.arch }}.exe
+          retention-days: 7
+
+  # ── Release：GitHub Release + SHA256SUMS ──────────────────────────
+  release:
+    name: Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gitpulse-*
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Prepare release files
+        run: |
+          # 解压 Unix tarballs
+          for tarball in artifacts/gitpulse-*.tar.gz; do
+            [ -f "$tarball" ] && tar xzf "$tarball" -C artifacts/
+          done
+          # 重命名统一
+          cd artifacts
+          for f in gitpulse-*; do
+            echo "Release file: $f"
+          done
+          cd ..
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd artifacts
+          sha256sum gitpulse-* > SHA256SUMS
+
+      - name: Extract changelog
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          awk "/^## \[${VERSION}\]/{found=1; next} /^## \[/{if(found) exit} found{print}" CHANGELOG.md > release-body.md
+          if [ ! -s release-body.md ]; then
+            echo "No changelog entry for v${VERSION}" > release-body.md
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          body_path: release-body.md
+          files: |
+            artifacts/gitpulse-*
+            artifacts/SHA256SUMS
