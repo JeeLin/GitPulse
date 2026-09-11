@@ -1,3 +1,4 @@
+use crate::ui::accounts::AccountState;
 use crate::ui::branches::BranchState;
 use crate::config::Config;
 use crate::git::RepoInfo;
@@ -10,6 +11,7 @@ pub struct App {
     pub db: NotificationDb,
     pub notification_state: NotificationState,
     pub branch_state: BranchState,
+    pub account_state: AccountState,
     pub should_quit: bool,
 }
 
@@ -23,12 +25,14 @@ impl App {
         let db = NotificationDb::new(&db_path)?;
         let notification_state = NotificationState::new();
         let branch_state = BranchState::new();
+        let account_state = AccountState::new();
         Ok(Self {
             config,
             repos: Vec::new(),
             db,
             notification_state,
             branch_state,
+            account_state,
             should_quit: false,
         })
     }
