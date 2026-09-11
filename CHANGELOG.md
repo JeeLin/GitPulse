@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-12
+
+### Added
+- Worktree 管理：查看当前所有 worktree 及其状态（路径、分支、HEAD）
+- 跨仓库搜索：在所有本地仓库中搜索代码（基于 git grep）
+- 搜索结果展示：显示搜索结果列表，支持仓库/文件/行号导航
+
 ## [0.4.0] - 2026-09-12
 
 ### Added
