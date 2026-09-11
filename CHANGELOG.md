@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-12
+
+### Added
+- Trending 浏览：查看今日热门仓库，显示语言、Stars、日增量
+- Stars 管理：查看我的收藏列表，按语言/时间过滤
+
 ## [0.5.0] - 2026-09-12
 
 ### Added
