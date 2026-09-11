@@ -10,7 +10,10 @@ pub mod notifications;
 #[allow(dead_code)]
 pub mod branches;
 #[allow(dead_code)]
+#[allow(dead_code)]
 pub mod accounts;
+#[allow(dead_code)]
+pub mod remote;
 
 use anyhow::Result;
 use crossterm::{
@@ -64,11 +67,17 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
                     && accounts::handle_account_input(key.code, &mut app.account_state) {
                         continue;
                     }
+                // 再检查远端仓库面板
+                if app.remote_state.is_visible
+                    && remote::handle_remote_repo_input(key.code, &mut app.remote_state) {
+                        continue;
+                    }
                 match key.code {
                     KeyCode::Char('q') => { app.should_quit = true; break; }
                     KeyCode::Char('n') => { app.notification_state.toggle_visibility(); }
                     KeyCode::Char('b') => { app.branch_state.toggle_visibility(); }
                     KeyCode::Char('A') => { app.account_state.toggle_visibility(); }
+                    KeyCode::Char('R') => { app.remote_state.toggle_visibility(); }
                     KeyCode::Up | KeyCode::Char('j') => {
                         let i = list_state.selected().map_or(0, |i| if i == 0 { app.repos.len().saturating_sub(1) } else { i - 1 });
                         list_state.select(Some(i));
@@ -92,6 +101,10 @@ fn ui(f: &mut Frame, app: &App, list_state: &mut ListState) {
     }
     if app.account_state.is_visible {
         accounts::render_accounts(f, &app.account_state, f.area());
+        return;
+    }
+    if app.remote_state.is_visible {
+        remote::render_remote_repos(f, &app.remote_state, f.area());
         return;
     }
     if app.branch_state.is_visible {
