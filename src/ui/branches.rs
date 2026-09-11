@@ -90,10 +90,7 @@ pub fn render_branches(f: &mut Frame, state: &BranchState, area: Rect) {
         let help = Paragraph::new(vec![
             Line::from("按 'b' 键打开分支管理"),
             Line::from(""),
-            Line::from(format!(
-                "共 {} 个仓库",
-                state.branches.len()
-            )),
+            Line::from(format!("共 {} 个仓库", state.branches.len())),
         ])
         .block(Block::default().title("分支管理").borders(Borders::ALL))
         .wrap(Wrap { trim: true });
@@ -103,7 +100,9 @@ pub fn render_branches(f: &mut Frame, state: &BranchState, area: Rect) {
 
     // 删除确认对话框
     if state.delete_merged {
-        let merged_count = state.filtered_branches().iter()
+        let merged_count = state
+            .filtered_branches()
+            .iter()
             .filter(|b| b.status == BranchStatus::Merged)
             .count();
         let confirm_text = format!(

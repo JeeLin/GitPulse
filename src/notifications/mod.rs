@@ -1,12 +1,11 @@
-pub mod models;
-pub mod db;
-pub mod fetcher;
 pub mod aggregator;
+pub mod db;
 pub mod desktop;
-pub mod sync;
+pub mod fetcher;
+pub mod models;
 pub mod state;
+pub mod sync;
 
-pub use models::{Notification, NotificationType};
 pub use db::NotificationDb;
+pub use models::NotificationType;
 pub use state::NotificationState;
-pub use fetcher::{fetch_notifications, sync_notifications};

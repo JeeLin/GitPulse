@@ -66,10 +66,7 @@ pub fn search_in_repo(repo_path: &std::path::Path, query: &str) -> Vec<SearchRes
 }
 
 /// 在所有仓库中搜索代码
-pub fn search_all_repos(
-    repos: &[std::path::PathBuf],
-    query: &str,
-) -> Vec<SearchResult> {
+pub fn search_all_repos(repos: &[std::path::PathBuf], query: &str) -> Vec<SearchResult> {
     let mut results = Vec::new();
     for repo in repos {
         let repo_results = search_in_repo(repo, query);

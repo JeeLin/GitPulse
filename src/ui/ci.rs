@@ -82,7 +82,11 @@ pub fn render_ci(f: &mut Frame, state: &CIState, area: Rect) {
     list_state.select(state.selected);
 
     let run_list = List::new(run_items)
-        .block(Block::default().title("Workflow Runs").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("Workflow Runs")
+                .borders(Borders::ALL),
+        )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol(">> ");
 
@@ -122,7 +126,11 @@ pub fn handle_ci_input(key: crossterm::event::KeyCode, state: &mut CIState) -> b
         }
         crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
             let i = state.selected.map_or(0, |i| {
-                if i >= state.runs.len().saturating_sub(1) { 0 } else { i + 1 }
+                if i >= state.runs.len().saturating_sub(1) {
+                    0
+                } else {
+                    i + 1
+                }
             });
             state.selected = Some(i);
             true

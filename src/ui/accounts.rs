@@ -49,8 +49,7 @@ impl AccountState {
 
     /// 获取当前选中的账户
     pub fn selected_account(&self) -> Option<&Account> {
-        self.selected
-            .and_then(|i| self.accounts.get(i))
+        self.selected.and_then(|i| self.accounts.get(i))
     }
 }
 

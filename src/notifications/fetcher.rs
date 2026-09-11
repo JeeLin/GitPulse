@@ -38,17 +38,17 @@ pub async fn sync_notifications(
 ) -> Result<usize> {
     let notifications = fetch_notifications(_client).await?;
     let mut new_count = 0;
-    
+
     for notification in &notifications {
         if let Ok(existing) = db.get_notification(&notification.id) {
             if existing.is_some() {
                 continue;
             }
         }
-        
+
         db.save_notification(notification)?;
         new_count += 1;
     }
-    
+
     Ok(new_count)
 }

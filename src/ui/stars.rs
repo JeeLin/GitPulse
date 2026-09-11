@@ -64,10 +64,7 @@ pub fn render_stars(f: &mut Frame, state: &StarsState, area: Rect) {
         .map(|repo| {
             let lang = repo.language.as_deref().unwrap_or("N/A");
             ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("[{}]", lang),
-                    Style::default().fg(Color::Cyan),
-                ),
+                Span::styled(format!("[{}]", lang), Style::default().fg(Color::Cyan)),
                 Span::raw(" "),
                 Span::raw(&repo.full_name),
                 Span::styled(
@@ -125,7 +122,11 @@ pub fn handle_stars_input(key: crossterm::event::KeyCode, state: &mut StarsState
         }
         crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
             let i = state.selected.map_or(0, |i| {
-                if i >= state.repos.len().saturating_sub(1) { 0 } else { i + 1 }
+                if i >= state.repos.len().saturating_sub(1) {
+                    0
+                } else {
+                    i + 1
+                }
             });
             state.selected = Some(i);
             true

@@ -73,7 +73,11 @@ pub fn render_issues(f: &mut Frame, state: &IssueState, area: Rect) {
         .issues
         .iter()
         .map(|issue| {
-            let state_icon = if issue.state == "open" { "🟢" } else { "🔴" };
+            let state_icon = if issue.state == "open" {
+                "🟢"
+            } else {
+                "🔴"
+            };
             let state_style = if issue.state == "open" {
                 Style::default().fg(Color::Green)
             } else {

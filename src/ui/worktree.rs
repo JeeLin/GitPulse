@@ -82,7 +82,11 @@ pub fn render_worktrees(f: &mut Frame, state: &WorktreeState, area: Rect) {
     list_state.select(state.selected);
 
     let wt_list = List::new(wt_items)
-        .block(Block::default().title("Worktree 列表").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("Worktree 列表")
+                .borders(Borders::ALL),
+        )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol(">> ");
 
@@ -97,7 +101,11 @@ pub fn render_worktrees(f: &mut Frame, state: &WorktreeState, area: Rect) {
             if wt.is_main { "是" } else { "否" }
         );
         let paragraph = Paragraph::new(detail)
-            .block(Block::default().title("Worktree 详情").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title("Worktree 详情")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: true });
         f.render_widget(paragraph, chunks[1]);
     }
@@ -120,7 +128,11 @@ pub fn handle_worktree_input(key: crossterm::event::KeyCode, state: &mut Worktre
         }
         crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
             let i = state.selected.map_or(0, |i| {
-                if i >= state.worktrees.len().saturating_sub(1) { 0 } else { i + 1 }
+                if i >= state.worktrees.len().saturating_sub(1) {
+                    0
+                } else {
+                    i + 1
+                }
             });
             state.selected = Some(i);
             true

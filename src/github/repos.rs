@@ -107,17 +107,14 @@ mod tests {
 
     #[test]
     fn test_remote_repo_creation() {
-        let repo = RemoteRepoBuilder::new(
-            "test-repo".to_string(),
-            "user/test-repo".to_string(),
-        )
-        .description(Some("A test repository".to_string()))
-        .language(Some("Rust".to_string()))
-        .stars(42)
-        .updated_at("2024-01-01 12:00".to_string())
-        .fork(false)
-        .clone_url("https://github.com/user/test-repo.git".to_string())
-        .build();
+        let repo = RemoteRepoBuilder::new("test-repo".to_string(), "user/test-repo".to_string())
+            .description(Some("A test repository".to_string()))
+            .language(Some("Rust".to_string()))
+            .stars(42)
+            .updated_at("2024-01-01 12:00".to_string())
+            .fork(false)
+            .clone_url("https://github.com/user/test-repo.git".to_string())
+            .build();
 
         assert_eq!(repo.name, "test-repo");
         assert_eq!(repo.stars, 42);

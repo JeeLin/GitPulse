@@ -15,35 +15,35 @@ pub fn should_ignore(branch_name: &str, config: &BranchConfig) -> bool {
 /// 支持 * 和 ? 通配符
 fn matches_pattern(name: &str, pattern: &str) -> bool {
     let pattern = pattern.trim();
-    
+
     // 精确匹配
     if name == pattern {
         return true;
     }
-    
+
     // 如果模式中没有通配符，直接返回
     if !pattern.contains('*') && !pattern.contains('?') {
         return false;
     }
-    
+
     // 简单的通配符匹配
     let mut name_chars = name.chars().peekable();
     let mut pattern_chars = pattern.chars().peekable();
-    
+
     while let Some(&p) = pattern_chars.peek() {
         match p {
             '*' => {
                 pattern_chars.next();
-                // 跳过多个 * 
+                // 跳过多个 *
                 while pattern_chars.peek() == Some(&'*') {
                     pattern_chars.next();
                 }
-                
+
                 // 如果模式结束，匹配成功
                 if pattern_chars.peek().is_none() {
                     return true;
                 }
-                
+
                 // 尝试匹配剩余模式
                 // 尝试匹配剩余模式（分支名通常很短，递归开销可接受）
                 while name_chars.peek().is_some() {
@@ -70,10 +70,9 @@ fn matches_pattern(name: &str, pattern: &str) -> bool {
             }
         }
     }
-    
+
     name_chars.peek().is_none()
 }
-
 
 #[cfg(test)]
 mod tests {

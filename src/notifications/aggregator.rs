@@ -1,5 +1,5 @@
+use super::models::Notification;
 use std::collections::HashMap;
-use super::models::{Notification, NotificationType};
 
 /// 按仓库分组通知
 pub fn aggregate_by_repo(notifications: &[Notification]) -> HashMap<String, Vec<Notification>> {

@@ -28,7 +28,7 @@ pub struct Config {
 impl Config {
     pub fn load() -> Result<Self> {
         let config_file = config_dir().join("config.toml");
-        
+
         if config_file.exists() {
             let content = fs::read_to_string(&config_file)?;
             let parsed: ConfigFile = toml::from_str(&content)?;
@@ -42,12 +42,12 @@ impl Config {
     pub fn save(&self) -> Result<()> {
         let dir = config_dir();
         fs::create_dir_all(&dir)?;
-        
+
         let config_file = dir.join("config.toml");
         let file_config: ConfigFile = self.clone().into();
         let content = toml::to_string_pretty(&file_config)?;
         fs::write(config_file, content)?;
-        
+
         Ok(())
     }
 }

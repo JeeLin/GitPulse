@@ -1,11 +1,11 @@
+mod accounts;
 mod app;
+mod branches;
 mod config;
 mod db;
 mod git;
 mod github;
 mod notifications;
-mod branches;
-mod accounts;
 mod search;
 mod ui;
 

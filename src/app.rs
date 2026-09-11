@@ -1,16 +1,16 @@
-use crate::ui::accounts::AccountState;
-use crate::ui::remote::RemoteRepoState;
-use crate::ui::issues::IssueState;
-use crate::ui::pulls::PullRequestState;
-use crate::ui::ci::CIState;
-use crate::ui::worktree::WorktreeState;
-use crate::ui::search::SearchState;
-use crate::ui::trending::TrendingState;
-use crate::ui::stars::StarsState;
-use crate::ui::branches::BranchState;
 use crate::config::Config;
 use crate::git::RepoInfo;
 use crate::notifications::{NotificationDb, NotificationState};
+use crate::ui::accounts::AccountState;
+use crate::ui::branches::BranchState;
+use crate::ui::ci::CIState;
+use crate::ui::issues::IssueState;
+use crate::ui::pulls::PullRequestState;
+use crate::ui::remote::RemoteRepoState;
+use crate::ui::search::SearchState;
+use crate::ui::stars::StarsState;
+use crate::ui::trending::TrendingState;
+use crate::ui::worktree::WorktreeState;
 use anyhow::Result;
 
 pub struct App {

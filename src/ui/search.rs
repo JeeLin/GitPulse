@@ -91,10 +91,7 @@ pub fn render_search(f: &mut Frame, state: &SearchState, area: Rect) {
     if let Some(result) = state.selected_result() {
         let detail = format!(
             "仓库: {}\n文件: {}\n行号: {}\n内容: {}",
-            result.repo_name,
-            result.file_path,
-            result.line_number,
-            result.line_content
+            result.repo_name, result.file_path, result.line_number, result.line_content
         );
         let paragraph = Paragraph::new(detail)
             .block(Block::default().title("结果详情").borders(Borders::ALL))
@@ -120,7 +117,11 @@ pub fn handle_search_input(key: crossterm::event::KeyCode, state: &mut SearchSta
         }
         crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
             let i = state.selected.map_or(0, |i| {
-                if i >= state.results.len().saturating_sub(1) { 0 } else { i + 1 }
+                if i >= state.results.len().saturating_sub(1) {
+                    0
+                } else {
+                    i + 1
+                }
             });
             state.selected = Some(i);
             true

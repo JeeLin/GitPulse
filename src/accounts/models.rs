@@ -96,7 +96,10 @@ impl AccountConfig {
     pub fn get_account_for_repo(&self, repo_path: &str) -> Option<&Account> {
         // 查找仓库绑定
         if let Some(binding) = self.repo_bindings.iter().find(|b| b.repo_path == repo_path) {
-            return self.accounts.iter().find(|a| a.name == binding.account_name);
+            return self
+                .accounts
+                .iter()
+                .find(|a| a.name == binding.account_name);
         }
         // 无绑定时返回第一个账户
         self.accounts.first()
@@ -124,7 +127,8 @@ impl AccountConfig {
     /// 添加仓库绑定
     pub fn add_binding(&mut self, binding: RepoBinding) {
         // 移除该仓库的旧绑定
-        self.repo_bindings.retain(|b| b.repo_path != binding.repo_path);
+        self.repo_bindings
+            .retain(|b| b.repo_path != binding.repo_path);
         self.repo_bindings.push(binding);
     }
 
@@ -216,12 +220,12 @@ mod tests {
         let mut config = AccountConfig::default();
         config.add_account(create_test_account("personal"));
         config.add_account(create_test_account("work"));
-        
+
         config.add_binding(RepoBinding {
             repo_path: "/test".to_string(),
             account_name: "personal".to_string(),
         });
-        
+
         // 更新绑定
         config.add_binding(RepoBinding {
             repo_path: "/test".to_string(),

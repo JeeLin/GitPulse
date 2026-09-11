@@ -47,7 +47,11 @@ pub fn render_pulls(f: &mut Frame, state: &PullRequestState, area: Rect) {
             Line::from(""),
             Line::from(format!("PR 数量: {}", state.pulls.len())),
         ])
-        .block(Block::default().title("Pull Requests").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("Pull Requests")
+                .borders(Borders::ALL),
+        )
         .wrap(Wrap { trim: true });
         f.render_widget(help, area);
         return;
@@ -128,7 +132,11 @@ pub fn handle_pull_input(key: crossterm::event::KeyCode, state: &mut PullRequest
         }
         crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
             let i = state.selected.map_or(0, |i| {
-                if i >= state.pulls.len().saturating_sub(1) { 0 } else { i + 1 }
+                if i >= state.pulls.len().saturating_sub(1) {
+                    0
+                } else {
+                    i + 1
+                }
             });
             state.selected = Some(i);
             true

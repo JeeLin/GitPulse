@@ -3,8 +3,8 @@ use chrono::{DateTime, Local, NaiveDateTime};
 use git2::{BranchType, Repository};
 use std::path::Path;
 
-use super::models::{BranchConfig, BranchInfo, BranchStatus};
 use super::ignore::should_ignore;
+use super::models::{BranchConfig, BranchInfo, BranchStatus};
 
 /// 分析指定仓库的所有分支并返回智能标记结果
 pub fn analyze_branches(repo_path: &Path, config: &BranchConfig) -> Result<Vec<BranchInfo>> {
@@ -14,27 +14,31 @@ pub fn analyze_branches(repo_path: &Path, config: &BranchConfig) -> Result<Vec<B
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    
+
     let mut branches = Vec::new();
-    
+
     // 遍历本地分支
     let local_branches = repo.branches(Some(BranchType::Local))?;
     for branch_result in local_branches {
         let (branch, branch_type) = branch_result?;
-        if let Some(info) = analyze_single_branch(&repo, branch, branch_type, repo_path, &repo_name, config)? {
+        if let Some(info) =
+            analyze_single_branch(&repo, branch, branch_type, repo_path, &repo_name, config)?
+        {
             branches.push(info);
         }
     }
-    
+
     // 遍历远程分支
     let remote_branches = repo.branches(Some(BranchType::Remote))?;
     for branch_result in remote_branches {
         let (branch, branch_type) = branch_result?;
-        if let Some(info) = analyze_single_branch(&repo, branch, branch_type, repo_path, &repo_name, config)? {
+        if let Some(info) =
+            analyze_single_branch(&repo, branch, branch_type, repo_path, &repo_name, config)?
+        {
             branches.push(info);
         }
     }
-    
+
     Ok(branches)
 }
 
@@ -51,38 +55,33 @@ fn analyze_single_branch(
         Ok(Some(name)) => name.to_string(),
         _ => return Ok(None),
     };
-    
+
     // 检查是否应该忽略（长生命周期分支）
     if should_ignore(&branch_name, config) {
         return Ok(None);
     }
-    
+
     let is_remote = branch_type == BranchType::Remote;
     let is_head = branch.is_head();
-    
+
     // 获取上游分支
-    let upstream = branch.upstream().ok().and_then(|u| {
-        u.name().ok().flatten().map(|s| s.to_string())
-    });
-    
+    let upstream = branch
+        .upstream()
+        .ok()
+        .and_then(|u| u.name().ok().flatten().map(|s| s.to_string()));
+
     // 获取 ahead/behind（如果有上游）
     let (ahead, behind) = get_ahead_behind(repo, &branch);
-    
+
     // 获取最后提交时间
     let last_commit_date = get_last_commit_date(repo, &branch);
-    
+
     // 检查是否已合并（保守判断：已合并到主分支且无 ahead）
     let is_merged = check_if_merged(repo, &branch, ahead);
-    
+
     // 确定分支状态
-    let status = determine_status(
-        is_merged,
-        ahead,
-        behind,
-        &last_commit_date,
-        config,
-    );
-    
+    let status = determine_status(is_merged, ahead, behind, &last_commit_date, config);
+
     Ok(Some(BranchInfo::new(
         branch_name,
         repo_path.to_path_buf(),
@@ -137,7 +136,7 @@ fn determine_status(
     if is_merged {
         return BranchStatus::Merged;
     }
-    
+
     // 落后主干 N 个提交 → Stale
     // 最后提交超过 N 天 → Stale
     let now = Local::now().naive_local();
@@ -145,12 +144,12 @@ fn determine_status(
     if days_since_activity >= config.min_stale_days as i64 {
         return BranchStatus::Stale;
     }
-    
+
     // 无活动超过阈值 → Orphaned
     if days_since_activity >= config.min_orphaned_days as i64 {
         return BranchStatus::Orphaned;
     }
-    
+
     // 默认：正常
     BranchStatus::Clean
 }

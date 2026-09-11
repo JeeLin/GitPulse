@@ -84,10 +84,7 @@ pub fn render_remote_repos(f: &mut Frame, state: &RemoteRepoState, area: Rect) {
                 Span::raw(fork_icon),
                 Span::raw(&repo.name),
                 Span::raw(" "),
-                Span::styled(
-                    format!("★{}", repo.stars),
-                    star_style,
-                ),
+                Span::styled(format!("★{}", repo.stars), star_style),
             ]))
         })
         .collect();
@@ -122,7 +119,10 @@ pub fn render_remote_repos(f: &mut Frame, state: &RemoteRepoState, area: Rect) {
 }
 
 /// 处理远端仓库面板的键盘事件
-pub fn handle_remote_repo_input(key: crossterm::event::KeyCode, state: &mut RemoteRepoState) -> bool {
+pub fn handle_remote_repo_input(
+    key: crossterm::event::KeyCode,
+    state: &mut RemoteRepoState,
+) -> bool {
     if !state.is_visible {
         return false;
     }

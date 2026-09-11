@@ -62,10 +62,7 @@ pub fn render_trending(f: &mut Frame, state: &TrendingState, area: Rect) {
         .map(|repo| {
             let lang = repo.language.as_deref().unwrap_or("N/A");
             ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("[{}]", lang),
-                    Style::default().fg(Color::Cyan),
-                ),
+                Span::styled(format!("[{}]", lang), Style::default().fg(Color::Cyan)),
                 Span::raw(" "),
                 Span::raw(&repo.full_name),
                 Span::styled(
@@ -84,7 +81,11 @@ pub fn render_trending(f: &mut Frame, state: &TrendingState, area: Rect) {
     list_state.select(state.selected);
 
     let repo_list = List::new(repo_items)
-        .block(Block::default().title("Trending 仓库").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("Trending 仓库")
+                .borders(Borders::ALL),
+        )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol(">> ");
 
@@ -124,7 +125,11 @@ pub fn handle_trending_input(key: crossterm::event::KeyCode, state: &mut Trendin
         }
         crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
             let i = state.selected.map_or(0, |i| {
-                if i >= state.repos.len().saturating_sub(1) { 0 } else { i + 1 }
+                if i >= state.repos.len().saturating_sub(1) {
+                    0
+                } else {
+                    i + 1
+                }
             });
             state.selected = Some(i);
             true

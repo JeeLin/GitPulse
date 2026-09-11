@@ -45,7 +45,7 @@ async fn pull_repo(path: &Path) -> Result<()> {
         .current_dir(path)
         .output()
         .await?;
-    
+
     if output.status.success() {
         Ok(())
     } else {
@@ -60,7 +60,7 @@ async fn fetch_repo(path: &Path) -> Result<()> {
         .current_dir(path)
         .output()
         .await?;
-    
+
     if output.status.success() {
         Ok(())
     } else {
@@ -75,7 +75,7 @@ async fn stash_repo(path: &Path) -> Result<()> {
         .current_dir(path)
         .output()
         .await?;
-    
+
     if output.status.success() {
         Ok(())
     } else {
@@ -89,7 +89,7 @@ fn clean_repo(path: &Path) -> Result<()> {
         .args(["clean", "-fd"])
         .current_dir(path)
         .output()?;
-    
+
     if output.status.success() {
         Ok(())
     } else {
