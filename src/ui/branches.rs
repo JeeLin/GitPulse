@@ -47,7 +47,7 @@ impl BranchState {
         for branch in branches {
             self.branches
                 .entry(branch.repo_name.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(branch);
         }
         self.selected = Some(0);
@@ -64,7 +64,7 @@ impl BranchState {
         let mut result = Vec::new();
         for branches in self.branches.values() {
             for branch in branches {
-                if self.filter.as_ref().map_or(true, |f| branch.status == *f) {
+                if self.filter.as_ref().is_none_or(|f| branch.status == *f) {
                     result.push(branch);
                 }
             }

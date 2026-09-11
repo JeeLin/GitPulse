@@ -47,17 +47,15 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
                 // 先检查通知面板是否处理了按键
-                if app.notification_state.is_visible {
-                    if notifications::handle_notification_input(key.code, &mut app.notification_state, &app.db) {
+                if app.notification_state.is_visible
+                    && notifications::handle_notification_input(key.code, &mut app.notification_state, &app.db) {
                         continue;
                     }
-                }
                 // 再检查分支面板
-                if app.branch_state.is_visible {
-                    if branches::handle_branch_input(key.code, &mut app.branch_state) {
+                if app.branch_state.is_visible
+                    && branches::handle_branch_input(key.code, &mut app.branch_state) {
                         continue;
                     }
-                }
                 match key.code {
                     KeyCode::Char('q') => { app.should_quit = true; break; }
                     KeyCode::Char('n') => { app.notification_state.toggle_visibility(); }
