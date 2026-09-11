@@ -25,7 +25,12 @@ pub mod ci;
 #[allow(dead_code)]
 pub mod worktree;
 #[allow(dead_code)]
+#[allow(dead_code)]
 pub mod search;
+#[allow(dead_code)]
+pub mod trending;
+#[allow(dead_code)]
+pub mod stars;
 
 use anyhow::Result;
 use crossterm::{
@@ -109,6 +114,16 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
                     && search::handle_search_input(key.code, &mut app.search_state) {
                         continue;
                     }
+                // 再检查 Trending 面板
+                if app.trending_state.is_visible
+                    && trending::handle_trending_input(key.code, &mut app.trending_state) {
+                        continue;
+                    }
+                // 再检查 Stars 面板
+                if app.stars_state.is_visible
+                    && stars::handle_stars_input(key.code, &mut app.stars_state) {
+                        continue;
+                    }
                 match key.code {
                     KeyCode::Char('q') => { app.should_quit = true; break; }
                     KeyCode::Char('n') => { app.notification_state.toggle_visibility(); }
@@ -120,6 +135,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
                     KeyCode::Char('C') => { app.ci_state.toggle_visibility(); }
                     KeyCode::Char('W') => { app.worktree_state.toggle_visibility(); }
                     KeyCode::Char('/') => { app.search_state.toggle_visibility(); }
+                    KeyCode::Char('T') => { app.trending_state.toggle_visibility(); }
+                    KeyCode::Char('S') => { app.stars_state.toggle_visibility(); }
                     KeyCode::Up | KeyCode::Char('j') => {
                         let i = list_state.selected().map_or(0, |i| if i == 0 { app.repos.len().saturating_sub(1) } else { i - 1 });
                         list_state.select(Some(i));
@@ -167,6 +184,14 @@ fn ui(f: &mut Frame, app: &App, list_state: &mut ListState) {
     }
     if app.search_state.is_visible {
         search::render_search(f, &app.search_state, f.area());
+        return;
+    }
+    if app.trending_state.is_visible {
+        trending::render_trending(f, &app.trending_state, f.area());
+        return;
+    }
+    if app.stars_state.is_visible {
+        stars::render_stars(f, &app.stars_state, f.area());
         return;
     }
     if app.branch_state.is_visible {

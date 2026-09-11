@@ -7,4 +7,9 @@ pub mod issues;
 #[allow(dead_code)]
 pub mod pulls;
 #[allow(dead_code)]
+#[allow(dead_code)]
 pub mod ci;
+#[allow(dead_code)]
+pub mod trending;
+#[allow(dead_code)]
+pub mod stars;

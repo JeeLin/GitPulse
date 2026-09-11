@@ -5,6 +5,8 @@ use crate::ui::pulls::PullRequestState;
 use crate::ui::ci::CIState;
 use crate::ui::worktree::WorktreeState;
 use crate::ui::search::SearchState;
+use crate::ui::trending::TrendingState;
+use crate::ui::stars::StarsState;
 use crate::ui::branches::BranchState;
 use crate::config::Config;
 use crate::git::RepoInfo;
@@ -24,6 +26,8 @@ pub struct App {
     pub ci_state: CIState,
     pub worktree_state: WorktreeState,
     pub search_state: SearchState,
+    pub trending_state: TrendingState,
+    pub stars_state: StarsState,
     pub should_quit: bool,
 }
 
@@ -55,6 +59,8 @@ impl App {
             ci_state,
             worktree_state: WorktreeState::new(),
             search_state: SearchState::new(),
+            trending_state: TrendingState::new(),
+            stars_state: StarsState::new(),
             should_quit: false,
         })
     }
