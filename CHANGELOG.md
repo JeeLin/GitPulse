@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-12
+
+### Added
+- 分支数据模型：定义 BranchInfo 结构体和 BranchStatus 枚举（Clean/Stale/Orphaned/Merged）
+- 分支状态分析：使用 git2-rs 遍历本地和远程分支，智能标记状态
+- 分支列表 TUI：按仓库分组展示分支列表，支持键盘导航和状态过滤
+- 批量清理操作：一键删除已合并分支，支持 dry-run 预览
+- 分支过滤视图：按状态过滤分支（数字键 1-4 切换，0 取消）
+- 分支排除规则：支持通配符模式匹配（main/master/develop/release/*/v*/stable）
 ## [0.1.1] - 2026-09-11
 
 ### Added
