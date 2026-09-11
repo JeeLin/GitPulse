@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use super::models::Notification;
 use std::collections::HashMap;
 

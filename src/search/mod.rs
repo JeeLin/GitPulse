@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 /// 搜索结果
 #[derive(Debug, Clone)]
 pub struct SearchResult {

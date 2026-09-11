@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use super::db::NotificationDb;
 use anyhow::Result;
 

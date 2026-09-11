@@ -175,7 +175,7 @@ mod tests {
         };
         let now = Local::now().naive_local();
         let old_date = now - chrono::Duration::days(10);
-        let status = determine_status(false, 0, 0, &old_date, &config);
+        let _status = determine_status(false, 0, 0, &old_date, &config);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use chrono::{DateTime, Utc};
 
 /// 通知类型
@@ -38,6 +39,7 @@ pub struct Notification {
 
 impl Notification {
     /// 创建新通知实例
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         repo: String,

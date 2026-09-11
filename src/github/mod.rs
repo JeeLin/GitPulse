@@ -1,7 +1,6 @@
 #[allow(dead_code)]
 pub mod auth;
 #[allow(dead_code)]
-#[allow(dead_code)]
 pub mod ci;
 #[allow(dead_code)]
 pub mod issues;

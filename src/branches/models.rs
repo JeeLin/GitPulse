@@ -52,6 +52,7 @@ pub struct BranchInfo {
 
 impl BranchInfo {
     /// 创建新的分支信息实例
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub fn new(
         name: String,
         repo_path: PathBuf,

@@ -1,10 +1,7 @@
 #[allow(dead_code)]
-#[allow(dead_code)]
 pub mod accounts;
 #[allow(dead_code)]
-#[allow(dead_code)]
 pub mod branches;
-#[allow(dead_code)]
 #[allow(dead_code)]
 pub mod ci;
 #[allow(dead_code)]
@@ -18,9 +15,7 @@ pub mod notifications;
 #[allow(dead_code)]
 pub mod pulls;
 #[allow(dead_code)]
-#[allow(dead_code)]
 pub mod remote;
-#[allow(dead_code)]
 #[allow(dead_code)]
 pub mod search;
 #[allow(dead_code)]

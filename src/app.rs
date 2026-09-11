@@ -14,6 +14,7 @@ use crate::ui::worktree::WorktreeState;
 use anyhow::Result;
 
 pub struct App {
+    #[expect(dead_code)]
     pub config: Config,
     pub repos: Vec<RepoInfo>,
     pub db: NotificationDb,

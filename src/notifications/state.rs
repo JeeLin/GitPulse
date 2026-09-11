@@ -20,6 +20,7 @@ impl NotificationState {
         self.is_visible = !self.is_visible;
     }
 
+    #[allow(dead_code)]
     pub fn update_notifications(&mut self, notifications: Vec<Notification>) {
         self.notifications = notifications;
         if !self.notifications.is_empty() {

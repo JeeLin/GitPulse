@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::notifications::models::{Notification, NotificationType};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, Result};
@@ -40,6 +41,7 @@ impl NotificationDb {
     }
 
     /// 保存通知到数据库
+    #[allow(dead_code)]
     pub fn save_notification(&self, notification: &Notification) -> Result<()> {
         self.conn.execute(
             r#"
