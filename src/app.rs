@@ -1,3 +1,4 @@
+use crate::ui::branches::BranchState;
 use crate::config::Config;
 use crate::git::RepoInfo;
 use crate::notifications::{NotificationDb, NotificationState};
@@ -8,6 +9,7 @@ pub struct App {
     pub repos: Vec<RepoInfo>,
     pub db: NotificationDb,
     pub notification_state: NotificationState,
+    pub branch_state: BranchState,
     pub should_quit: bool,
 }
 
@@ -20,7 +22,15 @@ impl App {
         let _ = std::fs::create_dir_all(&db_dir);
         let db = NotificationDb::new(&db_path)?;
         let notification_state = NotificationState::new();
-        Ok(Self { config, repos: Vec::new(), db, notification_state, should_quit: false })
+        let branch_state = BranchState::new();
+        Ok(Self {
+            config,
+            repos: Vec::new(),
+            db,
+            notification_state,
+            branch_state,
+            should_quit: false,
+        })
     }
 
     pub async fn run(&mut self) -> Result<()> {

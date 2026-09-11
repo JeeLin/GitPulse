@@ -6,6 +6,8 @@ pub mod groups;
 pub mod widgets;
 #[allow(dead_code)]
 pub mod notifications;
+#[allow(dead_code)]
+pub mod branches;
 
 use anyhow::Result;
 use crossterm::{
@@ -44,14 +46,22 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
         terminal.draw(|f| ui(f, app, &mut list_state))?;
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
+                // 先检查通知面板是否处理了按键
                 if app.notification_state.is_visible {
                     if notifications::handle_notification_input(key.code, &mut app.notification_state, &app.db) {
+                        continue;
+                    }
+                }
+                // 再检查分支面板
+                if app.branch_state.is_visible {
+                    if branches::handle_branch_input(key.code, &mut app.branch_state) {
                         continue;
                     }
                 }
                 match key.code {
                     KeyCode::Char('q') => { app.should_quit = true; break; }
                     KeyCode::Char('n') => { app.notification_state.toggle_visibility(); }
+                    KeyCode::Char('b') => { app.branch_state.toggle_visibility(); }
                     KeyCode::Up | KeyCode::Char('j') => {
                         let i = list_state.selected().map_or(0, |i| if i == 0 { app.repos.len().saturating_sub(1) } else { i - 1 });
                         list_state.select(Some(i));
@@ -73,6 +83,11 @@ fn ui(f: &mut Frame, app: &App, list_state: &mut ListState) {
         notifications::render_notifications(f, &app.notification_state, &app.db, f.area());
         return;
     }
+    if app.branch_state.is_visible {
+        branches::render_branches(f, &app.branch_state, f.area());
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
