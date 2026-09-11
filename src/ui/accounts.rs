@@ -56,20 +56,7 @@ impl AccountState {
 
 /// 渲染账户面板
 pub fn render_accounts(f: &mut Frame, state: &AccountState, area: Rect) {
-    if !state.is_visible {
-        let help = Paragraph::new(vec![
-            Line::from("按 'A' 键打开账户管理"),
-            Line::from(""),
-            Line::from(format!(
-                "当前活跃账户: {}",
-                state.active_account.as_deref().unwrap_or("无")
-            )),
-        ])
-        .block(Block::default().title("账户管理").borders(Borders::ALL))
-        .wrap(Wrap { trim: true });
-        f.render_widget(help, area);
-        return;
-    }
+    // 主布局：左侧账户列表 + 右侧账户详情
 
     // 主布局：左侧账户列表 + 右侧账户详情
     let chunks = Layout::default()

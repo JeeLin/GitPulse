@@ -19,7 +19,7 @@ impl std::fmt::Display for Platform {
 }
 
 /// 远端账户信息
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Account {
     /// 账户名称（如 "personal"、"work"）
     pub name: String,
@@ -50,7 +50,21 @@ impl Account {
             default_email,
         }
     }
+}
 
+impl std::fmt::Debug for Account {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Account")
+            .field("name", &self.name)
+            .field("platform", &self.platform)
+            .field("token", &"[REDACTED]")
+            .field("default_username", &self.default_username)
+            .field("default_email", &self.default_email)
+            .finish()
+    }
+}
+
+impl Account {
     /// 获取显示名称
     pub fn display_name(&self) -> String {
         format!("{} ({})", self.name, self.platform)
