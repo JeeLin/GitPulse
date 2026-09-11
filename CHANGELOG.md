@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-12
+
+### Added
+- 远端账户管理：多远端账户配置（GitHub/Gitea/GitLab）、账户切换 TUI 面板
+- 仓库账户绑定：仓库与账户的绑定关系，支持自动选择对应账户
+- Git 提交用户维护：全局默认用户和按仓库覆盖的提交用户管理
+- 账户安全：Account Debug 输出自动脱敏 token 字段
+
 ## [0.2.0] - 2026-09-12
 
 ### Added
