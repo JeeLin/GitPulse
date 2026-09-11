@@ -3,6 +3,8 @@ use crate::ui::remote::RemoteRepoState;
 use crate::ui::issues::IssueState;
 use crate::ui::pulls::PullRequestState;
 use crate::ui::ci::CIState;
+use crate::ui::worktree::WorktreeState;
+use crate::ui::search::SearchState;
 use crate::ui::branches::BranchState;
 use crate::config::Config;
 use crate::git::RepoInfo;
@@ -20,6 +22,8 @@ pub struct App {
     pub issue_state: IssueState,
     pub pull_state: PullRequestState,
     pub ci_state: CIState,
+    pub worktree_state: WorktreeState,
+    pub search_state: SearchState,
     pub should_quit: bool,
 }
 
@@ -49,6 +53,8 @@ impl App {
             issue_state,
             pull_state,
             ci_state,
+            worktree_state: WorktreeState::new(),
+            search_state: SearchState::new(),
             should_quit: false,
         })
     }

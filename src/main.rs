@@ -6,6 +6,7 @@ mod github;
 mod notifications;
 mod branches;
 mod accounts;
+mod search;
 mod ui;
 
 use anyhow::Result;

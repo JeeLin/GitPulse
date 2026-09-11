@@ -20,7 +20,12 @@ pub mod issues;
 #[allow(dead_code)]
 pub mod pulls;
 #[allow(dead_code)]
+#[allow(dead_code)]
 pub mod ci;
+#[allow(dead_code)]
+pub mod worktree;
+#[allow(dead_code)]
+pub mod search;
 
 use anyhow::Result;
 use crossterm::{
@@ -94,6 +99,16 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
                     && ci::handle_ci_input(key.code, &mut app.ci_state) {
                         continue;
                     }
+                // 再检查 Worktree 面板
+                if app.worktree_state.is_visible
+                    && worktree::handle_worktree_input(key.code, &mut app.worktree_state) {
+                        continue;
+                    }
+                // 再检查搜索面板
+                if app.search_state.is_visible
+                    && search::handle_search_input(key.code, &mut app.search_state) {
+                        continue;
+                    }
                 match key.code {
                     KeyCode::Char('q') => { app.should_quit = true; break; }
                     KeyCode::Char('n') => { app.notification_state.toggle_visibility(); }
@@ -103,6 +118,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
                     KeyCode::Char('I') => { app.issue_state.toggle_visibility(); }
                     KeyCode::Char('P') => { app.pull_state.toggle_visibility(); }
                     KeyCode::Char('C') => { app.ci_state.toggle_visibility(); }
+                    KeyCode::Char('W') => { app.worktree_state.toggle_visibility(); }
+                    KeyCode::Char('/') => { app.search_state.toggle_visibility(); }
                     KeyCode::Up | KeyCode::Char('j') => {
                         let i = list_state.selected().map_or(0, |i| if i == 0 { app.repos.len().saturating_sub(1) } else { i - 1 });
                         list_state.select(Some(i));
@@ -142,6 +159,14 @@ fn ui(f: &mut Frame, app: &App, list_state: &mut ListState) {
     }
     if app.ci_state.is_visible {
         ci::render_ci(f, &app.ci_state, f.area());
+        return;
+    }
+    if app.worktree_state.is_visible {
+        worktree::render_worktrees(f, &app.worktree_state, f.area());
+        return;
+    }
+    if app.search_state.is_visible {
+        search::render_search(f, &app.search_state, f.area());
         return;
     }
     if app.branch_state.is_visible {
