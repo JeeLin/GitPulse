@@ -20,6 +20,8 @@ pub struct BranchState {
     pub is_visible: bool,
     /// 当前过滤状态
     pub filter: Option<BranchStatus>,
+    /// 是否触发删除已合并分支
+    pub delete_merged: bool,
 }
 
 impl BranchState {
@@ -30,6 +32,7 @@ impl BranchState {
             selected: Some(0),
             is_visible: false,
             filter: None,
+            delete_merged: false,
         }
     }
 
@@ -198,6 +201,11 @@ pub fn handle_branch_input(key: crossterm::event::KeyCode, state: &mut BranchSta
         }
         crossterm::event::KeyCode::Char('0') => {
             state.set_filter(None);
+            true
+        }
+        crossterm::event::KeyCode::Char('D') => {
+            // D 键：标记删除已合并分支
+            state.delete_merged = true;
             true
         }
         _ => false,

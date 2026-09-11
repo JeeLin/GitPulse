@@ -4,6 +4,8 @@ pub mod models;
 pub mod ignore;
 #[allow(dead_code)]
 pub mod analyzer;
+#[allow(dead_code)]
+pub mod cleaner;
 
 #[allow(unused_imports)]
 pub use models::{BranchInfo, BranchStatus, PrStatus, BranchConfig};
