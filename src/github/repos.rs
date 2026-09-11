@@ -68,11 +68,10 @@ impl RemoteRepoBuilder {
         self
     }
 
-    pub fn is_fork(mut self, val: bool) -> Self {
+    pub fn fork(mut self, val: bool) -> Self {
         self.is_fork = val;
         self
     }
-
     pub fn clone_url(mut self, val: String) -> Self {
         self.clone_url = val;
         self
@@ -116,7 +115,7 @@ mod tests {
         .language(Some("Rust".to_string()))
         .stars(42)
         .updated_at("2024-01-01 12:00".to_string())
-        .is_fork(false)
+        .fork(false)
         .clone_url("https://github.com/user/test-repo.git".to_string())
         .build();
 
