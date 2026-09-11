@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-12
+
+### Added
+- 远端仓库浏览：通过 GitHub API 获取用户仓库列表，显示语言、Stars、更新时间等信息
+- Issue 列表：查看仓库 Issue 列表，支持按状态过滤（Open/Closed）
+- PR 列表：查看仓库 PR 列表，显示 CI 状态（✅/❌）
+- CI/CD 监控：查看 GitHub Actions Workflow Runs 状态
+- 仓库克隆：一键克隆远端仓库到本地目录
+
 ## [0.3.0] - 2026-09-12
 
 ### Added
