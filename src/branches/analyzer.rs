@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{Local, NaiveDateTime};
+use chrono::{DateTime, Local, NaiveDateTime};
 use git2::{BranchType, Repository};
 use std::path::Path;
 
@@ -110,7 +110,8 @@ fn get_last_commit_date(repo: &Repository, branch: &git2::Branch) -> NaiveDateTi
     if let Some(oid) = reference.target() {
         if let Ok(commit) = repo.find_commit(oid) {
             let timestamp = commit.time().seconds();
-            return NaiveDateTime::from_timestamp_opt(timestamp, 0)
+            return DateTime::from_timestamp(timestamp, 0)
+                .map(|dt| dt.naive_local())
                 .unwrap_or_else(|| Local::now().naive_local());
         }
     }

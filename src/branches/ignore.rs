@@ -45,13 +45,15 @@ fn matches_pattern(name: &str, pattern: &str) -> bool {
                 }
                 
                 // 尝试匹配剩余模式
-                while let Some(_) = name_chars.peek() {
-                    if matches_pattern(&name_chars.clone().collect::<String>(), &pattern_chars.clone().collect::<String>()) {
+                // 尝试匹配剩余模式（分支名通常很短，递归开销可接受）
+                while name_chars.peek().is_some() {
+                    let remaining_name: String = name_chars.clone().collect();
+                    let remaining_pattern: String = pattern_chars.clone().collect();
+                    if matches_pattern(&remaining_name, &remaining_pattern) {
                         return true;
                     }
                     name_chars.next();
                 }
-                return false;
             }
             '?' => {
                 pattern_chars.next();
