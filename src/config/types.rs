@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::Config;
+use crate::accounts::AccountConfig;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum Theme {
@@ -27,6 +28,8 @@ pub struct ConfigFile {
     pub theme: Theme,
     #[serde(default)]
     pub github: Option<GitHubConfig>,
+    #[serde(default)]
+    pub accounts: Option<AccountConfig>,
 }
 
 impl From<ConfigFile> for Config {
@@ -36,6 +39,7 @@ impl From<ConfigFile> for Config {
             groups: file.groups,
             theme: file.theme,
             github: file.github,
+            accounts: file.accounts,
         }
     }
 }
@@ -47,6 +51,7 @@ impl From<Config> for ConfigFile {
             groups: config.groups,
             theme: config.theme,
             github: config.github,
+            accounts: config.accounts,
         }
     }
 }
