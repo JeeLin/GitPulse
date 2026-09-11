@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::accounts::AccountConfig;
+use crate::accounts::{AccountConfig, GitUser};
 
 pub use types::*;
 
@@ -21,6 +21,7 @@ pub struct Config {
     pub groups: HashMap<String, Vec<PathBuf>>,
     pub theme: Theme,
     pub github: Option<GitHubConfig>,
+    pub user: Option<GitUser>,
     pub accounts: Option<AccountConfig>,
 }
 
@@ -58,6 +59,7 @@ impl Default for Config {
             groups: HashMap::new(),
             theme: Theme::Dark,
             github: None,
+            user: None,
             accounts: None,
         }
     }
