@@ -13,7 +13,14 @@ pub mod branches;
 #[allow(dead_code)]
 pub mod accounts;
 #[allow(dead_code)]
+#[allow(dead_code)]
 pub mod remote;
+#[allow(dead_code)]
+pub mod issues;
+#[allow(dead_code)]
+pub mod pulls;
+#[allow(dead_code)]
+pub mod ci;
 
 use anyhow::Result;
 use crossterm::{
@@ -72,12 +79,30 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
                     && remote::handle_remote_repo_input(key.code, &mut app.remote_state) {
                         continue;
                     }
+                // 再检查 Issue 面板
+                if app.issue_state.is_visible
+                    && issues::handle_issue_input(key.code, &mut app.issue_state) {
+                        continue;
+                    }
+                // 再检查 PR 面板
+                if app.pull_state.is_visible
+                    && pulls::handle_pull_input(key.code, &mut app.pull_state) {
+                        continue;
+                    }
+                // 再检查 CI 面板
+                if app.ci_state.is_visible
+                    && ci::handle_ci_input(key.code, &mut app.ci_state) {
+                        continue;
+                    }
                 match key.code {
                     KeyCode::Char('q') => { app.should_quit = true; break; }
                     KeyCode::Char('n') => { app.notification_state.toggle_visibility(); }
                     KeyCode::Char('b') => { app.branch_state.toggle_visibility(); }
                     KeyCode::Char('A') => { app.account_state.toggle_visibility(); }
                     KeyCode::Char('R') => { app.remote_state.toggle_visibility(); }
+                    KeyCode::Char('I') => { app.issue_state.toggle_visibility(); }
+                    KeyCode::Char('P') => { app.pull_state.toggle_visibility(); }
+                    KeyCode::Char('C') => { app.ci_state.toggle_visibility(); }
                     KeyCode::Up | KeyCode::Char('j') => {
                         let i = list_state.selected().map_or(0, |i| if i == 0 { app.repos.len().saturating_sub(1) } else { i - 1 });
                         list_state.select(Some(i));
@@ -105,6 +130,18 @@ fn ui(f: &mut Frame, app: &App, list_state: &mut ListState) {
     }
     if app.remote_state.is_visible {
         remote::render_remote_repos(f, &app.remote_state, f.area());
+        return;
+    }
+    if app.issue_state.is_visible {
+        issues::render_issues(f, &app.issue_state, f.area());
+        return;
+    }
+    if app.pull_state.is_visible {
+        pulls::render_pulls(f, &app.pull_state, f.area());
+        return;
+    }
+    if app.ci_state.is_visible {
+        ci::render_ci(f, &app.ci_state, f.area());
         return;
     }
     if app.branch_state.is_visible {

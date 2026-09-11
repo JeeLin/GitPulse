@@ -2,3 +2,9 @@
 pub mod auth;
 #[allow(dead_code)]
 pub mod repos;
+#[allow(dead_code)]
+pub mod issues;
+#[allow(dead_code)]
+pub mod pulls;
+#[allow(dead_code)]
+pub mod ci;

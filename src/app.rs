@@ -1,5 +1,8 @@
 use crate::ui::accounts::AccountState;
 use crate::ui::remote::RemoteRepoState;
+use crate::ui::issues::IssueState;
+use crate::ui::pulls::PullRequestState;
+use crate::ui::ci::CIState;
 use crate::ui::branches::BranchState;
 use crate::config::Config;
 use crate::git::RepoInfo;
@@ -14,6 +17,9 @@ pub struct App {
     pub branch_state: BranchState,
     pub account_state: AccountState,
     pub remote_state: RemoteRepoState,
+    pub issue_state: IssueState,
+    pub pull_state: PullRequestState,
+    pub ci_state: CIState,
     pub should_quit: bool,
 }
 
@@ -29,6 +35,9 @@ impl App {
         let branch_state = BranchState::new();
         let account_state = AccountState::new();
         let remote_state = RemoteRepoState::new();
+        let issue_state = IssueState::new();
+        let pull_state = PullRequestState::new();
+        let ci_state = CIState::new();
         Ok(Self {
             config,
             repos: Vec::new(),
@@ -37,6 +46,9 @@ impl App {
             branch_state,
             account_state,
             remote_state,
+            issue_state,
+            pull_state,
+            ci_state,
             should_quit: false,
         })
     }
