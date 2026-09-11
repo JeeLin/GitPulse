@@ -36,67 +36,53 @@ pub fn get_merged_branches(branches: &[BranchInfo]) -> Vec<&BranchInfo> {
         .collect()
 }
 
+/// 删除单个分支的辅助函数
+fn delete_single_branch(repo: &Repository, branch: &BranchInfo) -> BranchOperation {
+    let op = |result| BranchOperation {
+        branch_name: branch.name.clone(),
+        repo_path: branch.repo_path.clone(),
+        is_remote: branch.is_remote,
+        result,
+    };
+
+    let git_branch = match repo.find_branch(&branch.name, git2::BranchType::Local) {
+        Ok(b) => b,
+        Err(e) => return op(OperationResult::Failure(e.to_string())),
+    };
+
+    if git_branch.is_head() {
+        return op(OperationResult::Skipped("当前分支，跳过删除".to_string()));
+    }
+
+    let mut git_branch = git_branch;
+    match git_branch.delete() {
+        Ok(()) => op(OperationResult::Success),
+        Err(e) => op(OperationResult::Failure(e.to_string())),
+    }
+}
+
 /// 批量删除已合并的分支（本地）
 pub fn delete_merged_branches(
     repo: &Repository,
     branches: &[BranchInfo],
     dry_run: bool,
 ) -> Vec<BranchOperation> {
-    let mut results = Vec::new();
-
-    for branch in branches {
-        if branch.status != BranchStatus::Merged {
-            continue;
-        }
-
-        let op = if dry_run {
-            BranchOperation {
-                branch_name: branch.name.clone(),
-                repo_path: branch.repo_path.clone(),
-                is_remote: branch.is_remote,
-                result: OperationResult::Success,
-            }
-        } else {
-            match repo.find_branch(&branch.name, git2::BranchType::Local) {
-                Ok(mut git_branch) => {
-                    // 检查是否为当前分支
-                    if git_branch.is_head() {
-                        BranchOperation {
-                            branch_name: branch.name.clone(),
-                            repo_path: branch.repo_path.clone(),
-                            is_remote: branch.is_remote,
-                            result: OperationResult::Skipped("当前分支，跳过删除".to_string()),
-                        }
-                    } else {
-                        match git_branch.delete() {
-                            Ok(()) => BranchOperation {
-                                branch_name: branch.name.clone(),
-                                repo_path: branch.repo_path.clone(),
-                                is_remote: branch.is_remote,
-                                result: OperationResult::Success,
-                            },
-                            Err(e) => BranchOperation {
-                                branch_name: branch.name.clone(),
-                                repo_path: branch.repo_path.clone(),
-                                is_remote: branch.is_remote,
-                                result: OperationResult::Failure(e.to_string()),
-                            },
-                        }
-                    }
-                }
-                Err(e) => BranchOperation {
+    branches
+        .iter()
+        .filter(|b| b.status == BranchStatus::Merged)
+        .map(|branch| {
+            if dry_run {
+                BranchOperation {
                     branch_name: branch.name.clone(),
                     repo_path: branch.repo_path.clone(),
                     is_remote: branch.is_remote,
-                    result: OperationResult::Failure(e.to_string()),
-                },
+                    result: OperationResult::Success,
+                }
+            } else {
+                delete_single_branch(repo, branch)
             }
-        };
-
-        results.push(op);
-    }
-
-    results
+        })
+        .collect()
 }
 
 /// 获取需要删除的分支数量

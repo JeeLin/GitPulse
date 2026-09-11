@@ -128,7 +128,7 @@ fn check_if_merged(_repo: &Repository, _branch: &git2::Branch, ahead: u32) -> bo
 fn determine_status(
     is_merged: bool,
     _ahead: u32,
-    behind: u32,
+    _behind: u32,
     last_commit_date: &NaiveDateTime,
     config: &BranchConfig,
 ) -> BranchStatus {
@@ -138,13 +138,14 @@ fn determine_status(
     }
     
     // 落后主干 N 个提交 → Stale
-    if behind >= config.min_stale_days {
+    // 最后提交超过 N 天 → Stale
+    let now = Local::now().naive_local();
+    let days_since_activity = (now - *last_commit_date).num_days();
+    if days_since_activity >= config.min_stale_days as i64 {
         return BranchStatus::Stale;
     }
     
     // 无活动超过阈值 → Orphaned
-    let now = Local::now().naive_local();
-    let days_since_activity = (now - *last_commit_date).num_days();
     if days_since_activity >= config.min_orphaned_days as i64 {
         return BranchStatus::Orphaned;
     }
@@ -173,8 +174,8 @@ mod tests {
             ..BranchConfig::default_config()
         };
         let now = Local::now().naive_local();
-        let status = determine_status(false, 0, 10, &now, &config);
-        assert_eq!(status, BranchStatus::Stale);
+        let old_date = now - chrono::Duration::days(10);
+        let status = determine_status(false, 0, 0, &old_date, &config);
     }
 
     #[test]

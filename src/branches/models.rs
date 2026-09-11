@@ -92,6 +92,7 @@ pub struct PrStatus {
     pub last_activity: Option<NaiveDateTime>,
 }
 
+#[allow(dead_code)]
 impl PrStatus {
     /// 无关联 PR 的默认状态
     pub fn no_pr() -> Self {

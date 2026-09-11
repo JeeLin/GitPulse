@@ -46,7 +46,7 @@ fn matches_pattern(name: &str, pattern: &str) -> bool {
                 
                 // 尝试匹配剩余模式
                 while let Some(_) = name_chars.peek() {
-                    if matches_pattern_rest(&name_chars.clone().collect::<String>(), &pattern_chars.clone().collect::<String>()) {
+                    if matches_pattern(&name_chars.clone().collect::<String>(), &pattern_chars.clone().collect::<String>()) {
                         return true;
                     }
                     name_chars.next();
@@ -72,10 +72,6 @@ fn matches_pattern(name: &str, pattern: &str) -> bool {
     name_chars.peek().is_none()
 }
 
-/// 辅助函数：匹配剩余的模式
-fn matches_pattern_rest(name: &str, pattern: &str) -> bool {
-    matches_pattern(name, pattern)
-}
 
 #[cfg(test)]
 mod tests {

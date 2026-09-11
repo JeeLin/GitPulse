@@ -101,6 +101,22 @@ pub fn render_branches(f: &mut Frame, state: &BranchState, area: Rect) {
         return;
     }
 
+    // 删除确认对话框
+    if state.delete_merged {
+        let merged_count = state.filtered_branches().iter()
+            .filter(|b| b.status == BranchStatus::Merged)
+            .count();
+        let confirm_text = format!(
+            "确认删除 {} 个已合并分支？\n\n按 'y' 确认，按 'n' 取消",
+            merged_count
+        );
+        let confirm = Paragraph::new(confirm_text)
+            .block(Block::default().title("⚠️ 确认删除").borders(Borders::ALL))
+            .wrap(Wrap { trim: true });
+        f.render_widget(confirm, area);
+        return;
+    }
+
     // 主布局：左侧仓库列表 + 右侧分支列表
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -164,6 +180,16 @@ pub fn handle_branch_input(key: crossterm::event::KeyCode, state: &mut BranchSta
     match key {
         crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('b') => {
             state.toggle_visibility();
+            true
+        }
+        // 删除确认处理
+        crossterm::event::KeyCode::Char('y') if state.delete_merged => {
+            state.delete_merged = false;
+            // 实际删除操作由 App 层处理
+            true
+        }
+        crossterm::event::KeyCode::Char('n') if state.delete_merged => {
+            state.delete_merged = false;
             true
         }
         crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
