@@ -12,6 +12,7 @@ use ratatui::crossterm::{cursor::Show, execute};
 use ratatui::{Frame, Terminal};
 
 use crate::config::Config;
+use crate::git::{self, RepoInfo};
 
 /// Terminal type used by the TUI.
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -54,6 +55,8 @@ pub struct App {
     /// Bottom status line (convention 3); rendered with the dashboard (M1 subtask 4).
     #[allow(dead_code)]
     status: Option<StatusLine>,
+    /// Discovered git repositories (M1 subtask 3).
+    pub repos: Vec<RepoInfo>,
 }
 
 impl App {
@@ -63,6 +66,7 @@ impl App {
             view: View::Dashboard,
             config,
             status: None,
+            repos: Vec::new(),
         }
     }
 
@@ -72,6 +76,28 @@ impl App {
             message: message.into(),
             is_error: true,
         });
+    }
+
+    /// Clear the status line.
+    pub fn clear_error(&mut self) {
+        self.status = None;
+    }
+
+    /// Discover git repositories from `config.scan_dirs` and load their status.
+    ///
+    /// On failure, records an error and clears `repos` so the UI shows the
+    /// error rather than an empty list masquerading as success (checkpoint 2).
+    pub fn load_repos(&mut self) {
+        match git::discover_repos(&self.config.scan_dirs) {
+            Ok(repos) => {
+                self.repos = repos;
+                self.clear_error();
+            }
+            Err(e) => {
+                self.set_error(format!("扫描仓库失败: {e}"));
+                self.repos = Vec::new();
+            }
+        }
     }
 
     /// Dispatch a key press for the current view; returns `false` when the app should exit.
@@ -106,6 +132,7 @@ pub async fn run() -> Result<()> {
             app
         }
     };
+    app.load_repos();
     let run_result = event_loop(&mut terminal, &mut app);
     let restore_result: Result<()> = restore_terminal().map_err(Into::into);
     run_result.and(restore_result)
