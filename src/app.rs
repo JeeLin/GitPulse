@@ -13,7 +13,7 @@ use ratatui::widgets::ListState;
 use ratatui::Terminal;
 
 use crate::config::Config;
-use crate::git::{self, RepoInfo};
+use crate::git::{self, FileEntry, RepoInfo};
 
 /// Terminal type used by the TUI.
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -56,6 +56,20 @@ pub struct App {
     pub repos: Vec<RepoInfo>,
     /// Dashboard selection cursor, consumed by the dashboard renderer (M1 subtask 4).
     pub dashboard_state: ListState,
+    /// Index into `repos` for the currently opened single-repo view.
+    pub current_repo: Option<usize>,
+    /// File status entries for the current single-repo view.
+    pub file_entries: Vec<FileEntry>,
+    /// Selection cursor for the file status list in single-repo view.
+    pub file_state: ListState,
+    /// Scroll offset for the diff viewer.
+    pub diff_scroll: u16,
+    /// Whether the diff viewer is active (set when entering Diff view from Repo).
+    pub show_diff: bool,
+    /// Whether the discard confirmation dialog is shown.
+    pub show_discard_confirm: bool,
+    /// Current diff content for the selected file.
+    pub diff_content: String,
 }
 
 impl App {
@@ -67,6 +81,13 @@ impl App {
             status: None,
             repos: Vec::new(),
             dashboard_state: ListState::default(),
+            current_repo: None,
+            file_entries: Vec::new(),
+            file_state: ListState::default(),
+            diff_scroll: 0,
+            show_diff: false,
+            show_discard_confirm: false,
+            diff_content: String::new(),
         }
     }
 
@@ -124,8 +145,121 @@ impl App {
         if let Some(i) = self.dashboard_state.selected() {
             if i < self.repos.len() {
                 self.view = View::Repo;
+                self.current_repo = Some(i);
+                self.load_file_entries();
+                self.file_state.select(Some(0));
+                self.show_diff = false;
+                self.clear_error();
             }
         }
+    }
+
+    /// Load file status entries for the current repo.
+    pub fn load_file_entries(&mut self) {
+        if let Some(i) = self.current_repo {
+            if i < self.repos.len() {
+                let repo_path = self.repos[i].path.clone();
+                match git::list_file_status(&repo_path) {
+                    Ok(entries) => {
+                        self.file_entries = entries;
+                        self.clear_error();
+                        if self.file_entries.is_empty() {
+                            self.file_state.select(None);
+                        } else {
+                            let sel = self.file_state.selected().unwrap_or(0);
+                            let new_sel = sel.min(self.file_entries.len() - 1);
+                            self.file_state.select(Some(new_sel));
+                        }
+                    }
+                    Err(e) => {
+                        self.set_error(format!("加载文件列表失败: {e}"));
+                        self.file_entries.clear();
+                        self.file_state.select(None);
+                    }
+                }
+            }
+        }
+    }
+
+    /// View the diff of the currently selected file.
+    pub fn view_file_diff(&mut self) {
+        if let (Some(repo_idx), Some(file_idx)) = (self.current_repo, self.file_state.selected()) {
+            if repo_idx < self.repos.len() && file_idx < self.file_entries.len() {
+                let repo_path = self.repos[repo_idx].path.clone();
+                let file_path = self.file_entries[file_idx].path.clone();
+                match git::diff_file(&repo_path, &file_path) {
+                    Ok(diff) => {
+                        self.diff_content = diff;
+                        self.show_diff = true;
+                        self.view = View::Diff;
+                        self.diff_scroll = 0;
+                    }
+                    Err(e) => self.set_error(format!("加载 diff 失败: {e}")),
+                }
+            }
+        }
+    }
+
+    /// Stage the currently selected file.
+    pub fn stage_current(&mut self) {
+        if let (Some(repo_idx), Some(file_idx)) = (self.current_repo, self.file_state.selected()) {
+            if repo_idx < self.repos.len() && file_idx < self.file_entries.len() {
+                let repo_path = self.repos[repo_idx].path.clone();
+                let file_path = self.file_entries[file_idx].path.clone();
+                match git::stage(&repo_path, &file_path) {
+                    Ok(()) => {
+                        self.clear_error();
+                        self.load_file_entries();
+                    }
+                    Err(e) => self.set_error(format!("stage 失败: {e}")),
+                }
+            }
+        }
+    }
+
+    /// Unstage the currently selected file.
+    pub fn unstage_current(&mut self) {
+        if let (Some(repo_idx), Some(file_idx)) = (self.current_repo, self.file_state.selected()) {
+            if repo_idx < self.repos.len() && file_idx < self.file_entries.len() {
+                let repo_path = self.repos[repo_idx].path.clone();
+                let file_path = self.file_entries[file_idx].path.clone();
+                match git::unstage(&repo_path, &file_path) {
+                    Ok(()) => {
+                        self.clear_error();
+                        self.load_file_entries();
+                    }
+                    Err(e) => self.set_error(format!("unstage 失败: {e}")),
+                }
+            }
+        }
+    }
+
+    /// Show the discard confirmation dialog.
+    pub fn start_discard(&mut self) {
+        self.show_discard_confirm = true;
+    }
+
+    /// Execute the discard for the currently selected file.
+    pub fn confirm_discard(&mut self) {
+        self.show_discard_confirm = false;
+        if let (Some(repo_idx), Some(file_idx)) = (self.current_repo, self.file_state.selected()) {
+            if repo_idx < self.repos.len() && file_idx < self.file_entries.len() {
+                let repo_path = self.repos[repo_idx].path.clone();
+                let file_path = self.file_entries[file_idx].path.clone();
+                match git::discard(&repo_path, &file_path) {
+                    Ok(()) => {
+                        self.clear_error();
+                        self.load_file_entries();
+                    }
+                    Err(e) => self.set_error(format!("discard 失败: {e}")),
+                }
+            }
+        }
+    }
+
+    /// Cancel the discard confirmation dialog.
+    pub fn cancel_discard(&mut self) {
+        self.show_discard_confirm = false;
     }
 
     /// Dispatch a key press for the current view; returns `false` when the app should exit.
@@ -165,6 +299,82 @@ impl App {
                 _ => true,
             },
             // Entered from the dashboard by later subtasks; Esc steps back one level.
+            View::Repo => {
+                if self.show_discard_confirm {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            self.confirm_discard();
+                            true
+                        }
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            self.cancel_discard();
+                            true
+                        }
+                        _ => true,
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Esc => {
+                            self.view = View::Dashboard;
+                            true
+                        }
+                        KeyCode::Char('q') => false,
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            if !self.file_entries.is_empty() {
+                                let next = self.file_state.selected().map_or(0, |i| {
+                                    i.saturating_add(1).min(self.file_entries.len() - 1)
+                                });
+                                self.file_state.select(Some(next));
+                            }
+                            true
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            if !self.file_entries.is_empty() {
+                                let prev = self.file_state.selected().map_or(0, |i| {
+                                    i.saturating_sub(1)
+                                });
+                                self.file_state.select(Some(prev));
+                            }
+                            true
+                        }
+                        KeyCode::Char('d') => {
+                            self.view_file_diff();
+                            true
+                        }
+                        KeyCode::Char('s') => {
+                            self.stage_current();
+                            true
+                        }
+                        KeyCode::Char('u') => {
+                            self.unstage_current();
+                            true
+                        }
+                        KeyCode::Char('x') => {
+                            self.start_discard();
+                            true
+                        }
+                        _ => true,
+                    }
+                }
+            }
+            View::Diff => match key.code {
+                KeyCode::Esc => {
+                    self.view = View::Repo;
+                    self.show_diff = false;
+                    true
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.diff_scroll = self.diff_scroll.saturating_add(1);
+                    true
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.diff_scroll = self.diff_scroll.saturating_sub(1);
+                    true
+                }
+                KeyCode::Char('q') => false,
+                _ => true,
+            },
+            // Fallback for Commit/Branches: Esc steps back to Dashboard.
             _ => match key.code {
                 KeyCode::Esc => {
                     self.view = View::Dashboard;

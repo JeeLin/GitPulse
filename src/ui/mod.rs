@@ -1,6 +1,8 @@
 //! TUI rendering: view dispatch shared by all screens.
 
 pub mod dashboard;
+pub mod diff;
+pub mod repo;
 
 use ratatui::Frame;
 
@@ -21,7 +23,25 @@ pub fn render(f: &mut Frame, app: &mut App) {
             };
             dashboard::render_dashboard(f, &mut state);
         }
-        // Repo/Diff/Commit/Branches land in M1 subtasks 5-7.
-        View::Repo | View::Diff | View::Commit | View::Branches => {}
+        View::Repo => {
+            let sel = app.file_state.selected();
+            let confirm_file = if app.show_discard_confirm {
+                sel.and_then(|i| app.file_entries.get(i))
+            } else {
+                None
+            };
+            let state = repo::RepoState {
+                entries: &app.file_entries,
+                status: app.status.as_ref(),
+                list_state: &mut app.file_state,
+                show_discard_confirm: app.show_discard_confirm,
+                confirm_file,
+            };
+            repo::render_repo(f, state);
+        }
+        View::Diff => {
+            diff::render_diff(f, app);
+        }
+        View::Commit | View::Branches => {}
     }
 }
