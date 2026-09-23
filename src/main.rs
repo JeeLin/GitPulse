@@ -1,6 +1,7 @@
 //! GitPulse entry point: CLI parsing, tokio runtime, TUI startup.
 
 mod app;
+mod config;
 
 use anyhow::Result;
 use clap::Parser;

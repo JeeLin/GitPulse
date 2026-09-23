@@ -9,7 +9,9 @@ use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::crossterm::{cursor::Show, execute};
-use ratatui::{Terminal, Frame};
+use ratatui::{Frame, Terminal};
+
+use crate::config::Config;
 
 /// Terminal type used by the TUI.
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -31,13 +33,47 @@ pub enum View {
     Branches,
 }
 
+/// Bottom status line content: short message or error (convention 3).
+// Fields are read once the status line is rendered (M1 subtask 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct StatusLine {
+    /// Message text.
+    pub message: String,
+    /// `true` for errors, which render red and persist until the next operation.
+    pub is_error: bool,
+}
+
 /// Application state shared across views.
 pub struct App {
     /// Current view; key presses are dispatched per view in [`App::handle_key`].
     view: View,
+    /// Loaded configuration; repo discovery consumes it (M1 subtask 3).
+    #[allow(dead_code)]
+    config: Config,
+    /// Bottom status line (convention 3); rendered with the dashboard (M1 subtask 4).
+    #[allow(dead_code)]
+    status: Option<StatusLine>,
 }
 
 impl App {
+    /// Create the application around a loaded configuration.
+    pub fn new(config: Config) -> Self {
+        Self {
+            view: View::Dashboard,
+            config,
+            status: None,
+        }
+    }
+
+    /// Record an error message on the status line (persists until the next operation).
+    pub fn set_error(&mut self, message: impl Into<String>) {
+        self.status = Some(StatusLine {
+            message: message.into(),
+            is_error: true,
+        });
+    }
+
     /// Dispatch a key press for the current view; returns `false` when the app should exit.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
@@ -62,7 +98,14 @@ impl App {
 pub async fn run() -> Result<()> {
     install_panic_hook();
     let mut terminal = init_terminal()?;
-    let mut app = App { view: View::Dashboard };
+    let mut app = match Config::load() {
+        Ok(config) => App::new(config),
+        Err(err) => {
+            let mut app = App::new(Config::default());
+            app.set_error(format!("failed to load config: {err:#}"));
+            app
+        }
+    };
     let run_result = event_loop(&mut terminal, &mut app);
     let restore_result: Result<()> = restore_terminal().map_err(Into::into);
     run_result.and(restore_result)
