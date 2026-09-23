@@ -1,0 +1,23 @@
+[tools]
+rust = "stable"
+
+[tasks.build]
+run = "cargo build"
+
+[tasks.check]
+run = "cargo check"
+
+[tasks.clippy]
+run = "cargo clippy -- -D warnings"
+
+[tasks.fmt]
+run = "cargo fmt --all"
+
+[tasks.test]
+run = "cargo test"
+
+[tasks.clean]
+run = "cargo clean"
+
+[tasks.run]
+run = "cargo run"

@@ -1,0 +1,15 @@
+[package]
+name = "gitpulse"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+git2 = "0.19"
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
