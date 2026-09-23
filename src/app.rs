@@ -9,7 +9,8 @@ use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::crossterm::{cursor::Show, execute};
-use ratatui::{Frame, Terminal};
+use ratatui::widgets::ListState;
+use ratatui::Terminal;
 
 use crate::config::Config;
 use crate::git::{self, RepoInfo};
@@ -35,9 +36,7 @@ pub enum View {
 }
 
 /// Bottom status line content: short message or error (convention 3).
-// Fields are read once the status line is rendered (M1 subtask 4).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct StatusLine {
     /// Message text.
     pub message: String,
@@ -48,15 +47,15 @@ pub struct StatusLine {
 /// Application state shared across views.
 pub struct App {
     /// Current view; key presses are dispatched per view in [`App::handle_key`].
-    view: View,
+    pub view: View,
     /// Loaded configuration; repo discovery consumes it (M1 subtask 3).
-    #[allow(dead_code)]
     config: Config,
     /// Bottom status line (convention 3); rendered with the dashboard (M1 subtask 4).
-    #[allow(dead_code)]
-    status: Option<StatusLine>,
+    pub status: Option<StatusLine>,
     /// Discovered git repositories (M1 subtask 3).
     pub repos: Vec<RepoInfo>,
+    /// Dashboard selection cursor, consumed by the dashboard renderer (M1 subtask 4).
+    pub dashboard_state: ListState,
 }
 
 impl App {
@@ -67,6 +66,7 @@ impl App {
             config,
             status: None,
             repos: Vec::new(),
+            dashboard_state: ListState::default(),
         }
     }
 
@@ -100,13 +100,70 @@ impl App {
         }
     }
 
+    /// Re-run repo discovery and update the dashboard (manual refresh, convention 5).
+    ///
+    /// The selection cursor is clamped so a shrinking list never points past
+    /// the end of `repos`.
+    pub fn refresh_repos(&mut self) {
+        self.load_repos();
+        if self.repos.is_empty() {
+            self.dashboard_state.select(None);
+        } else if let Some(i) = self.dashboard_state.selected() {
+            if i >= self.repos.len() {
+                self.dashboard_state
+                    .select(Some(self.repos.len().saturating_sub(1)));
+            }
+        }
+    }
+
+    /// Enter the single-repo view for the selected dashboard row.
+    ///
+    /// No-op when nothing (valid) is selected. Tracking the current repo for
+    /// the repo view lands with M1 subtask 5.
+    pub fn enter_repo(&mut self) {
+        if let Some(i) = self.dashboard_state.selected() {
+            if i < self.repos.len() {
+                self.view = View::Repo;
+            }
+        }
+    }
+
     /// Dispatch a key press for the current view; returns `false` when the app should exit.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
             return true;
         }
         match self.view {
-            View::Dashboard => !matches!(key.code, KeyCode::Char('q') | KeyCode::Esc),
+            View::Dashboard => match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => false,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if !self.repos.is_empty() {
+                        let next = self.dashboard_state.selected().map_or(0, |i| {
+                            i.saturating_add(1).min(self.repos.len() - 1)
+                        });
+                        self.dashboard_state.select(Some(next));
+                    }
+                    true
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if !self.repos.is_empty() {
+                        let prev = self.dashboard_state.selected().map_or(0, |i| {
+                            i.saturating_sub(1)
+                        });
+                        self.dashboard_state.select(Some(prev));
+                    }
+                    true
+                }
+                KeyCode::Char('r') => {
+                    self.refresh_repos();
+                    true
+                }
+                KeyCode::Enter => {
+                    self.enter_repo();
+                    true
+                }
+                _ => true,
+            },
             // Entered from the dashboard by later subtasks; Esc steps back one level.
             _ => match key.code {
                 KeyCode::Esc => {
@@ -132,19 +189,16 @@ pub async fn run() -> Result<()> {
             app
         }
     };
-    app.load_repos();
+    app.refresh_repos();
     let run_result = event_loop(&mut terminal, &mut app);
     let restore_result: Result<()> = restore_terminal().map_err(Into::into);
     run_result.and(restore_result)
 }
 
-/// Render one frame: an empty dashboard until data loading lands in later subtasks.
-fn render(_frame: &mut Frame) {}
-
 /// Blocking event loop: draw a frame, then wait for the next terminal event.
 fn event_loop(terminal: &mut Tui, app: &mut App) -> Result<()> {
     loop {
-        terminal.draw(render)?;
+        terminal.draw(|f| crate::ui::render(f, app))?;
         if let Event::Key(key) = event::read()? {
             if !app.handle_key(key) {
                 return Ok(());
@@ -184,4 +238,93 @@ fn install_panic_hook() {
         let _ = restore_terminal();
         default_hook(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::RepoInfo;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE)
+    }
+
+    fn app_with_repos(count: usize) -> App {
+        let mut app = App::new(Config::default());
+        app.repos = (0..count)
+            .map(|i| RepoInfo {
+                name: format!("repo-{i}"),
+                path: std::path::PathBuf::from(format!("/tmp/repo-{i}")),
+                branch: "main".to_string(),
+                dirty: Default::default(),
+                ahead: 0,
+                behind: 0,
+                last_commit: Default::default(),
+            })
+            .collect();
+        app
+    }
+
+    #[test]
+    fn dashboard_j_k_moves_selection() {
+        let mut app = app_with_repos(3);
+        assert_eq!(app.dashboard_state.selected(), None);
+
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.dashboard_state.selected(), Some(0));
+
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.dashboard_state.selected(), Some(1));
+
+        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(app.dashboard_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn dashboard_j_stops_at_last_repo() {
+        let mut app = app_with_repos(2);
+        app.dashboard_state.select(Some(1));
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.dashboard_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn dashboard_enter_opens_selected_repo() {
+        let mut app = app_with_repos(1);
+        // Nothing selected: Enter is a no-op.
+        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.view, View::Dashboard);
+
+        app.dashboard_state.select(Some(0));
+        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.view, View::Repo);
+    }
+
+    #[test]
+    fn dashboard_q_quits() {
+        let mut app = app_with_repos(1);
+        assert!(!app.handle_key(key(KeyCode::Char('q'))));
+    }
+
+    #[test]
+    fn dashboard_r_refreshes_and_clears_error() {
+        let mut app = app_with_repos(1);
+        app.set_error("boom".to_string());
+        assert!(app.handle_key(key(KeyCode::Char('r'))));
+        assert_eq!(app.status, None);
+        // Default config has empty scan_dirs, so a refresh yields no repos.
+        assert!(app.repos.is_empty());
+        assert_eq!(app.dashboard_state.selected(), None);
+    }
+
+    #[test]
+    fn refresh_clamps_out_of_range_selection() {
+        let mut app = app_with_repos(3);
+        app.dashboard_state.select(Some(2));
+        app.repos.pop();
+        app.repos.pop();
+        app.refresh_repos();
+        // scan_dirs empty: repos cleared and selection dropped.
+        assert_eq!(app.dashboard_state.selected(), None);
+    }
 }

@@ -3,6 +3,7 @@
 mod app;
 mod config;
 mod git;
+mod ui;
 
 use anyhow::Result;
 use clap::Parser;
