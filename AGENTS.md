@@ -6,7 +6,6 @@
 - Git：git2-rs
 - GitHub API：octocrab
 - 异步：tokio
-- 本地存储：SQLite（rusqlite）
 - 依赖管理：mise
 
 ## 项目结构
@@ -24,7 +23,7 @@ GitPulse/
 │   ├── git/                # Git 操作（git2-rs）
 │   ├── github/             # GitHub API（octocrab）
 │   ├── config/             # 配置管理
-│   └── db/                 # SQLite 存储
+│   └── db/                 # SQLite 存储（预留，暂未启用）
 ├── Cargo.toml
 ├── mise.toml
 └── .gitignore
