@@ -15,7 +15,7 @@ next 分支为孤儿分支重写，旧版 v0.1-v0.7 实现归档于 master，因
 
 ### M1 本地核心闭环
 
-- **核心功能**：项目骨架、配置管理（统一 `~/.gitpulse/` 单一路径来源）、仓库发现与状态查询（TUI 启动时真实加载）、状态仪表盘渲染真数据、单仓库视图（文件列表 + diff 查看 + stage/unstage + commit + push/pull）、批量 pull/fetch、分支面板（列表/创建/切换/删除）
+- **核心功能**：项目骨架、配置管理（统一 `~/.gitpulse/` 单一路径来源）、仓库发现与状态查询（TUI 启动时真实加载）、状态仪表盘渲染真数据、单仓库视图（文件列表 + diff 查看 + stage/unstage + discard 确认框 + commit 单行输入 + push/pull 快进）、批量 pull/fetch、分支面板（列表/创建/切换/删除）
 - **端到端验收**：在 TUI 里对真实仓库完成一次 edit→stage→commit→push
 - **子任务预估**：
 

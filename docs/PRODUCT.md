@@ -40,7 +40,7 @@
 - 项目骨架与配置管理（统一 `~/.gitpulse/` 单一路径来源）
 - 仓库发现与状态查询，在 TUI 启动时真实加载
 - 状态仪表盘渲染真数据，并可进入单仓库视图
-- 单仓库视图：文件状态列表、diff 查看、stage/unstage、commit、push/pull
+- 单仓库视图：文件状态列表、diff 查看、stage/unstage、discard（带确认框）、commit、push/pull（fast-forward only）
 - 批量 pull/fetch
 - 分支面板：分支列表、创建、切换、删除
 
