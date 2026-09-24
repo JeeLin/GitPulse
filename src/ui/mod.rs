@@ -99,6 +99,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 list_state: &mut app.config_state,
                 show_input: app.show_config_input,
                 input: &app.config_input,
+                show_delete_confirm: app.show_config_delete_confirm,
             };
             config::render_config(f, state);
         }
@@ -260,5 +261,17 @@ mod tests {
         );
         assert!(text.contains("Enter确认"), "missing confirm hint: {text}");
         assert!(text.contains("Esc取消"), "missing cancel hint: {text}");
+    }
+
+    #[test]
+    fn config_view_delete_confirm_renders_via_dispatch() {
+        let mut app = base_app();
+        app.view = View::Config;
+        app.config_state.select(None);
+        app.show_config_delete_confirm = true;
+        let text = render_compact(&mut app);
+        assert!(text.contains("移除该目录"), "missing prompt: {text}");
+        assert!(text.contains("y确认"), "missing confirm key: {text}");
+        assert!(text.contains("n取消"), "missing cancel key: {text}");
     }
 }

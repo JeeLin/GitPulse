@@ -26,13 +26,15 @@ pub struct ConfigState<'a> {
     pub show_input: bool,
     /// Directory path being typed in add mode (convention 9).
     pub input: &'a str,
+    /// Whether the delete-scan-dir confirmation overlay is shown.
+    pub show_delete_confirm: bool,
 }
 
 /// Render the scan-dir list with the bottom status line and key hints, plus
 /// the add-scan-dir input overlay when active.
 ///
 /// While the input is open the bottom hints switch to `Enter 确认 / Esc 取消`;
-/// the delete-confirm overlay lands with a later subtask.
+/// the delete confirmation renders a `y/n` overlay over the list.
 pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
     let area = f.area();
     let chunks = Layout::default()
@@ -62,6 +64,13 @@ pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
 
     if state.show_input {
         render_add_input(f, area, state.input);
+    }
+    if state.show_delete_confirm {
+        let dir = state
+            .list_state
+            .selected()
+            .and_then(|i| state.scan_dirs.get(i));
+        render_delete_confirm(f, area, dir);
     }
 }
 
@@ -101,6 +110,34 @@ fn render_add_input(f: &mut Frame, area: Rect, input: &str) {
         Span::styled("▌", Style::default().fg(Color::Cyan)),
     ]);
     f.render_widget(Paragraph::new(line).block(block), popup_area);
+}
+
+/// Delete confirmation overlay (discard-style, convention 8): y confirms,
+/// n cancels; names the selected directory when one is selected.
+fn render_delete_confirm(f: &mut Frame, area: Rect, dir: Option<&PathBuf>) {
+    let popup_area = centered_rect(60, 5, area);
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title("移除该目录？")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Red));
+
+    let mut lines = vec![];
+    if let Some(dir) = dir {
+        lines.push(Line::from(Span::styled(
+            dir.display().to_string(),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("y", Style::default().fg(Color::Cyan)),
+        Span::raw(" 确认  "),
+        Span::styled("n", Style::default().fg(Color::Cyan)),
+        Span::raw(" 取消"),
+    ]));
+    f.render_widget(Paragraph::new(lines).block(block), popup_area);
 }
 
 /// Draw the bordered scan-dir list; the title carries the entry count.
@@ -162,6 +199,7 @@ mod tests {
             list_state: &mut list_state,
             show_input: false,
             input: "",
+            show_delete_confirm: false,
         });
         assert!(text.contains("扫描目录配置(2)"), "missing title: {text}");
         assert!(
@@ -184,6 +222,7 @@ mod tests {
             list_state: &mut list_state,
             show_input: false,
             input: "",
+            show_delete_confirm: false,
         });
         assert!(text.contains("扫描目录配置(0)"), "missing title: {text}");
         assert!(text.contains("Esc返回"), "missing back hint: {text}");
@@ -202,6 +241,7 @@ mod tests {
             list_state: &mut list_state,
             show_input: false,
             input: "",
+            show_delete_confirm: false,
         });
         assert!(text.contains("目录不能为空"), "missing error: {text}");
     }
@@ -217,6 +257,7 @@ mod tests {
             list_state: &mut list_state,
             show_input: true,
             input: "/home/user",
+            show_delete_confirm: false,
         });
         assert!(text.contains("添加扫描目录"), "missing title: {text}");
         assert!(text.contains(">/home/user"), "missing input: {text}");
@@ -225,5 +266,27 @@ mod tests {
         assert!(text.contains("Esc取消"), "missing cancel hint: {text}");
         // The list hints are replaced while typing.
         assert!(!text.contains("a添加"), "list hints leaked: {text}");
+    }
+
+    #[test]
+    fn render_delete_confirm_shows_prompt_and_keys() {
+        let dirs = vec![PathBuf::from("/home/user/repos")];
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        let text = render_to_text(ConfigState {
+            scan_dirs: &dirs,
+            status: None,
+            list_state: &mut list_state,
+            show_input: false,
+            input: "",
+            show_delete_confirm: true,
+        });
+        assert!(text.contains("移除该目录"), "missing prompt: {text}");
+        assert!(
+            text.contains("/home/user/repos"),
+            "missing target dir: {text}"
+        );
+        assert!(text.contains("y确认"), "missing confirm key: {text}");
+        assert!(text.contains("n取消"), "missing cancel key: {text}");
     }
 }

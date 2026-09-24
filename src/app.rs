@@ -165,6 +165,8 @@ pub struct App {
     pub show_config_input: bool,
     /// Directory path being typed in the add-scan-dir input.
     pub config_input: String,
+    /// Whether the delete-scan-dir confirmation dialog is shown.
+    pub show_config_delete_confirm: bool,
 }
 
 impl App {
@@ -199,6 +201,7 @@ impl App {
             config_state: ListState::default(),
             show_config_input: false,
             config_input: String::new(),
+            show_config_delete_confirm: false,
         }
     }
 
@@ -679,6 +682,7 @@ impl App {
         self.view = View::Dashboard;
         self.show_config_input = false;
         self.config_input.clear();
+        self.show_config_delete_confirm = false;
         self.clear_error();
     }
 
@@ -691,6 +695,7 @@ impl App {
     pub fn start_config_add(&mut self) {
         self.config_input.clear();
         self.show_config_input = true;
+        self.show_config_delete_confirm = false;
         self.status = None;
     }
 
@@ -740,6 +745,60 @@ impl App {
         self.config_state
             .select(Some(self.config.scan_dirs.len() - 1));
         self.set_info_unless_error(format!("已添加扫描目录: {path}"));
+    }
+
+    /// Open the delete confirmation for the selected scan dir (config `d`).
+    ///
+    /// An empty list reports an error instead of opening a dialog that could
+    /// not name a target; a stale selection falls back to the first entry.
+    pub fn start_config_delete(&mut self) {
+        if self.config.scan_dirs.is_empty() {
+            self.set_error("没有可删除的目录");
+            return;
+        }
+        let selected = self
+            .config_state
+            .selected()
+            .filter(|i| *i < self.config.scan_dirs.len())
+            .unwrap_or(0);
+        self.config_state.select(Some(selected));
+        self.show_config_input = false;
+        self.show_config_delete_confirm = true;
+    }
+
+    /// Cancel the delete-scan-dir confirmation.
+    pub fn cancel_config_delete(&mut self) {
+        self.show_config_delete_confirm = false;
+    }
+
+    /// Remove the confirmed scan dir, persist, and rescan (convention 5).
+    ///
+    /// The selection is clamped so a shrinking list never points past the
+    /// end (and resets to none when the list empties); a failed save rolls
+    /// the removal back so memory stays consistent with disk.
+    pub fn confirm_config_delete(&mut self) {
+        self.show_config_delete_confirm = false;
+        let Some(i) = self
+            .config_state
+            .selected()
+            .filter(|i| *i < self.config.scan_dirs.len())
+        else {
+            return;
+        };
+        let removed = self.config.scan_dirs.remove(i);
+        if let Err(err) = self.config.save() {
+            self.config.scan_dirs.insert(i, removed);
+            self.set_error(format!("保存配置失败: {err:#}"));
+            return;
+        }
+        self.refresh_repos();
+        if self.config.scan_dirs.is_empty() {
+            self.config_state.select(None);
+        } else {
+            self.config_state
+                .select(Some(i.min(self.config.scan_dirs.len() - 1)));
+        }
+        self.set_info_unless_error(format!("已删除扫描目录: {}", removed.display()));
     }
 
     /// Whether a background batch operation is currently running.
@@ -1170,11 +1229,23 @@ impl App {
                     }
                 }
             }
-            // Config panel: the modal input (and later delete-confirm) takes
-            // precedence over list navigation; Esc returns to the dashboard,
-            // q exits the program.
+            // Config panel: modal input / delete-confirm take precedence over
+            // list navigation; Esc returns to the dashboard, q exits the
+            // program.
             View::Config => {
-                if self.show_config_input {
+                if self.show_config_delete_confirm {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            self.confirm_config_delete();
+                            true
+                        }
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            self.cancel_config_delete();
+                            true
+                        }
+                        _ => true,
+                    }
+                } else if self.show_config_input {
                     match key.code {
                         KeyCode::Esc => {
                             self.cancel_config_add();
@@ -1207,6 +1278,10 @@ impl App {
                         KeyCode::Char('q') => false,
                         KeyCode::Char('a') => {
                             self.start_config_add();
+                            true
+                        }
+                        KeyCode::Char('d') => {
+                            self.start_config_delete();
                             true
                         }
                         KeyCode::Char('j') | KeyCode::Down => {
@@ -2644,5 +2719,93 @@ mod tests {
         assert!(app.file_entries.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- config delete confirmation ----------
+
+    #[test]
+    fn config_delete_opens_and_esc_cancels_without_removing() {
+        let mut app = App::new(Config::default());
+        app.config.scan_dirs = vec![
+            std::path::PathBuf::from("/a"),
+            std::path::PathBuf::from("/b"),
+        ];
+        app.enter_config();
+        app.config_state.select(Some(1));
+
+        // d opens the confirmation on the selected entry.
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.show_config_delete_confirm);
+        assert!(!app.show_config_input);
+        assert_eq!(app.config_state.selected(), Some(1));
+
+        // Other keys are swallowed while the dialog is open.
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.show_config_delete_confirm);
+        assert_eq!(app.config_state.selected(), Some(1));
+
+        // Esc (before y) cancels: nothing removed, still in the panel.
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(!app.show_config_delete_confirm);
+        assert_eq!(app.config.scan_dirs.len(), 2);
+        assert_eq!(app.view, View::Config);
+
+        // n also cancels.
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.show_config_delete_confirm);
+        assert!(app.handle_key(key(KeyCode::Char('n'))));
+        assert!(!app.show_config_delete_confirm);
+        assert_eq!(app.config.scan_dirs.len(), 2);
+    }
+
+    #[test]
+    fn config_delete_on_empty_list_reports_error() {
+        let mut app = App::new(Config::default());
+        app.enter_config();
+
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(!app.show_config_delete_confirm);
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert_eq!(st.message, "没有可删除的目录");
+    }
+
+    #[test]
+    fn config_delete_confirm_removes_saves_and_refreshes() {
+        // Holds the I/O guard: the save below writes the redirected config.
+        let _io = crate::config::config_io_guard();
+
+        let keep = temp_dir("config-del-keep");
+        init_repo_with_commit(&keep);
+        let drop = temp_dir("config-del-drop");
+
+        let mut app = App::new(Config::default());
+        app.config.scan_dirs = vec![keep.clone(), drop.clone()];
+        app.enter_config();
+        app.config_state.select(Some(1));
+
+        // y removes the selected dir, persists, and rescans.
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.handle_key(key(KeyCode::Char('y'))));
+        assert!(!app.show_config_delete_confirm);
+        assert_eq!(app.config.scan_dirs, vec![keep.clone()]);
+        // Selection clamps to the surviving entry.
+        assert_eq!(app.config_state.selected(), Some(0));
+
+        // Persisted to the config file (restart would load the same dirs).
+        let loaded = Config::load().expect("load saved config");
+        assert_eq!(loaded.scan_dirs, vec![keep.clone()]);
+
+        // Auto-rescan keeps the repository under the surviving scan dir.
+        assert_eq!(app.repos.len(), 1);
+        assert_eq!(app.repos[0].path, keep);
+
+        // Success message survives the refresh (which clears the status).
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error, "{}", st.message);
+        assert_eq!(st.message, format!("已删除扫描目录: {}", drop.display()));
+
+        let _ = std::fs::remove_dir_all(&keep);
+        let _ = std::fs::remove_dir_all(&drop);
     }
 }
