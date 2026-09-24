@@ -6,10 +6,11 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
 };
 
+use super::repo::centered_rect;
 use crate::app::StatusLine;
 
 /// Borrowed render state for the config panel, referencing `App.config.scan_dirs`
@@ -21,11 +22,17 @@ pub struct ConfigState<'a> {
     pub status: Option<&'a StatusLine>,
     /// Selection cursor shared across frames.
     pub list_state: &'a mut ListState,
+    /// Whether the add-scan-dir input overlay is shown.
+    pub show_input: bool,
+    /// Directory path being typed in add mode (convention 9).
+    pub input: &'a str,
 }
 
-/// Render the scan-dir list with the bottom status line and key hints.
+/// Render the scan-dir list with the bottom status line and key hints, plus
+/// the add-scan-dir input overlay when active.
 ///
-/// Modal input / delete-confirm overlays land with later subtasks.
+/// While the input is open the bottom hints switch to `Enter 确认 / Esc 取消`;
+/// the delete-confirm overlay lands with a later subtask.
 pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
     let area = f.area();
     let chunks = Layout::default()
@@ -51,17 +58,49 @@ pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
         );
     }
 
-    let hints = Line::from(vec![
-        Span::styled("j/k", Style::default().fg(Color::Cyan)),
-        Span::raw(" 选择  "),
-        Span::styled("a", Style::default().fg(Color::Cyan)),
-        Span::raw(" 添加  "),
-        Span::styled("d", Style::default().fg(Color::Cyan)),
-        Span::raw(" 删除  "),
-        Span::styled("Esc", Style::default().fg(Color::Cyan)),
-        Span::raw(" 返回"),
+    f.render_widget(Paragraph::new(key_hints(state.show_input)), chunks[2]);
+
+    if state.show_input {
+        render_add_input(f, area, state.input);
+    }
+}
+
+/// Bottom key-hint row: list navigation normally, submit/cancel in input mode.
+fn key_hints(input_open: bool) -> Line<'static> {
+    if input_open {
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(Color::Cyan)),
+            Span::raw(" 确认  "),
+            Span::styled("Esc", Style::default().fg(Color::Cyan)),
+            Span::raw(" 取消"),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("j/k", Style::default().fg(Color::Cyan)),
+            Span::raw(" 选择  "),
+            Span::styled("a", Style::default().fg(Color::Cyan)),
+            Span::raw(" 添加  "),
+            Span::styled("d", Style::default().fg(Color::Cyan)),
+            Span::raw(" 删除  "),
+            Span::styled("Esc", Style::default().fg(Color::Cyan)),
+            Span::raw(" 返回"),
+        ])
+    }
+}
+
+/// Single-line add-scan-dir input (convention 9): typed path plus cursor,
+/// titled 添加扫描目录; Enter confirms, Esc cancels via the bottom hints.
+fn render_add_input(f: &mut Frame, area: Rect, input: &str) {
+    let popup_area = centered_rect(60, 5, area);
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default().title("添加扫描目录").borders(Borders::ALL);
+    let line = Line::from(vec![
+        Span::styled("> ", Style::default().fg(Color::Cyan)),
+        Span::raw(input.to_string()),
+        Span::styled("▌", Style::default().fg(Color::Cyan)),
     ]);
-    f.render_widget(Paragraph::new(hints), chunks[2]);
+    f.render_widget(Paragraph::new(line).block(block), popup_area);
 }
 
 /// Draw the bordered scan-dir list; the title carries the entry count.
@@ -121,6 +160,8 @@ mod tests {
             scan_dirs: &dirs,
             status: None,
             list_state: &mut list_state,
+            show_input: false,
+            input: "",
         });
         assert!(text.contains("扫描目录配置(2)"), "missing title: {text}");
         assert!(
@@ -141,6 +182,8 @@ mod tests {
             scan_dirs: &[],
             status: None,
             list_state: &mut list_state,
+            show_input: false,
+            input: "",
         });
         assert!(text.contains("扫描目录配置(0)"), "missing title: {text}");
         assert!(text.contains("Esc返回"), "missing back hint: {text}");
@@ -157,7 +200,30 @@ mod tests {
             scan_dirs: &[],
             status: Some(&status),
             list_state: &mut list_state,
+            show_input: false,
+            input: "",
         });
         assert!(text.contains("目录不能为空"), "missing error: {text}");
+    }
+
+    #[test]
+    fn render_add_input_shows_title_typed_path_and_keys() {
+        let dirs = vec![PathBuf::from("/a")];
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        let text = render_to_text(ConfigState {
+            scan_dirs: &dirs,
+            status: None,
+            list_state: &mut list_state,
+            show_input: true,
+            input: "/home/user",
+        });
+        assert!(text.contains("添加扫描目录"), "missing title: {text}");
+        assert!(text.contains(">/home/user"), "missing input: {text}");
+        assert!(text.contains("▌"), "missing cursor: {text}");
+        assert!(text.contains("Enter确认"), "missing confirm hint: {text}");
+        assert!(text.contains("Esc取消"), "missing cancel hint: {text}");
+        // The list hints are replaced while typing.
+        assert!(!text.contains("a添加"), "list hints leaked: {text}");
     }
 }

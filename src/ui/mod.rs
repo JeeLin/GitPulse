@@ -97,6 +97,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 scan_dirs: &scan_dirs,
                 status: app.status.as_ref(),
                 list_state: &mut app.config_state,
+                show_input: app.show_config_input,
+                input: &app.config_input,
             };
             config::render_config(f, state);
         }
@@ -242,5 +244,21 @@ mod tests {
         assert!(text.contains("a添加"), "missing add hint: {text}");
         assert!(text.contains("d删除"), "missing delete hint: {text}");
         assert!(text.contains("Esc返回"), "missing back hint: {text}");
+    }
+
+    #[test]
+    fn config_view_input_overlay_renders_via_dispatch() {
+        let mut app = base_app();
+        app.view = View::Config;
+        app.show_config_input = true;
+        app.config_input = "/home/user/repos".to_string();
+        let text = render_compact(&mut app);
+        assert!(text.contains("添加扫描目录"), "missing input title: {text}");
+        assert!(
+            text.contains(">/home/user/repos"),
+            "missing typed path: {text}"
+        );
+        assert!(text.contains("Enter确认"), "missing confirm hint: {text}");
+        assert!(text.contains("Esc取消"), "missing cancel hint: {text}");
     }
 }

@@ -15,8 +15,6 @@ use anyhow::Result;
 use thiserror::Error;
 
 /// Errors produced while reading or writing the configuration file.
-// Save-path variants are constructed once `Config::save` gains callers.
-#[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum ConfigError {
     /// The config file exists but could not be read.
@@ -66,8 +64,6 @@ impl Config {
     }
 
     /// Save the config to [`config_path`], creating the config dir when missing.
-    // Callers land with the config editing UI in a later subtask.
-    #[allow(dead_code)]
     pub fn save(&self) -> Result<()> {
         save_to(self, &config_path())
     }
@@ -96,7 +92,6 @@ fn load_from(path: &Path) -> Result<Config> {
 
 /// Save a config to the given file path, creating parent directories as needed.
 // Reached via `Config::save`; exercised directly by unit tests.
-#[allow(dead_code)]
 fn save_to(config: &Config, path: &Path) -> Result<()> {
     let contents =
         toml::to_string_pretty(config).map_err(|source| ConfigError::Serialize { source })?;
@@ -113,6 +108,32 @@ fn save_to(config: &Config, path: &Path) -> Result<()> {
         source,
     })?;
     Ok(())
+}
+
+/// Serialize tests that exercise the real config path, pointing `HOME` at a
+/// throwaway directory so `Config::save` never clobbers the developer's
+/// `~/.gitpulse/config.toml`.
+///
+/// Every test that calls [`Config::save`], [`Config::load`], or otherwise
+/// resolves the config path must hold this guard for its whole body: the
+/// redirected config file is shared (so concurrent save/load pairs would
+/// race), and the one-time `HOME` redirect must not interleave with other
+/// HOME readers.
+#[cfg(test)]
+pub(crate) fn config_io_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    static TEST_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let guard = LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _ = TEST_HOME.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("gitpulse-test-home-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create test home");
+        std::env::set_var("HOME", &dir);
+        dir
+    });
+    guard
 }
 
 #[cfg(test)]
@@ -171,6 +192,21 @@ mod tests {
         };
         save_to(&config, &path).expect("save");
         let loaded = load_from(&path).expect("load");
+        assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn config_save_persists_scan_dirs_via_public_api() {
+        // Holds the I/O guard: writes the redirected (temp-HOME) config file.
+        let _io = super::config_io_guard();
+        let config = Config {
+            scan_dirs: vec![
+                PathBuf::from("/home/user/repos"),
+                PathBuf::from("/opt/projects"),
+            ],
+        };
+        config.save().expect("save");
+        let loaded = Config::load().expect("load");
         assert_eq!(loaded, config);
     }
 }

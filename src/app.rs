@@ -161,6 +161,10 @@ pub struct App {
     pub show_branch_delete_confirm: bool,
     /// Selection cursor for the scan-dir list in the config panel.
     pub config_state: ListState,
+    /// Whether the add-scan-dir input overlay is shown.
+    pub show_config_input: bool,
+    /// Directory path being typed in the add-scan-dir input.
+    pub config_input: String,
 }
 
 impl App {
@@ -193,6 +197,8 @@ impl App {
             show_branch_input: false,
             show_branch_delete_confirm: false,
             config_state: ListState::default(),
+            show_config_input: false,
+            config_input: String::new(),
         }
     }
 
@@ -671,12 +677,69 @@ impl App {
     /// Leave the configuration panel back to the dashboard (`Esc`).
     pub fn leave_config(&mut self) {
         self.view = View::Dashboard;
+        self.show_config_input = false;
+        self.config_input.clear();
         self.clear_error();
     }
 
     /// Configured scan directories, read by the config panel renderer.
     pub fn scan_dirs(&self) -> &[std::path::PathBuf] {
         &self.config.scan_dirs
+    }
+
+    /// Open the add-scan-dir input overlay (config panel `a`).
+    pub fn start_config_add(&mut self) {
+        self.config_input.clear();
+        self.show_config_input = true;
+        self.status = None;
+    }
+
+    /// Cancel the add-scan-dir input, discarding the typed path (convention 9).
+    pub fn cancel_config_add(&mut self) {
+        self.show_config_input = false;
+        self.config_input.clear();
+    }
+
+    /// Validate the typed path, persist it, and rescan (convention 5).
+    ///
+    /// Each validation failure keeps the input open with the typed text so it
+    /// can be corrected: empty / missing / not a directory / duplicate.
+    /// On success the config is saved, repos refreshed, and the new entry
+    /// selected; the success message is written after the refresh, which
+    /// would otherwise clear it.
+    pub fn submit_config_add(&mut self) {
+        let path = self.config_input.trim().to_string();
+        if path.is_empty() {
+            self.set_error("目录不能为空");
+            return;
+        }
+        if !std::path::Path::new(&path).exists() {
+            self.set_error(format!("目录不存在: {path}"));
+            return;
+        }
+        if !std::path::Path::new(&path).is_dir() {
+            self.set_error(format!("不是目录: {path}"));
+            return;
+        }
+        let dir = std::path::PathBuf::from(&path);
+        if self.config.scan_dirs.contains(&dir) {
+            self.set_error("目录已在列表中");
+            return;
+        }
+
+        self.config.scan_dirs.push(dir);
+        if let Err(err) = self.config.save() {
+            // Keep memory and disk consistent, and keep the typed text so the
+            // save can be retried (convention 9).
+            self.config.scan_dirs.pop();
+            self.set_error(format!("保存配置失败: {err:#}"));
+            return;
+        }
+        self.cancel_config_add();
+        self.refresh_repos();
+        self.config_state
+            .select(Some(self.config.scan_dirs.len() - 1));
+        self.set_info_unless_error(format!("已添加扫描目录: {path}"));
     }
 
     /// Whether a background batch operation is currently running.
@@ -1107,36 +1170,68 @@ impl App {
                     }
                 }
             }
-            // Config panel: modal input / delete-confirm take precedence over
-            // list navigation (overlays land with later subtasks); Esc returns
-            // to the dashboard, q exits the program.
-            View::Config => match key.code {
-                KeyCode::Esc => {
-                    self.leave_config();
-                    true
-                }
-                KeyCode::Char('q') => false,
-                KeyCode::Char('j') | KeyCode::Down => {
-                    if !self.config.scan_dirs.is_empty() {
-                        let next = self.config_state.selected().map_or(0, |i| {
-                            i.saturating_add(1).min(self.config.scan_dirs.len() - 1)
-                        });
-                        self.config_state.select(Some(next));
+            // Config panel: the modal input (and later delete-confirm) takes
+            // precedence over list navigation; Esc returns to the dashboard,
+            // q exits the program.
+            View::Config => {
+                if self.show_config_input {
+                    match key.code {
+                        KeyCode::Esc => {
+                            self.cancel_config_add();
+                            true
+                        }
+                        KeyCode::Enter => {
+                            self.submit_config_add();
+                            true
+                        }
+                        KeyCode::Backspace => {
+                            self.config_input.pop();
+                            true
+                        }
+                        KeyCode::Char(c)
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
+                            self.config_input.push(c);
+                            true
+                        }
+                        _ => true,
                     }
-                    true
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    if !self.config.scan_dirs.is_empty() {
-                        let prev = self
-                            .config_state
-                            .selected()
-                            .map_or(0, |i| i.saturating_sub(1));
-                        self.config_state.select(Some(prev));
+                } else {
+                    match key.code {
+                        KeyCode::Esc => {
+                            self.leave_config();
+                            true
+                        }
+                        KeyCode::Char('q') => false,
+                        KeyCode::Char('a') => {
+                            self.start_config_add();
+                            true
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            if !self.config.scan_dirs.is_empty() {
+                                let next = self.config_state.selected().map_or(0, |i| {
+                                    i.saturating_add(1).min(self.config.scan_dirs.len() - 1)
+                                });
+                                self.config_state.select(Some(next));
+                            }
+                            true
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            if !self.config.scan_dirs.is_empty() {
+                                let prev = self
+                                    .config_state
+                                    .selected()
+                                    .map_or(0, |i| i.saturating_sub(1));
+                                self.config_state.select(Some(prev));
+                            }
+                            true
+                        }
+                        _ => true,
                     }
-                    true
                 }
-                _ => true,
-            },
+            }
         }
     }
 }
@@ -1864,6 +1959,115 @@ mod tests {
         app.leave_config();
         app.enter_config();
         assert_eq!(app.config_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn config_add_validation_reports_each_failure() {
+        let mut app = App::new(Config::default());
+        app.enter_config();
+
+        // a opens a clean input; keys type and edit the path.
+        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        assert!(app.show_config_input);
+        assert!(app.config_input.is_empty());
+        for c in "ab".chars() {
+            assert!(app.handle_key(key(KeyCode::Char(c))));
+        }
+        assert_eq!(app.config_input, "ab");
+        assert!(app.handle_key(key(KeyCode::Backspace)));
+        assert_eq!(app.config_input, "a");
+        // Ctrl+char does not type into the input.
+        let ctrl = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        assert!(app.handle_key(ctrl));
+        assert_eq!(app.config_input, "a");
+
+        // Empty path: error, input stays open.
+        app.cancel_config_add();
+        app.start_config_add();
+        app.submit_config_add();
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert_eq!(st.message, "目录不能为空");
+        assert!(app.show_config_input);
+
+        // Path does not exist: error, input stays open with the typed text.
+        let missing =
+            std::env::temp_dir().join(format!("gitpulse-config-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        app.config_input = missing.display().to_string();
+        app.submit_config_add();
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert_eq!(st.message, format!("目录不存在: {}", missing.display()));
+        assert!(app.show_config_input);
+        assert_eq!(app.config_input, missing.display().to_string());
+
+        // Path exists but is not a directory: distinct error.
+        let file =
+            std::env::temp_dir().join(format!("gitpulse-config-file-{}.txt", std::process::id()));
+        std::fs::write(&file, "x").unwrap();
+        app.config_input = file.display().to_string();
+        app.submit_config_add();
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert_eq!(st.message, format!("不是目录: {}", file.display()));
+
+        // Duplicate: rejected without touching the list.
+        let dup = temp_dir("config-dup");
+        app.config.scan_dirs = vec![dup.clone()];
+        app.config_input = dup.display().to_string();
+        app.submit_config_add();
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert_eq!(st.message, "目录已在列表中");
+        assert_eq!(app.config.scan_dirs, vec![dup.clone()]);
+
+        // Esc cancels the input but stays in the config panel.
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(!app.show_config_input);
+        assert!(app.config_input.is_empty());
+        assert_eq!(app.view, View::Config);
+
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir_all(&dup);
+    }
+
+    #[test]
+    fn config_add_success_saves_persists_and_refreshes() {
+        // Holds the I/O guard: the save below writes the redirected config.
+        let _io = crate::config::config_io_guard();
+
+        let dir = temp_dir("config-add");
+        init_repo_with_commit(&dir);
+
+        let mut app = App::new(Config::default());
+        app.enter_config();
+        app.handle_key(key(KeyCode::Char('a')));
+        for c in dir.display().to_string().chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        assert!(app.handle_key(key(KeyCode::Enter)));
+
+        // Input closed and cleared, list updated, new entry selected.
+        assert!(!app.show_config_input);
+        assert!(app.config_input.is_empty());
+        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
+        assert_eq!(app.config_state.selected(), Some(0));
+
+        // Persisted to the config file (restart would load the same dirs).
+        let loaded = Config::load().expect("load saved config");
+        assert_eq!(loaded.scan_dirs, vec![dir.clone()]);
+
+        // Auto-rescan discovered the repository under the new scan dir.
+        assert_eq!(app.repos.len(), 1);
+        assert_eq!(app.repos[0].path, dir);
+
+        // Success message survives the refresh (which clears the status).
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error, "{}", st.message);
+        assert_eq!(st.message, format!("已添加扫描目录: {}", dir.display()));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---------- B: branch panel ----------

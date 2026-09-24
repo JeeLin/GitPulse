@@ -19,9 +19,13 @@ pub fn config_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::config_io_guard;
 
     #[test]
     fn config_dir_ends_with_gitpulse() {
+        // Serialized with the one-time HOME redirect in `config_io_guard`:
+        // reading HOME while another test calls `set_var` would race.
+        let _io = config_io_guard();
         let dir = config_dir();
         assert_eq!(
             dir.file_name().and_then(|n| n.to_str()),
@@ -33,6 +37,7 @@ mod tests {
 
     #[test]
     fn config_path_is_config_toml_inside_config_dir() {
+        let _io = config_io_guard();
         let path = config_path();
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),
