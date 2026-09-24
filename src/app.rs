@@ -664,16 +664,7 @@ impl App {
     /// and a stale cursor from a previous visit is re-clamped.
     pub fn enter_config(&mut self) {
         self.view = View::Config;
-        if self.config.scan_dirs.is_empty() {
-            self.config_state.select(None);
-        } else {
-            let selected = self
-                .config_state
-                .selected()
-                .filter(|i| *i < self.config.scan_dirs.len())
-                .unwrap_or(0);
-            self.config_state.select(Some(selected));
-        }
+        clamp_selection(&mut self.config_state, self.config.scan_dirs.len());
         self.clear_error();
     }
 
@@ -756,12 +747,7 @@ impl App {
             self.set_error("没有可删除的目录");
             return;
         }
-        let selected = self
-            .config_state
-            .selected()
-            .filter(|i| *i < self.config.scan_dirs.len())
-            .unwrap_or(0);
-        self.config_state.select(Some(selected));
+        clamp_selection(&mut self.config_state, self.config.scan_dirs.len());
         self.show_config_input = false;
         self.show_config_delete_confirm = true;
     }
@@ -778,11 +764,7 @@ impl App {
     /// the removal back so memory stays consistent with disk.
     pub fn confirm_config_delete(&mut self) {
         self.show_config_delete_confirm = false;
-        let Some(i) = self
-            .config_state
-            .selected()
-            .filter(|i| *i < self.config.scan_dirs.len())
-        else {
+        let Some(i) = valid_selection(&self.config_state, self.config.scan_dirs.len()) else {
             return;
         };
         let removed = self.config.scan_dirs.remove(i);
@@ -1244,6 +1226,23 @@ fn move_selection(state: &mut ListState, len: usize, down: bool) {
         state.selected().map_or(0, |i| i.saturating_sub(1))
     };
     state.select(Some(next));
+}
+
+/// The selection of `state` when it still indexes a list of `len` items;
+/// stale (out-of-range) and absent selections yield `None`.
+fn valid_selection(state: &ListState, len: usize) -> Option<usize> {
+    state.selected().filter(|i| *i < len)
+}
+
+/// Re-clamp `state`'s cursor to a list of `len` items: an empty list clears
+/// it, a stale or absent selection falls back to the first entry.
+fn clamp_selection(state: &mut ListState, len: usize) {
+    if len == 0 {
+        state.select(None);
+        return;
+    }
+    let idx = valid_selection(state, len).unwrap_or(0);
+    state.select(Some(idx));
 }
 
 /// Outcome of routing one key press through [`input_modal_key`].
