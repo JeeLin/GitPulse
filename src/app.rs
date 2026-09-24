@@ -994,23 +994,11 @@ impl App {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => false,
             KeyCode::Char('j') | KeyCode::Down => {
-                if !self.repos.is_empty() {
-                    let next = self
-                        .dashboard_state
-                        .selected()
-                        .map_or(0, |i| i.saturating_add(1).min(self.repos.len() - 1));
-                    self.dashboard_state.select(Some(next));
-                }
+                move_selection(&mut self.dashboard_state, self.repos.len(), true);
                 true
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if !self.repos.is_empty() {
-                    let prev = self
-                        .dashboard_state
-                        .selected()
-                        .map_or(0, |i| i.saturating_sub(1));
-                    self.dashboard_state.select(Some(prev));
-                }
+                move_selection(&mut self.dashboard_state, self.repos.len(), false);
                 true
             }
             KeyCode::Char('r') => {
@@ -1064,23 +1052,11 @@ impl App {
                 }
                 KeyCode::Char('q') => false,
                 KeyCode::Char('j') | KeyCode::Down => {
-                    if !self.file_entries.is_empty() {
-                        let next = self
-                            .file_state
-                            .selected()
-                            .map_or(0, |i| i.saturating_add(1).min(self.file_entries.len() - 1));
-                        self.file_state.select(Some(next));
-                    }
+                    move_selection(&mut self.file_state, self.file_entries.len(), true);
                     true
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    if !self.file_entries.is_empty() {
-                        let prev = self
-                            .file_state
-                            .selected()
-                            .map_or(0, |i| i.saturating_sub(1));
-                        self.file_state.select(Some(prev));
-                    }
+                    move_selection(&mut self.file_state, self.file_entries.len(), false);
                     true
                 }
                 KeyCode::Char('d') => {
@@ -1216,23 +1192,11 @@ impl App {
                 }
                 KeyCode::Char('q') => false,
                 KeyCode::Char('j') | KeyCode::Down => {
-                    if !self.branches.is_empty() {
-                        let next = self
-                            .branch_state
-                            .selected()
-                            .map_or(0, |i| i.saturating_add(1).min(self.branches.len() - 1));
-                        self.branch_state.select(Some(next));
-                    }
+                    move_selection(&mut self.branch_state, self.branches.len(), true);
                     true
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    if !self.branches.is_empty() {
-                        let prev = self
-                            .branch_state
-                            .selected()
-                            .map_or(0, |i| i.saturating_sub(1));
-                        self.branch_state.select(Some(prev));
-                    }
+                    move_selection(&mut self.branch_state, self.branches.len(), false);
                     true
                 }
                 KeyCode::Enter => {
@@ -1312,28 +1276,34 @@ impl App {
                     true
                 }
                 KeyCode::Char('j') | KeyCode::Down => {
-                    if !self.config.scan_dirs.is_empty() {
-                        let next = self.config_state.selected().map_or(0, |i| {
-                            i.saturating_add(1).min(self.config.scan_dirs.len() - 1)
-                        });
-                        self.config_state.select(Some(next));
-                    }
+                    move_selection(&mut self.config_state, self.config.scan_dirs.len(), true);
                     true
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    if !self.config.scan_dirs.is_empty() {
-                        let prev = self
-                            .config_state
-                            .selected()
-                            .map_or(0, |i| i.saturating_sub(1));
-                        self.config_state.select(Some(prev));
-                    }
+                    move_selection(&mut self.config_state, self.config.scan_dirs.len(), false);
                     true
                 }
                 _ => true,
             }
         }
     }
+}
+
+/// Move the selection in `state` one row within a list of `len` items:
+/// `down` clamps at the last row, otherwise at the first. An empty list
+/// never selects (the cursor stays cleared).
+fn move_selection(state: &mut ListState, len: usize, down: bool) {
+    if len == 0 {
+        return;
+    }
+    let next = if down {
+        state
+            .selected()
+            .map_or(0, |i| i.saturating_add(1).min(len - 1))
+    } else {
+        state.selected().map_or(0, |i| i.saturating_sub(1))
+    };
+    state.select(Some(next));
 }
 
 /// Render the first 7 hex characters of a commit id for the status line.
