@@ -80,60 +80,7 @@ pub fn render_dashboard(f: &mut Frame, state: &mut DashboardState<'_>) {
     if state.repos.is_empty() {
         render_empty_state(f, list_area);
     } else {
-        let items: Vec<ListItem> = state
-            .repos
-            .iter()
-            .map(|repo| {
-                let dirty_count = repo.dirty.untracked
-                    + repo.dirty.modified
-                    + repo.dirty.added
-                    + repo.dirty.deleted;
-                let dirty_color = if dirty_count == 0 {
-                    Color::Green
-                } else {
-                    Color::Red
-                };
-
-                let line = Line::from(vec![
-                    Span::raw(format!("{:<20}", repo.name)),
-                    Span::styled(
-                        format!("{:<15}", repo.branch),
-                        Style::default().fg(Color::Cyan),
-                    ),
-                    Span::styled(
-                        format!("{:>4}", dirty_count),
-                        Style::default().fg(dirty_color),
-                    ),
-                    Span::raw("  "),
-                    Span::styled(
-                        format!("{}↑{}↓", repo.ahead, repo.behind),
-                        if repo.ahead > 0 {
-                            Style::default().fg(Color::Yellow)
-                        } else {
-                            Style::default()
-                        },
-                    ),
-                    Span::raw("  "),
-                    Span::raw(format_time(repo.last_commit.time)),
-                ]);
-                ListItem::new(line)
-            })
-            .collect();
-
-        let block = Block::default()
-            .title(format!("GitPulse 仓库状态 ({})", state.repos.len()))
-            .borders(Borders::ALL);
-
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("► ");
-
-        f.render_stateful_widget(list, list_area, state.list_state);
+        render_repo_list(f, list_area, state);
     }
 
     // Shared tail (empty state and list alike; the error branch above keeps
@@ -143,6 +90,63 @@ pub fn render_dashboard(f: &mut Frame, state: &mut DashboardState<'_>) {
     }
 
     render_status_line(f, status_area, state.status);
+}
+
+/// Draw the bordered repository list: name, branch, dirty count, ahead /
+/// behind markers, and last-commit time, with the shared highlight style.
+fn render_repo_list(f: &mut Frame, area: Rect, state: &mut DashboardState<'_>) {
+    let items: Vec<ListItem> = state
+        .repos
+        .iter()
+        .map(|repo| {
+            let dirty_count =
+                repo.dirty.untracked + repo.dirty.modified + repo.dirty.added + repo.dirty.deleted;
+            let dirty_color = if dirty_count == 0 {
+                Color::Green
+            } else {
+                Color::Red
+            };
+
+            let line = Line::from(vec![
+                Span::raw(format!("{:<20}", repo.name)),
+                Span::styled(
+                    format!("{:<15}", repo.branch),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("{:>4}", dirty_count),
+                    Style::default().fg(dirty_color),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!("{}↑{}↓", repo.ahead, repo.behind),
+                    if repo.ahead > 0 {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Span::raw("  "),
+                Span::raw(format_time(repo.last_commit.time)),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let block = Block::default()
+        .title(format!("GitPulse 仓库状态 ({})", state.repos.len()))
+        .borders(Borders::ALL);
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("► ");
+
+    f.render_stateful_widget(list, area, state.list_state);
 }
 
 /// Draw the scrolling per-repository batch progress log (convention 6):
