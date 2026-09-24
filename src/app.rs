@@ -94,8 +94,13 @@ impl BatchLogLine {
 
 /// Message sent from a background batch pull/fetch task over its channel.
 enum BatchEvent {
-    /// Status update for the named repository.
-    Line { name: String, message: String },
+    /// Status update for the repository at `index` (positional key: distinct
+    /// repositories may share the same display name).
+    Line {
+        index: usize,
+        name: String,
+        message: String,
+    },
     /// Terminal per-repository results of the batch run.
     Done(Vec<(String, Result<()>)>),
 }
@@ -411,10 +416,11 @@ impl App {
     ///
     /// The task runs off the UI thread; progress arrives on an mpsc channel
     /// consumed each frame (convention 1), so the UI stays interactive while
-    /// the operation runs. No-op while another remote op is in flight or
-    /// outside the repo view.
+    /// the operation runs. No-op while another remote or batch op is in
+    /// flight (they would contend on the same repository locks), or outside
+    /// the repo view.
     pub fn start_remote(&mut self, op: &'static str) {
-        if self.view != View::Repo || self.remote_rx.is_some() {
+        if self.view != View::Repo || self.remote_rx.is_some() || self.batch_rx.is_some() {
             return;
         }
         let Some(repo_idx) = self.current_repo else {
@@ -534,6 +540,7 @@ impl App {
                 move |index: usize, message: &str| {
                     let name = names.get(index).cloned().unwrap_or_default();
                     let _ = sink.send(BatchEvent::Line {
+                        index,
                         name,
                         message: message.to_string(),
                     });
@@ -558,11 +565,16 @@ impl App {
         };
         loop {
             match rx.try_recv() {
-                Ok(BatchEvent::Line { name, message }) => {
+                Ok(BatchEvent::Line {
+                    index,
+                    name,
+                    message,
+                }) => {
+                    // Positional key: each repository keeps one advancing line
+                    // even when two repositories share the same display name.
                     let line = BatchLogLine::new(name, message);
-                    if let Some(existing) = self.batch_log.iter_mut().find(|l| l.name == line.name)
-                    {
-                        *existing = line;
+                    if index < self.batch_log.len() {
+                        self.batch_log[index] = line;
                     } else {
                         self.batch_log.push(line);
                     }
@@ -1070,7 +1082,7 @@ pub async fn run() -> Result<()> {
         Ok(config) => App::new(config),
         Err(err) => {
             let mut app = App::new(Config::default());
-            app.set_error(format!("failed to load config: {err:#}"));
+            app.set_error(format!("加载配置失败: {err:#}"));
             app
         }
     };

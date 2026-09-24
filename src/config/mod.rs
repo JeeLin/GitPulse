@@ -20,7 +20,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum ConfigError {
     /// The config file exists but could not be read.
-    #[error("failed to read config at {path}: {source}")]
+    #[error("读取配置失败 {path}: {source}")]
     Read {
         /// Path that could not be read.
         path: PathBuf,
@@ -28,7 +28,7 @@ pub enum ConfigError {
         source: std::io::Error,
     },
     /// The config file is not valid TOML.
-    #[error("failed to parse config at {path}: {source}")]
+    #[error("解析配置失败 {path}: {source}")]
     Parse {
         /// Path that could not be parsed.
         path: PathBuf,
@@ -36,13 +36,13 @@ pub enum ConfigError {
         source: toml::de::Error,
     },
     /// The config could not be serialized to TOML.
-    #[error("failed to serialize config: {source}")]
+    #[error("序列化配置失败: {source}")]
     Serialize {
         /// Underlying serialization error.
         source: toml::ser::Error,
     },
     /// The config directory could not be created.
-    #[error("failed to create config dir at {path}: {source}")]
+    #[error("创建配置目录失败 {path}: {source}")]
     CreateDir {
         /// Parent directory that could not be created.
         path: PathBuf,
@@ -50,7 +50,7 @@ pub enum ConfigError {
         source: std::io::Error,
     },
     /// The config file could not be written.
-    #[error("failed to write config at {path}: {source}")]
+    #[error("写入配置失败 {path}: {source}")]
     Write {
         /// Path that could not be written.
         path: PathBuf,

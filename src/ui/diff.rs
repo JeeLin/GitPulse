@@ -41,7 +41,10 @@ fn render_diff_content(f: &mut Frame, area: Rect, content: &str, scroll: u16) {
     // Parse diff lines and style them
     let mut lines = Vec::new();
     for line in content.lines() {
-        let styled_line = if line.starts_with('+') {
+        // `+++`/`---` are file headers in the patch, not +/- change lines.
+        let styled_line = if line.starts_with("+++") || line.starts_with("---") {
+            Line::from(Span::raw(line.to_string()))
+        } else if line.starts_with('+') {
             Line::from(vec![Span::styled(
                 line.to_string(),
                 Style::default().fg(Color::Green),

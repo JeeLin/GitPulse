@@ -83,7 +83,7 @@ pub fn diff_file(repo_path: &Path, rel_path: &Path) -> Result<String> {
 
     let diff = repo
         .diff_tree_to_workdir_with_index(tree_opt, Some(&mut diff_opts))
-        .with_context(|| format!("failed to diff file: {}", rel_path.display()))?;
+        .with_context(|| format!("生成 diff 失败: {}", rel_path.display()))?;
 
     let mut diff_str = String::new();
 
@@ -93,7 +93,7 @@ pub fn diff_file(repo_path: &Path, rel_path: &Path) -> Result<String> {
     })?;
 
     if diff_str.is_empty() {
-        anyhow::bail!("File not found in diff or no changes");
+        anyhow::bail!("文件无更改或不在 diff 中");
     }
     Ok(diff_str)
 }
@@ -119,6 +119,10 @@ pub fn stage(repo_path: &Path, rel_path: &Path) -> Result<()> {
 }
 
 /// Unstage a file: reset the index entry back to HEAD (or remove it from index if not in HEAD).
+///
+/// A path absent from both HEAD and the index has nothing to unstage and
+/// returns `Ok` (not an error); real reset failures propagate so the UI
+/// never reports success for a failed operation.
 pub fn unstage(repo_path: &Path, rel_path: &Path) -> Result<()> {
     let repo = Repository::open(repo_path)?;
 
@@ -128,16 +132,28 @@ pub fn unstage(repo_path: &Path, rel_path: &Path) -> Result<()> {
         .ok()
         .and_then(|h| h.peel(ObjectType::Commit).ok());
 
-    if let Some(obj) = head_obj {
-        // HEAD exists: try to reset the path back to HEAD version
-        let _ = repo.reset_default(Some(&obj), [rel_path]);
-        Ok(())
-    } else {
-        // No HEAD (unborn): just remove the path from the index entirely
-        let mut index = repo.index()?;
-        index.remove_path(rel_path)?;
-        index.write()?;
-        Ok(())
+    match head_obj {
+        Some(obj) => {
+            let in_head = obj
+                .as_tree()
+                .and_then(|t| t.get_path(rel_path).ok())
+                .is_some();
+            let in_index = repo.index()?.get_path(rel_path, 0).is_some();
+            if !in_head && !in_index {
+                return Ok(());
+            }
+            repo.reset_default(Some(&obj), [rel_path])?;
+            Ok(())
+        }
+        None => {
+            // No HEAD (unborn): just remove the path from the index entirely
+            let mut index = repo.index()?;
+            if index.get_path(rel_path, 0).is_some() {
+                index.remove_path(rel_path)?;
+                index.write()?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -146,7 +162,7 @@ pub fn discard(repo_path: &Path, rel_path: &Path) -> Result<()> {
     let repo = Repository::open(repo_path)?;
 
     // 1. Unstage if staged
-    let _ = unstage(repo_path, rel_path);
+    unstage(repo_path, rel_path)?;
 
     // 2. If file exists in HEAD, checkout the HEAD version to working tree (force).
     //    If not in HEAD (was untracked or newly added), remove it from working tree.

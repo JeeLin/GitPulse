@@ -167,7 +167,7 @@ fn resolve_last_commit(repo: &Repository) -> Result<CommitInfo> {
     };
     let commit = head.peel_to_commit()?;
     let summary = commit.summary().unwrap_or("").to_string();
-    let author = commit.author().name().unwrap_or("").to_string().to_string();
+    let author = commit.author().name().unwrap_or("").to_string();
     let time = commit.time().seconds();
     Ok(CommitInfo {
         summary,
