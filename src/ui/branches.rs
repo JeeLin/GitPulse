@@ -143,28 +143,12 @@ fn render_create_input(f: &mut Frame, area: Rect, input: &str) {
 
 /// Delete confirmation dialog (discard-style, convention 8): y confirms.
 fn render_delete_dialog(f: &mut Frame, area: Rect, branch: &BranchInfo) {
-    let popup_area = centered_rect(50, 8, area);
-    let block = Block::default()
-        .title("确认删除分支")
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Red));
-
-    let text = vec![
-        Line::from(vec![
-            Span::raw("确定删除分支 "),
-            Span::styled(branch.name.clone(), Style::default().fg(Color::Yellow)),
-            Span::raw("?"),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("y", Style::default().fg(Color::Cyan)),
-            Span::raw(" 确认  "),
-            Span::styled("n", Style::default().fg(Color::Cyan)),
-            Span::raw(" 取消"),
-        ]),
-    ];
-    f.render_widget(Clear, popup_area);
-    f.render_widget(Paragraph::new(text).block(block), popup_area);
+    let body = vec![Line::from(vec![
+        Span::raw("确定删除分支 "),
+        Span::styled(branch.name.clone(), Style::default().fg(Color::Yellow)),
+        Span::raw("?"),
+    ])];
+    super::render_confirm_overlay(f, area, "确认删除分支", 50, 8, body, false);
 }
 
 #[cfg(test)]

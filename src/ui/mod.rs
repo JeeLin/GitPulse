@@ -11,7 +11,8 @@ pub mod repo;
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
-    widgets::Paragraph,
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -30,6 +31,44 @@ pub fn render_status_line(f: &mut Frame, area: Rect, status: Option<&StatusLine>
         };
         f.render_widget(Paragraph::new(status.message.clone()).style(style), area);
     }
+}
+
+/// Shared y/n confirmation overlay (convention 8): a centered red-bordered
+/// popup titled `title`, showing the caller's `body` lines above the standard
+/// `y/n` hint row. `percent_x`/`height` size the popup; `wrap` soft-wraps
+/// long target names (discard dialog) instead of clipping them.
+pub fn render_confirm_overlay(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    percent_x: u16,
+    height: u16,
+    body: Vec<Line<'static>>,
+    wrap: bool,
+) {
+    let popup = repo::centered_rect(percent_x, height, area);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Red));
+
+    let mut lines = body;
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("y", Style::default().fg(Color::Cyan)),
+        Span::raw(" 确认  "),
+        Span::styled("n", Style::default().fg(Color::Cyan)),
+        Span::raw(" 取消"),
+    ]));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    let paragraph = if wrap {
+        paragraph.wrap(Wrap { trim: false })
+    } else {
+        paragraph
+    };
+    f.render_widget(Clear, popup);
+    f.render_widget(paragraph, popup);
 }
 
 /// Dispatch rendering to the active view.

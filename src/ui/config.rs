@@ -224,29 +224,14 @@ fn ellipsize(text: &str, max: usize) -> String {
 /// Delete confirmation overlay (discard-style, convention 8): y confirms,
 /// n cancels; names the selected directory when one is selected.
 fn render_delete_confirm(f: &mut Frame, area: Rect, dir: Option<&PathBuf>) {
-    let popup_area = centered_rect(60, 5, area);
-    f.render_widget(Clear, popup_area);
-
-    let block = Block::default()
-        .title("移除该目录？")
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Red));
-
-    let mut lines = vec![];
+    let mut body = vec![];
     if let Some(dir) = dir {
-        lines.push(Line::from(Span::styled(
+        body.push(Line::from(Span::styled(
             dir.display().to_string(),
             Style::default().fg(Color::Yellow),
         )));
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("y", Style::default().fg(Color::Cyan)),
-        Span::raw(" 确认  "),
-        Span::styled("n", Style::default().fg(Color::Cyan)),
-        Span::raw(" 取消"),
-    ]));
-    f.render_widget(Paragraph::new(lines).block(block), popup_area);
+    super::render_confirm_overlay(f, area, "移除该目录？", 60, 5, body, false);
 }
 
 /// Draw the bordered scan-dir list; the title carries the entry count.

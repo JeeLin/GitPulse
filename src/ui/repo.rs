@@ -2,11 +2,11 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame,
 };
 
-use super::{remote, render_status_line};
+use super::{remote, render_confirm_overlay, render_status_line};
 use crate::app::{RemoteStatus, StatusLine};
 use crate::git::{FileEntry, FileState};
 
@@ -117,35 +117,15 @@ fn render_file_list(f: &mut Frame, area: Rect, state: &mut RepoState<'_>) {
 }
 
 fn render_discard_dialog(f: &mut Frame, area: Rect, file: &FileEntry) {
-    let popup_area = centered_rect(50, 10, area);
-
-    let block = Block::default()
-        .title("确认丢弃更改")
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Red));
-
-    let text = vec![
-        Line::from(vec![
-            Span::raw("确定丢弃 "),
-            Span::styled(
-                file.path.display().to_string(),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::raw(" 的更改?"),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("y", Style::default().fg(Color::Cyan)),
-            Span::raw(" 确认  "),
-            Span::styled("n", Style::default().fg(Color::Cyan)),
-            Span::raw(" 取消"),
-        ]),
-    ];
-
-    let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
-
-    f.render_widget(Clear, popup_area);
-    f.render_widget(paragraph, popup_area);
+    let body = vec![Line::from(vec![
+        Span::raw("确定丢弃 "),
+        Span::styled(
+            file.path.display().to_string(),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw(" 的更改?"),
+    ])];
+    render_confirm_overlay(f, area, "确认丢弃更改", 50, 10, body, true);
 }
 
 /// Create a centered rectangle within the given area.
