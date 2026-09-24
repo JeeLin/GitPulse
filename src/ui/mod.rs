@@ -90,3 +90,129 @@ pub fn render(f: &mut Frame, app: &mut App) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::git::{BranchInfo, FileEntry, FileState};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn base_app() -> App {
+        App::new(Config::default())
+    }
+
+    /// Render one frame through the view dispatcher and return the
+    /// whitespace-stripped buffer text (wide CJK glyphs leave padding cells).
+    fn render_compact(app: &mut App) -> String {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, app)).unwrap();
+        let raw: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        raw.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn dashboard_view_renders_title_for_empty_repo_list() {
+        let mut app = base_app();
+        let text = render_compact(&mut app);
+        assert!(
+            text.contains("GitPulse仓库状态(0)"),
+            "missing dashboard title: {text}"
+        );
+    }
+
+    #[test]
+    fn repo_view_renders_file_list_and_hints() {
+        let mut app = base_app();
+        app.view = View::Repo;
+        app.file_entries = vec![FileEntry {
+            path: std::path::PathBuf::from("src/main.rs"),
+            state: FileState::Modified,
+        }];
+        app.file_state.select(Some(0));
+        let text = render_compact(&mut app);
+        assert!(text.contains("文件状态(1文件)"), "missing title: {text}");
+        assert!(text.contains("Msrc/main.rs"), "missing entry: {text}");
+        assert!(text.contains("Esc返回"), "missing hints: {text}");
+    }
+
+    #[test]
+    fn repo_view_shows_discard_confirm_overlay() {
+        let mut app = base_app();
+        app.view = View::Repo;
+        app.file_entries = vec![FileEntry {
+            path: std::path::PathBuf::from("src/main.rs"),
+            state: FileState::Modified,
+        }];
+        app.file_state.select(Some(0));
+        app.show_discard_confirm = true;
+        let text = render_compact(&mut app);
+        assert!(
+            text.contains("确认丢弃更改"),
+            "missing dialog title: {text}"
+        );
+        assert!(text.contains("y确认"), "missing confirm key: {text}");
+    }
+
+    #[test]
+    fn diff_view_renders_content_and_title() {
+        let mut app = base_app();
+        app.view = View::Diff;
+        app.diff_content = "+added_line\n-removed_line\n".to_string();
+        let text = render_compact(&mut app);
+        assert!(text.contains("文件差异"), "missing title: {text}");
+        assert!(text.contains("+added_line"), "missing added line: {text}");
+        assert!(
+            text.contains("-removed_line"),
+            "missing removed line: {text}"
+        );
+    }
+
+    #[test]
+    fn commit_view_renders_popup_over_repo_background() {
+        let mut app = base_app();
+        app.view = View::Commit;
+        app.commit_message = "feat: hello".to_string();
+        let text = render_compact(&mut app);
+        assert!(text.contains("提交信息"), "missing popup title: {text}");
+        assert!(text.contains("feat:hello"), "missing message: {text}");
+    }
+
+    #[test]
+    fn branches_view_renders_empty_list_with_title_and_hints() {
+        let mut app = base_app();
+        app.view = View::Branches;
+        let text = render_compact(&mut app);
+        // No dedicated empty-state copy: the title carries the zero count.
+        assert!(text.contains("分支[](0)"), "missing empty title: {text}");
+        assert!(text.contains("n新建"), "missing create hint: {text}");
+        assert!(text.contains("Esc返回"), "missing back hint: {text}");
+    }
+
+    #[test]
+    fn branches_view_shows_delete_confirm_overlay() {
+        let mut app = base_app();
+        app.view = View::Branches;
+        app.branches = vec![BranchInfo {
+            name: "feature".to_string(),
+            is_head: false,
+            upstream: None,
+        }];
+        app.branch_state.select(Some(0));
+        app.show_branch_delete_confirm = true;
+        let text = render_compact(&mut app);
+        assert!(
+            text.contains("确认删除分支"),
+            "missing dialog title: {text}"
+        );
+        assert!(text.contains("feature"), "missing branch name: {text}");
+    }
+}

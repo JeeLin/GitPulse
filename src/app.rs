@@ -403,8 +403,10 @@ impl App {
         match git::commit(&repo_path, &message) {
             Ok(oid) => {
                 self.commit_message.clear();
-                self.set_info(format!("commit 成功 {}", short_oid(&oid)));
+                // Refresh first: it clears the status line, so the success
+                // message must be written after, otherwise it never shows.
                 self.refresh_repo_status(repo_idx);
+                self.set_info_unless_error(format!("commit 成功 {}", short_oid(&oid)));
             }
             Err(e) => {
                 self.set_error(format!("commit 失败: {e}"));
@@ -1230,5 +1232,1079 @@ mod tests {
         app.refresh_repos();
         // scan_dirs empty: repos cleared and selection dropped.
         assert_eq!(app.dashboard_state.selected(), None);
+    }
+
+    // ---------- helpers for temp-repository tests ----------
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("gitpulse-app-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn init_repo_with_commit(dir: &std::path::Path) {
+        let repo = git2::Repository::init(dir).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "GitPulse Test").unwrap();
+        config.set_str("user.email", "test@gitpulse.local").unwrap();
+        drop(config);
+        std::fs::write(dir.join("a.txt"), "v1\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("a.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("GitPulse Test", "test@gitpulse.local").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "v1", &tree, &[])
+            .unwrap();
+    }
+
+    fn app_with_repo_at(dir: &std::path::Path) -> App {
+        let mut app = App::new(Config::default());
+        app.repos.push(git::query_status(dir).unwrap());
+        app
+    }
+
+    fn index_has_staged(dir: &std::path::Path, rel: &str) -> bool {
+        let repo = git2::Repository::open(dir).unwrap();
+        let mut opts = git2::StatusOptions::new();
+        let statuses = repo.statuses(Some(&mut opts)).unwrap();
+        statuses.iter().any(|e| {
+            e.path() == Some(rel)
+                && (e.status().contains(git2::Status::INDEX_MODIFIED)
+                    || e.status().contains(git2::Status::INDEX_NEW))
+        })
+    }
+
+    // ---------- A: pure state machine ----------
+
+    #[test]
+    fn status_line_error_info_lifecycle() {
+        let mut app = App::new(Config::default());
+        assert!(app.status.is_none());
+
+        app.set_error("bad");
+        assert_eq!(
+            app.status,
+            Some(StatusLine {
+                message: "bad".to_string(),
+                is_error: true
+            })
+        );
+
+        app.clear_error();
+        assert!(app.status.is_none());
+
+        app.set_info("good");
+        assert!(!app.status.as_ref().unwrap().is_error);
+
+        // set_info overwrites an error; the guard lives in set_info_unless_error.
+        app.set_error("bad again");
+        app.set_info("good again");
+        assert!(!app.status.as_ref().unwrap().is_error);
+
+        app.set_error("kept");
+        app.set_info_unless_error("ignored");
+        assert!(app.status.as_ref().unwrap().is_error);
+        assert_eq!(app.status.as_ref().unwrap().message, "kept");
+
+        app.clear_error();
+        app.set_info_unless_error("applied");
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error);
+        assert_eq!(st.message, "applied");
+    }
+
+    #[test]
+    fn load_repos_discovers_temp_git_repo() {
+        let dir = temp_dir("load-scan");
+        init_repo_with_commit(&dir);
+
+        let mut app = App::new(Config::default());
+        app.config.scan_dirs = vec![dir.clone()];
+        app.set_error("stale".to_string());
+        app.load_repos();
+
+        assert_eq!(app.repos.len(), 1);
+        assert_eq!(app.repos[0].path, dir);
+        assert!(app.status.is_none()); // success clears the prior error
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_repos_missing_scan_dir_yields_empty_without_error() {
+        // discover_repos swallows per-directory I/O errors, so a missing scan
+        // dir yields Ok([]) and load_repos clears the status instead of erroring.
+        let missing =
+            std::env::temp_dir().join(format!("gitpulse-app-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+
+        let mut app = App::new(Config::default());
+        app.config.scan_dirs = vec![missing];
+        app.load_repos();
+
+        assert!(app.repos.is_empty());
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn refresh_repos_on_empty_list_clears_selection_without_panic() {
+        let mut app = App::new(Config::default());
+        app.dashboard_state.select(Some(4));
+        app.refresh_repos();
+        assert_eq!(app.dashboard_state.selected(), None);
+        app.refresh_repos();
+        assert_eq!(app.dashboard_state.selected(), None);
+    }
+
+    #[test]
+    fn enter_repo_requires_valid_selection_and_loads_entries() {
+        let dir = temp_dir("enter-repo");
+        init_repo_with_commit(&dir);
+        std::fs::write(dir.join("a.txt"), "dirty\n").unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+
+        // No selection: no-op.
+        app.enter_repo();
+        assert_eq!(app.view, View::Dashboard);
+        assert_eq!(app.current_repo, None);
+
+        // Out-of-range selection: no-op.
+        app.dashboard_state.select(Some(9));
+        app.enter_repo();
+        assert_eq!(app.view, View::Dashboard);
+
+        // Valid selection: enters the repo view with entries loaded.
+        app.dashboard_state.select(Some(0));
+        app.set_error("stale".to_string());
+        app.enter_repo();
+        assert_eq!(app.view, View::Repo);
+        assert_eq!(app.current_repo, Some(0));
+        assert_eq!(app.file_entries.len(), 1);
+        assert_eq!(app.file_state.selected(), Some(0));
+        assert!(app.status.is_none());
+
+        // load_file_entries: no-op without a current repo or with a stale index.
+        let snapshot = app.file_entries.len();
+        app.current_repo = None;
+        app.load_file_entries();
+        assert_eq!(app.file_entries.len(), snapshot);
+        app.current_repo = Some(7);
+        app.load_file_entries();
+        assert_eq!(app.file_entries.len(), snapshot);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_flow_open_submit_and_error_paths() {
+        let mut app = App::new(Config::default());
+
+        // open_commit switches to the commit input...
+        app.view = View::Repo;
+        app.open_commit();
+        assert_eq!(app.view, View::Commit);
+        assert!(app.commit_message.is_empty());
+
+        // ...but is blocked while a remote operation is in flight.
+        let (_tx, rx) = mpsc::unbounded_channel();
+        app.remote_rx = Some(rx);
+        app.view = View::Repo;
+        app.open_commit();
+        assert_eq!(app.view, View::Repo);
+        app.remote_rx = None;
+
+        // Submit without an open repo: error, returns to the repo view,
+        // typed message kept.
+        app.view = View::Commit;
+        app.commit_message = "msg".to_string();
+        app.submit_commit();
+        assert_eq!(app.view, View::Repo);
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(
+            st.message.contains("commit 失败: 未打开仓库"),
+            "{}",
+            st.message
+        );
+        assert_eq!(app.commit_message, "msg");
+
+        // Stale repo index: distinct error.
+        let mut app = App::new(Config::default());
+        app.view = View::Commit;
+        app.current_repo = Some(3);
+        app.submit_commit();
+        assert_eq!(app.view, View::Repo);
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("仓库索引失效"), "{}", st.message);
+
+        // Empty message with an open repo: git rejects it before opening.
+        let dir = temp_dir("commit-empty");
+        init_repo_with_commit(&dir);
+        let mut app = app_with_repo_at(&dir);
+        app.current_repo = Some(0);
+        app.view = View::Commit;
+        app.submit_commit();
+        assert_eq!(app.view, View::Repo);
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(
+            st.message.contains("commit message 不能为空"),
+            "{}",
+            st.message
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discard_dialog_flag_lifecycle_without_selection() {
+        let mut app = App::new(Config::default());
+        app.start_discard();
+        assert!(app.show_discard_confirm);
+        app.cancel_discard();
+        assert!(!app.show_discard_confirm);
+
+        app.start_discard();
+        app.confirm_discard(); // no repo/selection: only closes the dialog
+        assert!(!app.show_discard_confirm);
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn dashboard_keys_with_empty_repo_list_do_not_panic() {
+        let mut app = App::new(Config::default());
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.dashboard_state.selected(), None);
+        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(app.dashboard_state.selected(), None);
+        assert!(app.handle_key(key(KeyCode::Down)));
+        assert!(app.handle_key(key(KeyCode::Up)));
+        assert_eq!(app.dashboard_state.selected(), None);
+
+        // Enter and b are no-ops without a selection.
+        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.view, View::Dashboard);
+        assert!(app.handle_key(key(KeyCode::Char('b'))));
+        assert_eq!(app.view, View::Dashboard);
+
+        // l with no repos reports info and never starts a batch.
+        assert!(app.handle_key(key(KeyCode::Char('l'))));
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error);
+        assert!(st.message.contains("没有仓库"), "{}", st.message);
+        assert!(!app.batch_running());
+
+        assert!(!app.handle_key(key(KeyCode::Esc)));
+    }
+
+    #[test]
+    fn repo_view_keys_route_to_commit_branches_and_dashboard() {
+        let dir = temp_dir("repo-keys");
+        init_repo_with_commit(&dir);
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert_eq!(app.view, View::Repo);
+
+        // c opens the commit input; Esc cancels back to the repo view.
+        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        assert_eq!(app.view, View::Commit);
+        app.commit_message = "draft".to_string();
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Repo);
+        assert!(app.commit_message.is_empty());
+
+        // x opens the discard dialog, n cancels it.
+        assert!(app.handle_key(key(KeyCode::Char('x'))));
+        assert!(app.show_discard_confirm);
+        assert!(app.handle_key(key(KeyCode::Char('n'))));
+        assert!(!app.show_discard_confirm);
+
+        // File-list keys on an empty list are safe no-ops.
+        assert!(app.file_entries.is_empty());
+        let sel = app.file_state.selected();
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.file_state.selected(), sel);
+        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(app.file_state.selected(), sel);
+
+        // b opens the branch panel with the repo view as origin; Esc returns.
+        assert!(app.handle_key(key(KeyCode::Char('b'))));
+        assert_eq!(app.view, View::Branches);
+        assert!(!app.branches.is_empty());
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Repo);
+
+        // p / l are no-ops without a current repo (nothing is spawned).
+        app.current_repo = None;
+        assert!(app.handle_key(key(KeyCode::Char('p'))));
+        assert!(app.remote_rx.is_none());
+        assert!(app.handle_key(key(KeyCode::Char('l'))));
+        assert!(app.remote_rx.is_none());
+        app.current_repo = Some(0);
+
+        // Esc steps back to the dashboard; q exits from the repo view.
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Dashboard);
+        app.view = View::Repo;
+        assert!(!app.handle_key(key(KeyCode::Char('q'))));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diff_view_keys_scroll_and_exit() {
+        let dir = temp_dir("diff-keys");
+        init_repo_with_commit(&dir);
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+
+        // d opens the diff of the modified tracked file.
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert_eq!(app.view, View::Diff);
+        assert!(!app.diff_content.is_empty());
+        assert_eq!(app.diff_scroll, 0);
+
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.diff_scroll, 1);
+        assert!(app.handle_key(key(KeyCode::Down)));
+        assert_eq!(app.diff_scroll, 2);
+        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(app.diff_scroll, 1);
+        assert!(app.handle_key(key(KeyCode::Up)));
+        assert_eq!(app.diff_scroll, 0);
+        assert!(app.handle_key(key(KeyCode::Char('k')))); // saturates at 0
+        assert_eq!(app.diff_scroll, 0);
+
+        assert!(!app.handle_key(key(KeyCode::Char('q'))));
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Repo);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn view_file_diff_reports_error_for_untracked_file() {
+        let dir = temp_dir("diff-untracked");
+        init_repo_with_commit(&dir);
+        std::fs::write(dir.join("new.txt"), "x\n").unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert_eq!(app.file_entries.len(), 1);
+
+        // Untracked files produce no HEAD→workdir diff: error, stay in Repo.
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert_eq!(app.view, View::Repo);
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("加载 diff 失败"), "{}", st.message);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_view_keys_edit_submit_and_cancel() {
+        let mut app = App::new(Config::default());
+        app.view = View::Commit;
+
+        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        assert!(app.handle_key(key(KeyCode::Char('i'))));
+        assert_eq!(app.commit_message, "hi");
+
+        // Ctrl+char does not type into the input.
+        let ctrl = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        assert!(app.handle_key(ctrl));
+        assert_eq!(app.commit_message, "hi");
+
+        assert!(app.handle_key(key(KeyCode::Backspace)));
+        assert_eq!(app.commit_message, "h");
+
+        // Esc cancels: back to the repo view with a cleared input.
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Repo);
+        assert!(app.commit_message.is_empty());
+
+        // Enter submits (no repo here → error, returns to the repo view).
+        app.view = View::Commit;
+        app.commit_message = "msg".to_string();
+        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.view, View::Repo);
+        assert!(app.status.as_ref().unwrap().is_error);
+    }
+
+    #[test]
+    fn stage_and_unstage_keys_update_the_index() {
+        let dir = temp_dir("stage");
+        init_repo_with_commit(&dir);
+        std::fs::write(dir.join("a.txt"), "v2\n").unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert_eq!(app.file_entries.len(), 1);
+        assert!(!index_has_staged(&dir, "a.txt"));
+
+        assert!(app.handle_key(key(KeyCode::Char('s'))));
+        assert!(index_has_staged(&dir, "a.txt"));
+        assert!(app.status.is_none());
+
+        assert!(app.handle_key(key(KeyCode::Char('u'))));
+        assert!(!index_has_staged(&dir, "a.txt"));
+        assert!(app.status.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stage_unstage_discard_on_broken_repo_report_errors() {
+        let mut app = app_with_repos(1); // fake path: every git call fails
+        app.current_repo = Some(0);
+        app.file_state.select(Some(0));
+        app.file_entries.push(FileEntry {
+            path: std::path::PathBuf::from("a.txt"),
+            state: crate::git::FileState::Modified,
+        });
+
+        app.stage_current();
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("stage 失败"), "{}", st.message);
+
+        app.unstage_current();
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("unstage 失败"), "{}", st.message);
+
+        app.start_discard();
+        app.confirm_discard();
+        assert!(!app.show_discard_confirm);
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("discard 失败"), "{}", st.message);
+    }
+
+    #[test]
+    fn batch_running_tracks_receiver_presence() {
+        let mut app = App::new(Config::default());
+        assert!(!app.batch_running());
+        let (_tx, rx) = mpsc::unbounded_channel();
+        app.batch_rx = Some(rx);
+        assert!(app.batch_running());
+    }
+
+    #[test]
+    fn branch_repo_name_reports_empty_for_invalid_index() {
+        let mut app = App::new(Config::default());
+        assert_eq!(app.branch_repo_name(), "");
+        app.branch_repo = Some(0);
+        assert_eq!(app.branch_repo_name(), "");
+
+        let dir = temp_dir("branch-name");
+        init_repo_with_commit(&dir);
+        let mut app = app_with_repo_at(&dir);
+        app.branch_repo = Some(0);
+        assert_eq!(
+            app.branch_repo_name(),
+            dir.file_name().unwrap().to_str().unwrap()
+        );
+        app.branch_repo = Some(5);
+        assert_eq!(app.branch_repo_name(), "");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn handle_key_ignores_release_events() {
+        let mut app = app_with_repos(2);
+        let mut k = key(KeyCode::Char('j'));
+        k.kind = KeyEventKind::Release;
+        assert!(app.handle_key(k));
+        assert_eq!(app.dashboard_state.selected(), None);
+    }
+
+    // ---------- B: branch panel ----------
+
+    #[test]
+    fn enter_branches_loads_list_and_head_selection() {
+        let dir = temp_dir("enter-branches");
+        init_repo_with_commit(&dir);
+        git::create_branch(&dir, "feature").unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        assert!(app.handle_key(key(KeyCode::Char('b'))));
+        assert_eq!(app.view, View::Branches);
+        assert_eq!(app.branches.len(), 2);
+        let sel = app.branch_state.selected().unwrap();
+        assert!(app.branches[sel].is_head);
+        assert_eq!(app.branch_repo, Some(0));
+        assert_eq!(app.branches_from, View::Dashboard);
+
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Dashboard);
+        assert!(app.status.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn enter_branches_is_noop_without_valid_selection() {
+        // Nothing selected at all.
+        let mut app = App::new(Config::default());
+        app.enter_branches();
+        assert_eq!(app.view, View::Dashboard);
+
+        // Selection past the end of the repo list.
+        let mut app = app_with_repos(1);
+        app.dashboard_state.select(Some(5));
+        app.enter_branches();
+        assert_eq!(app.view, View::Dashboard);
+
+        // Unsupported origin view.
+        app.view = View::Diff;
+        app.enter_branches();
+        assert_eq!(app.view, View::Diff);
+
+        // Repo view without a current repo.
+        let mut app = app_with_repos(1);
+        app.view = View::Repo;
+        app.enter_branches();
+        assert_eq!(app.view, View::Repo);
+    }
+
+    #[test]
+    fn branches_view_keys_navigate_and_open_create_input() {
+        let dir = temp_dir("branch-keys");
+        init_repo_with_commit(&dir);
+        git::create_branch(&dir, "feature").unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_branches();
+        assert_eq!(app.branches.len(), 2);
+
+        let head_idx = app.branch_state.selected().unwrap();
+        assert!(app.branches[head_idx].is_head);
+
+        // j / k move within the list.
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.branch_state.selected(), Some(head_idx + 1));
+        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(app.branch_state.selected(), Some(head_idx));
+
+        // n opens the create input; Esc closes it but stays in the panel.
+        assert!(app.handle_key(key(KeyCode::Char('n'))));
+        assert!(app.show_branch_input);
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(!app.show_branch_input);
+        assert_eq!(app.view, View::Branches);
+
+        // q exits from the list; Esc leaves the panel back to the dashboard.
+        assert!(!app.handle_key(key(KeyCode::Char('q'))));
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Dashboard);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switch_to_selected_branch_updates_repo_and_status() {
+        let dir = temp_dir("switch");
+        init_repo_with_commit(&dir);
+        git::create_branch(&dir, "feature").unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_branches();
+
+        // No selection: no-op.
+        app.branch_state.select(None);
+        app.switch_to_selected_branch();
+        assert!(app.status.is_none());
+
+        let idx = app
+            .branches
+            .iter()
+            .position(|b| b.name == "feature")
+            .unwrap();
+        app.branch_state.select(Some(idx));
+        app.switch_to_selected_branch();
+
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error, "{}", st.message);
+        assert_eq!(st.message, "已切换到 feature");
+        assert_eq!(app.repos[0].branch, "feature");
+        let head = app.branches.iter().find(|b| b.is_head).unwrap();
+        assert_eq!(head.name, "feature");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn branch_create_flow_start_submit_and_errors() {
+        let dir = temp_dir("branch-create");
+        init_repo_with_commit(&dir);
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_branches();
+        let initial = app.branches.len();
+
+        // start_branch_create opens a clean input.
+        app.start_branch_create();
+        assert!(app.show_branch_input);
+        assert!(!app.show_branch_delete_confirm);
+        assert!(app.branch_input.is_empty());
+
+        // Empty name: error, input stays open.
+        app.submit_branch_create();
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("分支名不能为空"), "{}", st.message);
+        assert!(app.show_branch_input);
+
+        app.cancel_branch_create();
+        assert!(!app.show_branch_input);
+        assert!(app.branch_input.is_empty());
+
+        // Create via keys: n, type, backspace, Enter.
+        assert!(app.handle_key(key(KeyCode::Char('n'))));
+        for c in "feature".chars() {
+            assert!(app.handle_key(key(KeyCode::Char(c))));
+        }
+        assert_eq!(app.branch_input, "feature");
+        assert!(app.handle_key(key(KeyCode::Backspace)));
+        assert_eq!(app.branch_input, "featur");
+        assert!(app.handle_key(key(KeyCode::Char('e'))));
+        assert!(app.handle_key(key(KeyCode::Enter)));
+
+        assert!(!app.show_branch_input);
+        assert_eq!(app.branches.len(), initial + 1);
+        assert!(app.branches.iter().any(|b| b.name == "feature"));
+        let sel = app.branch_state.selected().unwrap();
+        assert_eq!(app.branches[sel].name, "feature");
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error, "{}", st.message);
+        assert!(st.message.contains("已创建分支 feature"), "{}", st.message);
+
+        // Duplicate name: error, typed text kept for correction.
+        app.start_branch_create();
+        app.branch_input = "feature".to_string();
+        app.submit_branch_create();
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("创建分支失败"), "{}", st.message);
+        assert!(app.show_branch_input);
+        assert_eq!(app.branch_input, "feature");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn branch_delete_flow_refuses_head_removes_feature() {
+        let dir = temp_dir("branch-delete");
+        init_repo_with_commit(&dir);
+        git::create_branch(&dir, "feature").unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_branches();
+
+        // No selection: start is a no-op.
+        app.branch_state.select(None);
+        app.start_branch_delete();
+        assert!(!app.show_branch_delete_confirm);
+
+        // Head branch: d opens, Esc cancels...
+        let head_idx = app.branches.iter().position(|b| b.is_head).unwrap();
+        app.branch_state.select(Some(head_idx));
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.show_branch_delete_confirm);
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(!app.show_branch_delete_confirm);
+        assert_eq!(app.view, View::Branches);
+
+        // ...d + n cancels as well...
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.handle_key(key(KeyCode::Char('n'))));
+        assert!(!app.show_branch_delete_confirm);
+
+        // ...and d + Y on the head branch is refused: branch kept, error shown.
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.handle_key(key(KeyCode::Char('Y'))));
+        assert!(!app.show_branch_delete_confirm);
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("删除分支失败"), "{}", st.message);
+        assert_eq!(app.branches.len(), 2);
+
+        // Non-head branch: confirmed delete removes it and refreshes the list.
+        let idx = app
+            .branches
+            .iter()
+            .position(|b| b.name == "feature")
+            .unwrap();
+        app.branch_state.select(Some(idx));
+        app.start_branch_delete();
+        assert!(app.show_branch_delete_confirm);
+        app.confirm_branch_delete();
+        assert!(!app.show_branch_delete_confirm);
+        assert!(!app.branches.iter().any(|b| b.name == "feature"));
+        assert!(app.branches.iter().any(|b| b.is_head));
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error, "{}", st.message);
+        assert!(st.message.contains("已删除分支 feature"), "{}", st.message);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn branch_panel_index_edges_report_errors() {
+        let mut app = App::new(Config::default());
+        app.branch_repo = Some(0); // stale index: no such repo
+        app.load_branches();
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(
+            st.message.contains("分支面板: 仓库索引失效"),
+            "{}",
+            st.message
+        );
+        assert!(app.branches.is_empty());
+        assert_eq!(app.branch_state.selected(), None);
+
+        app.branch_input = "x".to_string();
+        app.submit_branch_create();
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(
+            st.message.contains("创建分支失败: 仓库索引失效"),
+            "{}",
+            st.message
+        );
+
+        app.start_branch_create(); // no valid repo path: stays closed
+        assert!(!app.show_branch_input);
+    }
+
+    // ---------- C: async paths (tokio) and temp-repo side effects ----------
+
+    #[tokio::test]
+    async fn start_remote_guards_and_valid_start() {
+        let dir = temp_dir("remote-start");
+        init_repo_with_commit(&dir);
+
+        // Outside the repo view: no-op.
+        let mut app = app_with_repo_at(&dir);
+        app.start_remote("push");
+        assert!(app.remote_rx.is_none());
+
+        // Repo view without a current repo: no-op.
+        app.view = View::Repo;
+        app.start_remote("push");
+        assert!(app.remote_rx.is_none());
+
+        // Batch operation in flight: no-op.
+        let mut app = app_with_repo_at(&dir);
+        app.view = View::Repo;
+        app.current_repo = Some(0);
+        let (btx, brx) = mpsc::unbounded_channel();
+        app.batch_rx = Some(brx);
+        app.start_remote("push");
+        assert!(app.remote_rx.is_none());
+        app.batch_rx = None;
+        drop(btx);
+
+        // Remote already running: label untouched.
+        let (rtx, rrx) = mpsc::unbounded_channel::<RemoteEvent>();
+        app.remote_rx = Some(rrx);
+        app.remote_op = "push";
+        app.start_remote("pull");
+        assert_eq!(app.remote_op, "push");
+        app.remote_rx = None;
+        drop(rtx);
+
+        // Valid start: arms the receiver, initial progress, clears the status.
+        app.status = Some(StatusLine {
+            message: "old".to_string(),
+            is_error: true,
+        });
+        app.start_remote("pull");
+        assert!(app.remote_rx.is_some());
+        assert_eq!(app.remote_op, "pull");
+        assert!(matches!(app.remote_status, Some(RemoteStatus::Progress(_))));
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn poll_remote_drains_progress_done_and_disconnect() {
+        let mut app = App::new(Config::default());
+
+        // No receiver: no-op.
+        app.poll_remote();
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        app.remote_rx = Some(rx);
+        tx.send(RemoteEvent::Progress(Progress {
+            percent: 40,
+            message: "40%".to_string(),
+        }))
+        .unwrap();
+        app.poll_remote();
+        match &app.remote_status {
+            Some(RemoteStatus::Progress(p)) => {
+                assert_eq!(p.percent, 40);
+                assert_eq!(p.message, "40%");
+            }
+            other => panic!("expected progress, got {other:?}"),
+        }
+        assert!(app.remote_rx.is_some()); // still in flight
+
+        tx.send(RemoteEvent::Done(Err("boom".to_string()))).unwrap();
+        app.poll_remote();
+        assert_eq!(
+            app.remote_status,
+            Some(RemoteStatus::Error("boom".to_string()))
+        );
+        assert!(app.remote_rx.is_none());
+
+        // Done(Ok) closes the receiver; a refresh failure on a non-repo path
+        // surfaces as a status error.
+        let broken = temp_dir("remote-refresh"); // exists but is not a git repo
+        let mut app = App::new(Config::default());
+        app.repos.push(RepoInfo {
+            name: "broken".to_string(),
+            path: broken.clone(),
+            branch: "main".to_string(),
+            dirty: Default::default(),
+            ahead: 0,
+            behind: 0,
+            last_commit: Default::default(),
+        });
+        app.current_repo = Some(0);
+        let (tx, rx) = mpsc::unbounded_channel();
+        app.remote_rx = Some(rx);
+        tx.send(RemoteEvent::Done(Ok(()))).unwrap();
+        app.poll_remote();
+        assert_eq!(app.remote_status, Some(RemoteStatus::Success));
+        assert!(app.remote_rx.is_none());
+        let st = app.status.as_ref().expect("refresh failure must surface");
+        assert!(st.is_error, "{}", st.message);
+        let _ = std::fs::remove_dir_all(&broken);
+
+        // Sender dropped without Done: explicit disconnect error.
+        let mut app = App::new(Config::default());
+        let (tx, rx) = mpsc::unbounded_channel::<RemoteEvent>();
+        app.remote_rx = Some(rx);
+        drop(tx);
+        app.poll_remote();
+        assert_eq!(
+            app.remote_status,
+            Some(RemoteStatus::Error("远端任务意外退出".to_string()))
+        );
+        assert!(app.remote_rx.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_batch_guards_info_and_valid_start() {
+        // No repos: info message, nothing armed.
+        let mut app = App::new(Config::default());
+        app.start_batch("pull");
+        assert!(!app.batch_running());
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error);
+        assert!(st.message.contains("没有仓库"), "{}", st.message);
+
+        // Outside the dashboard: no-op.
+        let mut app = app_with_repos(2);
+        app.view = View::Repo;
+        app.start_batch("pull");
+        assert!(!app.batch_running());
+        assert!(app.status.is_none());
+
+        // Batch already running: label and log untouched.
+        let mut app = app_with_repos(2);
+        app.batch_op = "pull";
+        app.batch_log
+            .push(BatchLogLine::new("stale".to_string(), "进行中".to_string()));
+        let (btx, brx) = mpsc::unbounded_channel();
+        app.batch_rx = Some(brx);
+        app.start_batch("fetch");
+        assert_eq!(app.batch_op, "pull");
+        assert_eq!(app.batch_log.len(), 1);
+        app.batch_rx = None;
+        drop(btx);
+
+        // Remote in flight: no-op.
+        let mut app = app_with_repos(2);
+        let (rtx, rrx) = mpsc::unbounded_channel();
+        app.remote_rx = Some(rrx);
+        app.start_batch("fetch");
+        assert!(!app.batch_running());
+        app.remote_rx = None;
+        drop(rtx);
+
+        // Valid start: arms the receiver and resets log/status.
+        let mut app = app_with_repos(2);
+        app.batch_log
+            .push(BatchLogLine::new("stale".to_string(), "进行中".to_string()));
+        app.set_error("stale error".to_string());
+        app.start_batch("fetch");
+        assert!(app.batch_running());
+        assert_eq!(app.batch_op, "fetch");
+        assert!(app.batch_log.is_empty());
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn poll_batch_line_dedup_done_summaries_and_disconnect() {
+        let mut app = App::new(Config::default());
+
+        // No receiver: no-op.
+        app.poll_batch();
+
+        app.batch_op = "pull";
+        let (tx, rx) = mpsc::unbounded_channel();
+        app.batch_rx = Some(rx);
+
+        // Same index keeps one advancing line; a new index appends.
+        tx.send(BatchEvent::Line {
+            index: 0,
+            name: "r0".to_string(),
+            message: "进行中".to_string(),
+        })
+        .unwrap();
+        tx.send(BatchEvent::Line {
+            index: 0,
+            name: "r0".to_string(),
+            message: "成功".to_string(),
+        })
+        .unwrap();
+        tx.send(BatchEvent::Line {
+            index: 1,
+            name: "r1".to_string(),
+            message: "进行中".to_string(),
+        })
+        .unwrap();
+        app.poll_batch();
+        assert_eq!(app.batch_log.len(), 2);
+        assert_eq!(app.batch_log[0].message, "成功");
+        assert!(app.batch_log[0].is_success);
+        assert!(!app.batch_log[0].is_error);
+        assert_eq!(app.batch_log[1].message, "进行中");
+        assert!(!app.batch_log[1].is_success);
+        assert!(app.batch_running());
+
+        // Done with all successes → info summary.
+        tx.send(BatchEvent::Done(vec![
+            ("r0".to_string(), Ok(())),
+            ("r1".to_string(), Ok(())),
+        ]))
+        .unwrap();
+        app.poll_batch();
+        assert!(!app.batch_running());
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error);
+        assert!(
+            st.message.contains("批量 pull 完成: 2 个仓库成功"),
+            "{}",
+            st.message
+        );
+
+        // Done with a partial failure → error summary.
+        let (tx, rx) = mpsc::unbounded_channel();
+        app.batch_rx = Some(rx);
+        app.batch_op = "fetch";
+        tx.send(BatchEvent::Done(vec![
+            ("a".to_string(), Ok(())),
+            ("b".to_string(), Err(anyhow::anyhow!("nope"))),
+        ]))
+        .unwrap();
+        app.poll_batch();
+        assert!(!app.batch_running());
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(
+            st.message.contains("批量 fetch 完成: 1 成功 / 1 失败"),
+            "{}",
+            st.message
+        );
+
+        // Sender dropped without Done: explicit disconnect error.
+        let (tx, rx) = mpsc::unbounded_channel::<BatchEvent>();
+        app.batch_rx = Some(rx);
+        drop(tx);
+        app.poll_batch();
+        assert!(!app.batch_running());
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("批量任务意外退出"), "{}", st.message);
+    }
+
+    #[test]
+    fn submit_commit_success_creates_commit_and_refreshes() {
+        let dir = temp_dir("commit-ok");
+        init_repo_with_commit(&dir);
+        std::fs::write(dir.join("b.txt"), "second\n").unwrap();
+        git::stage(&dir, std::path::Path::new("b.txt")).unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        app.open_commit();
+        assert_eq!(app.view, View::Commit);
+        app.commit_message = "add b.txt".to_string();
+        app.submit_commit();
+
+        assert_eq!(app.view, View::Repo);
+        assert!(app.commit_message.is_empty());
+        assert!(app.file_entries.is_empty());
+        assert_eq!(app.repos[0].last_commit.summary, "add b.txt");
+        let d = &app.repos[0].dirty;
+        assert_eq!((d.added, d.modified, d.deleted, d.untracked), (0, 0, 0, 0));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn confirm_discard_restores_tracked_file_and_removes_untracked() {
+        let dir = temp_dir("discard");
+        init_repo_with_commit(&dir);
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert_eq!(app.file_entries.len(), 1);
+
+        app.start_discard();
+        assert!(app.show_discard_confirm);
+        app.confirm_discard();
+        assert!(!app.show_discard_confirm);
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "v1\n");
+        assert!(app.file_entries.is_empty());
+        assert!(app.status.is_none());
+
+        // Untracked file: discard removes it from the working tree.
+        std::fs::write(dir.join("u.txt"), "junk\n").unwrap();
+        app.load_file_entries();
+        assert_eq!(app.file_entries.len(), 1);
+        assert_eq!(app.file_state.selected(), Some(0));
+        app.start_discard();
+        app.confirm_discard();
+        assert!(!dir.join("u.txt").exists());
+        assert!(app.file_entries.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
