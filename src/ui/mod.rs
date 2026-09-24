@@ -2,6 +2,7 @@
 
 pub mod branches;
 pub mod commit;
+pub mod config;
 pub mod dashboard;
 pub mod diff;
 pub mod remote;
@@ -87,6 +88,17 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 confirm_branch: confirm,
             };
             branches::render_branches(f, state);
+        }
+        View::Config => {
+            // Owned copy: `scan_dirs()` borrows all of `app`, which would
+            // conflict with the `&mut app.config_state` below.
+            let scan_dirs = app.scan_dirs().to_vec();
+            let state = config::ConfigState {
+                scan_dirs: &scan_dirs,
+                status: app.status.as_ref(),
+                list_state: &mut app.config_state,
+            };
+            config::render_config(f, state);
         }
     }
 }
@@ -214,5 +226,21 @@ mod tests {
             "missing dialog title: {text}"
         );
         assert!(text.contains("feature"), "missing branch name: {text}");
+    }
+
+    #[test]
+    fn config_view_renders_title_and_hints_via_dispatch() {
+        let mut app = base_app();
+        app.view = View::Config;
+        let text = render_compact(&mut app);
+        // Default config has no scan dirs: the title carries the zero count.
+        assert!(
+            text.contains("扫描目录配置(0)"),
+            "missing config title: {text}"
+        );
+        assert!(text.contains("j/k选择"), "missing nav hint: {text}");
+        assert!(text.contains("a添加"), "missing add hint: {text}");
+        assert!(text.contains("d删除"), "missing delete hint: {text}");
+        assert!(text.contains("Esc返回"), "missing back hint: {text}");
     }
 }

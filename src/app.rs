@@ -34,6 +34,8 @@ pub enum View {
     Commit,
     /// Branch panel.
     Branches,
+    /// Scan-dir configuration panel.
+    Config,
 }
 
 /// Bottom status line content: short message or error (convention 3).
@@ -157,6 +159,8 @@ pub struct App {
     pub show_branch_input: bool,
     /// Whether the branch-delete confirmation dialog is shown.
     pub show_branch_delete_confirm: bool,
+    /// Selection cursor for the scan-dir list in the config panel.
+    pub config_state: ListState,
 }
 
 impl App {
@@ -188,6 +192,7 @@ impl App {
             branch_input: String::new(),
             show_branch_input: false,
             show_branch_delete_confirm: false,
+            config_state: ListState::default(),
         }
     }
 
@@ -643,6 +648,37 @@ impl App {
         self.clear_error();
     }
 
+    /// Enter the scan-dir configuration panel (dashboard `c`).
+    ///
+    /// The selection lands on the first configured directory — or is cleared
+    /// when none is configured — so `j/k` navigation always starts valid,
+    /// and a stale cursor from a previous visit is re-clamped.
+    pub fn enter_config(&mut self) {
+        self.view = View::Config;
+        if self.config.scan_dirs.is_empty() {
+            self.config_state.select(None);
+        } else {
+            let selected = self
+                .config_state
+                .selected()
+                .filter(|i| *i < self.config.scan_dirs.len())
+                .unwrap_or(0);
+            self.config_state.select(Some(selected));
+        }
+        self.clear_error();
+    }
+
+    /// Leave the configuration panel back to the dashboard (`Esc`).
+    pub fn leave_config(&mut self) {
+        self.view = View::Dashboard;
+        self.clear_error();
+    }
+
+    /// Configured scan directories, read by the config panel renderer.
+    pub fn scan_dirs(&self) -> &[std::path::PathBuf] {
+        &self.config.scan_dirs
+    }
+
     /// Whether a background batch operation is currently running.
     pub fn batch_running(&self) -> bool {
         self.batch_rx.is_some()
@@ -860,6 +896,10 @@ impl App {
                     self.enter_branches();
                     true
                 }
+                KeyCode::Char('c') => {
+                    self.enter_config();
+                    true
+                }
                 KeyCode::Enter => {
                     self.enter_repo();
                     true
@@ -1067,6 +1107,36 @@ impl App {
                     }
                 }
             }
+            // Config panel: modal input / delete-confirm take precedence over
+            // list navigation (overlays land with later subtasks); Esc returns
+            // to the dashboard, q exits the program.
+            View::Config => match key.code {
+                KeyCode::Esc => {
+                    self.leave_config();
+                    true
+                }
+                KeyCode::Char('q') => false,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if !self.config.scan_dirs.is_empty() {
+                        let next = self.config_state.selected().map_or(0, |i| {
+                            i.saturating_add(1).min(self.config.scan_dirs.len() - 1)
+                        });
+                        self.config_state.select(Some(next));
+                    }
+                    true
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if !self.config.scan_dirs.is_empty() {
+                        let prev = self
+                            .config_state
+                            .selected()
+                            .map_or(0, |i| i.saturating_sub(1));
+                        self.config_state.select(Some(prev));
+                    }
+                    true
+                }
+                _ => true,
+            },
         }
     }
 }
@@ -1730,6 +1800,70 @@ mod tests {
         k.kind = KeyEventKind::Release;
         assert!(app.handle_key(k));
         assert_eq!(app.dashboard_state.selected(), None);
+    }
+
+    // ---------- config panel skeleton ----------
+
+    #[test]
+    fn dashboard_c_enters_config_and_esc_returns() {
+        let mut app = App::new(Config::default());
+        app.set_error("stale".to_string());
+
+        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        assert_eq!(app.view, View::Config);
+        assert!(app.status.is_none()); // entering clears the stale status
+
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Dashboard);
+    }
+
+    #[test]
+    fn config_keys_navigate_dirs_and_quit() {
+        let mut app = App::new(Config::default());
+        app.config.scan_dirs = vec![
+            std::path::PathBuf::from("/a"),
+            std::path::PathBuf::from("/b"),
+        ];
+        app.enter_config();
+        assert_eq!(app.config_state.selected(), Some(0));
+
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.config_state.selected(), Some(1));
+        assert!(app.handle_key(key(KeyCode::Char('j')))); // clamps at the end
+        assert_eq!(app.config_state.selected(), Some(1));
+        assert!(app.handle_key(key(KeyCode::Down)));
+        assert_eq!(app.config_state.selected(), Some(1));
+        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(app.config_state.selected(), Some(0));
+        assert!(app.handle_key(key(KeyCode::Char('k')))); // clamps at the start
+        assert_eq!(app.config_state.selected(), Some(0));
+
+        // q exits the program from the config panel.
+        assert!(!app.handle_key(key(KeyCode::Char('q'))));
+    }
+
+    #[test]
+    fn config_enter_leave_handles_empty_list_and_stale_selection() {
+        let mut app = App::new(Config::default());
+
+        // Empty list: no selection, Esc returns to the dashboard.
+        app.enter_config();
+        assert_eq!(app.view, View::Config);
+        assert_eq!(app.config_state.selected(), None);
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.config_state.selected(), None);
+        app.leave_config();
+        assert_eq!(app.view, View::Dashboard);
+
+        // Non-empty list: a stale out-of-range cursor is re-clamped to the
+        // first entry; a valid cursor survives a re-entry.
+        app.config.scan_dirs = vec![std::path::PathBuf::from("/a")];
+        app.config_state.select(Some(7));
+        app.enter_config();
+        assert_eq!(app.config_state.selected(), Some(0));
+        app.leave_config();
+        app.enter_config();
+        assert_eq!(app.config_state.selected(), Some(0));
     }
 
     // ---------- B: branch panel ----------
