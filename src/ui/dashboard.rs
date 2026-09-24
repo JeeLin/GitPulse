@@ -1,7 +1,7 @@
 //! Repository dashboard: renders `App.repos` with selection and error state.
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
@@ -46,16 +46,19 @@ pub fn render_dashboard(f: &mut Frame, state: &mut DashboardState<'_>) {
         constraints.push(Constraint::Length(batch_rows));
     }
     constraints.push(Constraint::Length(1));
+    constraints.push(Constraint::Length(1)); // key hints
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(f.area());
     let list_area = chunks[0];
-    let (batch_area, status_area) = if batch_rows > 0 {
-        (Some(chunks[1]), chunks[2])
-    } else {
-        (None, chunks[1])
-    };
+    let last = chunks.len();
+    let batch_area = (batch_rows > 0).then(|| chunks[1]);
+    let status_area = chunks[last - 2];
+    let hints_area = chunks[last - 1];
+
+    // Key hints stay visible in every state, including the error early-return.
+    render_key_hints(f, hints_area);
 
     if let Some(status) = state.status {
         if status.is_error {
@@ -68,6 +71,19 @@ pub fn render_dashboard(f: &mut Frame, state: &mut DashboardState<'_>) {
             render_status_line(f, status_area, status);
             return;
         }
+    }
+
+    // First-launch empty state: no configured scan dirs discovered any repo,
+    // so guide the user into the config panel instead of showing an empty list.
+    if state.repos.is_empty() {
+        render_empty_state(f, list_area, state.repos.len());
+        if let Some(batch_area) = batch_area {
+            render_batch_log(f, batch_area, state);
+        }
+        if let Some(status) = state.status {
+            render_status_line(f, status_area, status);
+        }
+        return;
     }
 
     let items: Vec<ListItem> = state
@@ -173,6 +189,54 @@ fn render_status_line(f: &mut Frame, area: Rect, status: &StatusLine) {
         Style::default()
     };
     f.render_widget(Paragraph::new(status.message.clone()).style(style), area);
+}
+
+/// Replace the list body with a centered first-launch hint that points at the
+/// config panel (`c`), keeping the usual bordered title and row count.
+fn render_empty_state(f: &mut Frame, area: Rect, count: usize) {
+    let block = Block::default()
+        .title(format!("GitPulse 仓库状态 ({count})"))
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(50),
+            Constraint::Length(1),
+            Constraint::Percentage(50),
+        ])
+        .split(inner);
+    let hint = Line::from(vec![
+        Span::raw("扫描目录为空 — 按 "),
+        Span::styled("c", Style::default().fg(Color::Cyan)),
+        Span::raw(" 管理扫描目录"),
+    ]);
+    f.render_widget(Paragraph::new(hint).alignment(Alignment::Center), rows[1]);
+}
+
+/// Bottom key-hint row for every dashboard state; `c` opens the config panel.
+fn render_key_hints(f: &mut Frame, area: Rect) {
+    let hints = Line::from(vec![
+        Span::styled("j/k", Style::default().fg(Color::Cyan)),
+        Span::raw(" 选择  "),
+        Span::styled("Enter", Style::default().fg(Color::Cyan)),
+        Span::raw(" 进入  "),
+        Span::styled("r", Style::default().fg(Color::Cyan)),
+        Span::raw(" 刷新  "),
+        Span::styled("l", Style::default().fg(Color::Cyan)),
+        Span::raw(" pull  "),
+        Span::styled("f", Style::default().fg(Color::Cyan)),
+        Span::raw(" fetch  "),
+        Span::styled("b", Style::default().fg(Color::Cyan)),
+        Span::raw(" 分支  "),
+        Span::styled("c", Style::default().fg(Color::Cyan)),
+        Span::raw(" 配置  "),
+        Span::styled("q", Style::default().fg(Color::Cyan)),
+        Span::raw(" 退出"),
+    ]);
+    f.render_widget(Paragraph::new(hints), area);
 }
 
 /// Format a Unix timestamp as `YYYY-MM-DD HH:MM` (UTC) without chrono.
@@ -361,5 +425,92 @@ mod tests {
         assert_eq!(format_time(-1), "-");
         // 2024-01-01 00:00:00 UTC
         assert!(format_time(1_704_067_200).starts_with("2024-01-01"));
+    }
+
+    /// Wide CJK glyphs leave padding cells; compare whitespace-stripped.
+    fn compact(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn render_empty_repos_shows_config_hint_and_title() {
+        let mut list_state = ListState::default();
+        let text = render_to_text(&mut DashboardState {
+            repos: &[],
+            status: None,
+            list_state: &mut list_state,
+            batch_log: &[],
+            batch_op: "",
+            batch_running: false,
+        });
+        let compact = compact(&text);
+        assert!(
+            compact.contains("扫描目录为空—按c管理扫描目录"),
+            "missing empty-state hint: {compact}"
+        );
+        assert!(
+            compact.contains("GitPulse仓库状态(0)"),
+            "missing title: {compact}"
+        );
+    }
+
+    #[test]
+    fn render_with_repos_hides_config_hint() {
+        let repos = vec![make_repo("alpha", "main")];
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        let text = render_to_text(&mut DashboardState {
+            repos: &repos,
+            status: None,
+            list_state: &mut list_state,
+            batch_log: &[],
+            batch_op: "",
+            batch_running: false,
+        });
+        let compact = compact(&text);
+        assert!(compact.contains("alpha"), "missing repo: {compact}");
+        assert!(
+            !compact.contains("扫描目录为空"),
+            "empty-state hint leaked: {compact}"
+        );
+    }
+
+    #[test]
+    fn render_error_state_shows_error_not_config_hint() {
+        let status = StatusLine {
+            message: "error: scan failed".to_string(),
+            is_error: true,
+        };
+        let mut list_state = ListState::default();
+        let text = render_to_text(&mut DashboardState {
+            repos: &[],
+            status: Some(&status),
+            list_state: &mut list_state,
+            batch_log: &[],
+            batch_op: "",
+            batch_running: false,
+        });
+        let compact = compact(&text);
+        assert!(compact.contains("error"), "missing error: {compact}");
+        assert!(
+            !compact.contains("扫描目录为空"),
+            "hint must not mask the error: {compact}"
+        );
+    }
+
+    #[test]
+    fn render_key_hints_include_config_entry() {
+        let mut list_state = ListState::default();
+        let text = render_to_text(&mut DashboardState {
+            repos: &[],
+            status: None,
+            list_state: &mut list_state,
+            batch_log: &[],
+            batch_op: "",
+            batch_running: false,
+        });
+        let compact = compact(&text);
+        assert!(compact.contains("c配置"), "missing config hint: {compact}");
+        assert!(compact.contains("j/k选择"), "missing nav hint: {compact}");
     }
 }
