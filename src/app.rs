@@ -120,8 +120,6 @@ pub struct App {
     pub file_state: ListState,
     /// Scroll offset for the diff viewer.
     pub diff_scroll: u16,
-    /// Whether the diff viewer is active (set when entering Diff view from Repo).
-    pub show_diff: bool,
     /// Whether the discard confirmation dialog is shown.
     pub show_discard_confirm: bool,
     /// Current diff content for the selected file.
@@ -169,7 +167,6 @@ impl App {
             file_entries: Vec::new(),
             file_state: ListState::default(),
             diff_scroll: 0,
-            show_diff: false,
             show_discard_confirm: false,
             diff_content: String::new(),
             commit_message: String::new(),
@@ -246,7 +243,6 @@ impl App {
                 self.current_repo = Some(i);
                 self.load_file_entries();
                 self.file_state.select(Some(0));
-                self.show_diff = false;
                 self.clear_error();
             }
         }
@@ -288,7 +284,6 @@ impl App {
                 match git::diff_file(&repo_path, &file_path) {
                     Ok(diff) => {
                         self.diff_content = diff;
-                        self.show_diff = true;
                         self.view = View::Diff;
                         self.diff_scroll = 0;
                     }
@@ -936,7 +931,6 @@ impl App {
             View::Diff => match key.code {
                 KeyCode::Esc => {
                     self.view = View::Repo;
-                    self.show_diff = false;
                     true
                 }
                 KeyCode::Char('j') | KeyCode::Down => {

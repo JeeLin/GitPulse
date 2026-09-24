@@ -5,8 +5,7 @@
 mod path;
 mod types;
 
-#[allow(unused_imports)] // `config_dir` is part of the public path API for later subtasks
-pub use path::{config_dir, config_path};
+pub use path::config_path;
 pub use types::Config;
 
 use std::fs;
