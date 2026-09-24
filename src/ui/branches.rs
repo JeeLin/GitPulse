@@ -4,11 +4,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame,
 };
 
-use super::repo::centered_rect;
 use crate::app::StatusLine;
 use crate::git::BranchInfo;
 
@@ -128,17 +127,7 @@ fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) 
 
 /// Single-line create input (convention 9): Enter creates, Esc cancels.
 fn render_create_input(f: &mut Frame, area: Rect, input: &str) {
-    let popup_area = centered_rect(60, 5, area);
-    f.render_widget(Clear, popup_area);
-
-    let block = Block::default()
-        .title("新建分支 (Enter 创建 / Esc 取消)")
-        .borders(Borders::ALL);
-    let line = Line::from(vec![
-        Span::styled("> ", Style::default().fg(Color::Cyan)),
-        Span::raw(input),
-    ]);
-    f.render_widget(Paragraph::new(line).block(block), popup_area);
+    super::render_input_overlay(f, area, "新建分支 (Enter 创建 / Esc 取消)", input, false);
 }
 
 /// Delete confirmation dialog (discard-style, convention 8): y confirms.

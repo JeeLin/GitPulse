@@ -71,6 +71,25 @@ pub fn render_confirm_overlay(
     f.render_widget(paragraph, popup);
 }
 
+/// Shared single-line input overlay (convention 9): a centered popup titled
+/// `title` showing `text` after a cyan `> ` prompt. `show_cursor` appends the
+/// `▌` caret (config manual input); popups whose hints live in the title
+/// (branch create, commit message) omit it.
+pub fn render_input_overlay(f: &mut Frame, area: Rect, title: &str, text: &str, show_cursor: bool) {
+    let popup = repo::centered_rect(60, 5, area);
+    f.render_widget(Clear, popup);
+
+    let mut spans = vec![
+        Span::styled("> ", Style::default().fg(Color::Cyan)),
+        Span::raw(text),
+    ];
+    if show_cursor {
+        spans.push(Span::styled("▌", Style::default().fg(Color::Cyan)));
+    }
+    let block = Block::default().title(title).borders(Borders::ALL);
+    f.render_widget(Paragraph::new(Line::from(spans)).block(block), popup);
+}
+
 /// Dispatch rendering to the active view.
 ///
 /// The current [`App`] fields are borrowed directly into the view state

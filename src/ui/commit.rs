@@ -1,31 +1,21 @@
 //! Single-line commit message input popup.
 
-use ratatui::{
-    style::{Color, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
-    Frame,
-};
+use ratatui::Frame;
 
-use super::repo::centered_rect;
+use super::render_input_overlay;
 
 /// Render the commit message popup centered over the current view.
 ///
 /// Single-line input (convention 9): `Enter` commits, `Esc` cancels; the
 /// typed text lives in `App::commit_message` and is passed in per frame.
 pub fn render_commit_popup(f: &mut Frame, message: &str) {
-    let area = centered_rect(60, 5, f.area());
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .title("提交信息 (Enter 提交 / Esc 取消)")
-        .borders(Borders::ALL);
-
-    let line = Line::from(vec![
-        Span::styled("> ", Style::default().fg(Color::Cyan)),
-        Span::raw(message),
-    ]);
-    f.render_widget(Paragraph::new(line).block(block), area);
+    render_input_overlay(
+        f,
+        f.area(),
+        "提交信息 (Enter 提交 / Esc 取消)",
+        message,
+        false,
+    );
 }
 
 #[cfg(test)]

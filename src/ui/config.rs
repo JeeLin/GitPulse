@@ -128,16 +128,7 @@ fn key_hints(picker_open: bool, input_open: bool) -> Line<'static> {
 /// Single-line add-scan-dir input (convention 9): typed path plus cursor,
 /// titled 添加扫描目录; Enter confirms, Esc cancels via the bottom hints.
 fn render_add_input(f: &mut Frame, area: Rect, input: &str) {
-    let popup_area = centered_rect(60, 5, area);
-    f.render_widget(Clear, popup_area);
-
-    let block = Block::default().title("添加扫描目录").borders(Borders::ALL);
-    let line = Line::from(vec![
-        Span::styled("> ", Style::default().fg(Color::Cyan)),
-        Span::raw(input.to_string()),
-        Span::styled("▌", Style::default().fg(Color::Cyan)),
-    ]);
-    f.render_widget(Paragraph::new(line).block(block), popup_area);
+    super::render_input_overlay(f, area, "添加扫描目录", input, true);
 }
 
 /// Interactive directory browser overlay: the current path on the first row,
