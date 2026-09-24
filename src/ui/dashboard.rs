@@ -77,68 +77,65 @@ pub fn render_dashboard(f: &mut Frame, state: &mut DashboardState<'_>) {
     // so guide the user into the config panel instead of showing an empty list.
     if state.repos.is_empty() {
         render_empty_state(f, list_area, state.repos.len());
-        if let Some(batch_area) = batch_area {
-            render_batch_log(f, batch_area, state);
-        }
-        if let Some(status) = state.status {
-            render_status_line(f, status_area, status);
-        }
-        return;
+    } else {
+        let items: Vec<ListItem> = state
+            .repos
+            .iter()
+            .map(|repo| {
+                let dirty_count = repo.dirty.untracked
+                    + repo.dirty.modified
+                    + repo.dirty.added
+                    + repo.dirty.deleted;
+                let dirty_color = if dirty_count == 0 {
+                    Color::Green
+                } else {
+                    Color::Red
+                };
+
+                let line = Line::from(vec![
+                    Span::raw(format!("{:<20}", repo.name)),
+                    Span::styled(
+                        format!("{:<15}", repo.branch),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(
+                        format!("{:>4}", dirty_count),
+                        Style::default().fg(dirty_color),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("{}↑{}↓", repo.ahead, repo.behind),
+                        if repo.ahead > 0 {
+                            Style::default().fg(Color::Yellow)
+                        } else {
+                            Style::default()
+                        },
+                    ),
+                    Span::raw("  "),
+                    Span::raw(format_time(repo.last_commit.time)),
+                ]);
+                ListItem::new(line)
+            })
+            .collect();
+
+        let block = Block::default()
+            .title(format!("GitPulse 仓库状态 ({})", state.repos.len()))
+            .borders(Borders::ALL);
+
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("► ");
+
+        f.render_stateful_widget(list, list_area, state.list_state);
     }
 
-    let items: Vec<ListItem> = state
-        .repos
-        .iter()
-        .map(|repo| {
-            let dirty_count =
-                repo.dirty.untracked + repo.dirty.modified + repo.dirty.added + repo.dirty.deleted;
-            let dirty_color = if dirty_count == 0 {
-                Color::Green
-            } else {
-                Color::Red
-            };
-
-            let line = Line::from(vec![
-                Span::raw(format!("{:<20}", repo.name)),
-                Span::styled(
-                    format!("{:<15}", repo.branch),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::styled(
-                    format!("{:>4}", dirty_count),
-                    Style::default().fg(dirty_color),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    format!("{}↑{}↓", repo.ahead, repo.behind),
-                    if repo.ahead > 0 {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        Style::default()
-                    },
-                ),
-                Span::raw("  "),
-                Span::raw(format_time(repo.last_commit.time)),
-            ]);
-            ListItem::new(line)
-        })
-        .collect();
-
-    let block = Block::default()
-        .title(format!("GitPulse 仓库状态 ({})", state.repos.len()))
-        .borders(Borders::ALL);
-
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("► ");
-
-    f.render_stateful_widget(list, list_area, state.list_state);
-
+    // Shared tail (empty state and list alike; the error branch above keeps
+    // its early return without the batch log, matching prior behavior).
     if let Some(batch_area) = batch_area {
         render_batch_log(f, batch_area, state);
     }
