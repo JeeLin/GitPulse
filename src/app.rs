@@ -112,7 +112,9 @@ pub struct App {
     /// Current view; key presses are dispatched per view in [`App::handle_key`].
     pub view: View,
     /// Loaded configuration; repo discovery consumes it (M1 subtask 3).
-    config: Config,
+    /// `pub(crate)` so the config panel can borrow `scan_dirs` by field
+    /// instead of cloning them every frame.
+    pub(crate) config: Config,
     /// Bottom status line (convention 3); rendered with the dashboard (M1 subtask 4).
     pub status: Option<StatusLine>,
     /// Discovered git repositories (M1 subtask 3).
@@ -675,11 +677,6 @@ impl App {
         self.config_input.clear();
         self.show_config_delete_confirm = false;
         self.clear_error();
-    }
-
-    /// Configured scan directories, read by the config panel renderer.
-    pub fn scan_dirs(&self) -> &[std::path::PathBuf] {
-        &self.config.scan_dirs
     }
 
     /// Open the add-scan-dir input overlay (config panel `a`).

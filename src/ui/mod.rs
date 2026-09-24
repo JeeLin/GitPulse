@@ -90,11 +90,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
             branches::render_branches(f, state);
         }
         View::Config => {
-            // Owned copy: `scan_dirs()` borrows all of `app`, which would
-            // conflict with the `&mut app.config_state` below.
-            let scan_dirs = app.scan_dirs().to_vec();
+            // Field-level borrow of `app.config` coexists with the
+            // `&mut app.config_state` below (disjoint fields).
             let state = config::ConfigState {
-                scan_dirs: &scan_dirs,
+                scan_dirs: &app.config.scan_dirs,
                 status: app.status.as_ref(),
                 list_state: &mut app.config_state,
                 show_input: app.show_config_input,
