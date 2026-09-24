@@ -48,17 +48,7 @@ pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
 
     render_dir_list(f, chunks[0], &mut state);
 
-    if let Some(status) = state.status {
-        let style = if status.is_error {
-            Style::default().fg(Color::Red)
-        } else {
-            Style::default()
-        };
-        f.render_widget(
-            Paragraph::new(status.message.clone()).style(style),
-            chunks[1],
-        );
-    }
+    super::render_status_line(f, chunks[1], state.status);
 
     f.render_widget(Paragraph::new(key_hints(state.show_input)), chunks[2]);
 

@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::remote;
+use super::{remote, render_status_line};
 use crate::app::{RemoteStatus, StatusLine};
 use crate::git::{FileEntry, FileState};
 
@@ -114,17 +114,6 @@ fn render_file_list(f: &mut Frame, area: Rect, state: &mut RepoState<'_>) {
         .highlight_symbol("► ");
 
     f.render_stateful_widget(list, area, state.list_state);
-}
-
-fn render_status_line(f: &mut Frame, area: Rect, status: Option<&StatusLine>) {
-    if let Some(status) = status {
-        let style = if status.is_error {
-            Style::default().fg(Color::Red)
-        } else {
-            Style::default()
-        };
-        f.render_widget(Paragraph::new(status.message.clone()).style(style), area);
-    }
 }
 
 fn render_discard_dialog(f: &mut Frame, area: Rect, file: &FileEntry) {

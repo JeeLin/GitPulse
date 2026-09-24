@@ -11,6 +11,8 @@ use ratatui::{
 use crate::app::{BatchLogLine, StatusLine};
 use crate::git::RepoInfo;
 
+use super::render_status_line;
+
 /// Borrowed render state for the dashboard, referencing `App.repos` directly
 /// so no mock data source exists (checkpoint 2).
 pub struct DashboardState<'a> {
@@ -68,7 +70,7 @@ pub fn render_dashboard(f: &mut Frame, state: &mut DashboardState<'_>) {
             let paragraph =
                 Paragraph::new(status.message.clone()).style(Style::default().fg(Color::Red));
             f.render_widget(paragraph.block(block), list_area);
-            render_status_line(f, status_area, status);
+            render_status_line(f, status_area, Some(status));
             return;
         }
     }
@@ -140,9 +142,7 @@ pub fn render_dashboard(f: &mut Frame, state: &mut DashboardState<'_>) {
         render_batch_log(f, batch_area, state);
     }
 
-    if let Some(status) = state.status {
-        render_status_line(f, status_area, status);
-    }
+    render_status_line(f, status_area, state.status);
 }
 
 /// Draw the scrolling per-repository batch progress log (convention 6):
@@ -175,17 +175,6 @@ fn render_batch_log(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
         .collect();
     let block = Block::default().title(title).borders(Borders::ALL);
     f.render_widget(Paragraph::new(lines).block(block), area);
-}
-
-/// Draw the one-line status bar; errors render red and persist until the
-/// next operation (convention 3).
-fn render_status_line(f: &mut Frame, area: Rect, status: &StatusLine) {
-    let style = if status.is_error {
-        Style::default().fg(Color::Red)
-    } else {
-        Style::default()
-    };
-    f.render_widget(Paragraph::new(status.message.clone()).style(style), area);
 }
 
 /// Replace the list body with a centered first-launch hint that points at the

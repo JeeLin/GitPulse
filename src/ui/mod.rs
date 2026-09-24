@@ -8,10 +8,29 @@ pub mod diff;
 pub mod remote;
 pub mod repo;
 
-use ratatui::Frame;
+use ratatui::{
+    layout::Rect,
+    style::{Color, Style},
+    widgets::Paragraph,
+    Frame,
+};
 
-use crate::app::{App, View};
+use crate::app::{App, StatusLine, View};
 use crate::ui::dashboard::DashboardState;
+
+/// Draw the bottom status line shared by every view (convention 3): errors
+/// render red and persist until the next operation, anything else keeps the
+/// default style. `None` leaves the row blank.
+pub fn render_status_line(f: &mut Frame, area: Rect, status: Option<&StatusLine>) {
+    if let Some(status) = status {
+        let style = if status.is_error {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default()
+        };
+        f.render_widget(Paragraph::new(status.message.clone()).style(style), area);
+    }
+}
 
 /// Dispatch rendering to the active view.
 ///

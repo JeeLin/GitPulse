@@ -51,17 +51,7 @@ pub fn render_branches(f: &mut Frame, mut state: BranchesState<'_>) {
 
     render_branch_list(f, chunks[0], &mut state);
 
-    if let Some(status) = state.status {
-        let style = if status.is_error {
-            Style::default().fg(Color::Red)
-        } else {
-            Style::default()
-        };
-        f.render_widget(
-            Paragraph::new(status.message.clone()).style(style),
-            chunks[1],
-        );
-    }
+    super::render_status_line(f, chunks[1], state.status);
 
     let hints = Line::from(vec![
         Span::styled("j/k", Style::default().fg(Color::Cyan)),
