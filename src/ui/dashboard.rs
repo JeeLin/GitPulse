@@ -76,7 +76,7 @@ pub fn render_dashboard(f: &mut Frame, state: &mut DashboardState<'_>) {
     // First-launch empty state: no configured scan dirs discovered any repo,
     // so guide the user into the config panel instead of showing an empty list.
     if state.repos.is_empty() {
-        render_empty_state(f, list_area, state.repos.len());
+        render_empty_state(f, list_area);
     } else {
         let items: Vec<ListItem> = state
             .repos
@@ -190,9 +190,9 @@ fn render_status_line(f: &mut Frame, area: Rect, status: &StatusLine) {
 
 /// Replace the list body with a centered first-launch hint that points at the
 /// config panel (`c`), keeping the usual bordered title and row count.
-fn render_empty_state(f: &mut Frame, area: Rect, count: usize) {
+fn render_empty_state(f: &mut Frame, area: Rect) {
     let block = Block::default()
-        .title(format!("GitPulse 仓库状态 ({count})"))
+        .title("GitPulse 仓库状态 (0)")
         .borders(Borders::ALL);
     let inner = block.inner(area);
     f.render_widget(block, area);
