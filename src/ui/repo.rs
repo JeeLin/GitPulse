@@ -6,7 +6,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::StatusLine;
+use super::remote;
+use crate::app::{RemoteStatus, StatusLine};
 use crate::git::{FileEntry, FileState};
 
 /// State for rendering the single-repo view.
@@ -16,6 +17,10 @@ pub struct RepoState<'a> {
     pub list_state: &'a mut ListState,
     pub show_discard_confirm: bool,
     pub confirm_file: Option<&'a FileEntry>,
+    /// Push/pull feedback; takes over the status line while present.
+    pub remote_status: Option<&'a RemoteStatus>,
+    /// Label of the running/last remote operation (`push` / `pull`).
+    pub remote_op: &'a str,
 }
 
 /// Render the single-repo file status list with a bottom status line and key hints.
@@ -37,21 +42,30 @@ pub fn render_repo(f: &mut Frame, mut state: RepoState<'_>) {
     // Render file list
     render_file_list(f, file_list_area, &mut state);
 
-    // Render status line
-    render_status_line(f, status_area, state.status);
+    // Render status line: remote push/pull feedback takes precedence.
+    match state.remote_status {
+        Some(status) => remote::render_remote_status(f, status_area, status, state.remote_op),
+        None => render_status_line(f, status_area, state.status),
+    }
 
-    // Render key hints
+    // Render key hints (single-space separators keep the line under 80 cols)
     let hints = Line::from(vec![
         Span::styled("j/k", Style::default().fg(Color::Cyan)),
-        Span::raw(" 选择  "),
+        Span::raw(" 选择 "),
         Span::styled("d", Style::default().fg(Color::Cyan)),
-        Span::raw(" diff  "),
+        Span::raw(" diff "),
         Span::styled("s", Style::default().fg(Color::Cyan)),
-        Span::raw(" stage  "),
+        Span::raw(" stage "),
         Span::styled("u", Style::default().fg(Color::Cyan)),
-        Span::raw(" unstage  "),
+        Span::raw(" unstage "),
         Span::styled("x", Style::default().fg(Color::Cyan)),
-        Span::raw(" discard  "),
+        Span::raw(" discard "),
+        Span::styled("c", Style::default().fg(Color::Cyan)),
+        Span::raw(" commit "),
+        Span::styled("p", Style::default().fg(Color::Cyan)),
+        Span::raw(" push "),
+        Span::styled("l", Style::default().fg(Color::Cyan)),
+        Span::raw(" pull "),
         Span::styled("Esc", Style::default().fg(Color::Cyan)),
         Span::raw(" 返回"),
     ]);

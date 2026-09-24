@@ -1,7 +1,9 @@
 //! TUI rendering: view dispatch shared by all screens.
 
+pub mod commit;
 pub mod dashboard;
 pub mod diff;
+pub mod remote;
 pub mod repo;
 
 use ratatui::Frame;
@@ -36,12 +38,30 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 list_state: &mut app.file_state,
                 show_discard_confirm: app.show_discard_confirm,
                 confirm_file,
+                remote_status: app.remote_status.as_ref(),
+                remote_op: app.remote_op,
             };
             repo::render_repo(f, state);
         }
         View::Diff => {
             diff::render_diff(f, app);
         }
-        View::Commit | View::Branches => {}
+        View::Commit => {
+            // Repo view as background, commit input popup on top.
+            {
+                let state = repo::RepoState {
+                    entries: &app.file_entries,
+                    status: app.status.as_ref(),
+                    list_state: &mut app.file_state,
+                    show_discard_confirm: false,
+                    confirm_file: None,
+                    remote_status: app.remote_status.as_ref(),
+                    remote_op: app.remote_op,
+                };
+                repo::render_repo(f, state);
+            }
+            commit::render_commit_popup(f, &app.commit_message);
+        }
+        View::Branches => {}
     }
 }

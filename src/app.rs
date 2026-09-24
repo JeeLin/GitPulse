@@ -1,19 +1,21 @@
 //! Application state and the TUI event loop.
 
 use std::io::{self, Stdout};
+use std::time::Duration;
 
 use anyhow::Result;
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::crossterm::{cursor::Show, execute};
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
+use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::git::{self, FileEntry, RepoInfo};
+use crate::git::{self, FileEntry, Progress, RepoInfo};
 
 /// Terminal type used by the TUI.
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -44,6 +46,25 @@ pub struct StatusLine {
     pub is_error: bool,
 }
 
+/// Push/pull feedback rendered on the repo-view status line (convention 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteStatus {
+    /// Operation in flight; carries the latest progress update.
+    Progress(Progress),
+    /// Operation finished successfully.
+    Success,
+    /// Operation failed; the reason persists until the next operation.
+    Error(String),
+}
+
+/// Message sent from a background push/pull task over the progress channel.
+enum RemoteEvent {
+    /// Intermediate progress update.
+    Progress(Progress),
+    /// Terminal result of the operation.
+    Done(Result<(), String>),
+}
+
 /// Application state shared across views.
 pub struct App {
     /// Current view; key presses are dispatched per view in [`App::handle_key`].
@@ -70,6 +91,14 @@ pub struct App {
     pub show_discard_confirm: bool,
     /// Current diff content for the selected file.
     pub diff_content: String,
+    /// Single-line commit message being typed in the Commit view (convention 9).
+    pub commit_message: String,
+    /// Push/pull feedback; takes precedence over the normal status line.
+    pub remote_status: Option<RemoteStatus>,
+    /// Label of the running/last remote operation (`push` / `pull`).
+    pub remote_op: &'static str,
+    /// Receiver for background push/pull progress and completion events.
+    remote_rx: Option<mpsc::UnboundedReceiver<RemoteEvent>>,
 }
 
 impl App {
@@ -88,6 +117,10 @@ impl App {
             show_diff: false,
             show_discard_confirm: false,
             diff_content: String::new(),
+            commit_message: String::new(),
+            remote_status: None,
+            remote_op: "",
+            remote_rx: None,
         }
     }
 
@@ -262,6 +295,154 @@ impl App {
         self.show_discard_confirm = false;
     }
 
+    /// Record a short success message on the status line (convention 3).
+    pub fn set_info(&mut self, message: impl Into<String>) {
+        self.status = Some(StatusLine {
+            message: message.into(),
+            is_error: false,
+        });
+    }
+
+    /// Open the single-line commit message input (convention 9).
+    pub fn open_commit(&mut self) {
+        if self.remote_rx.is_some() {
+            return;
+        }
+        self.commit_message.clear();
+        self.view = View::Commit;
+    }
+
+    /// Cancel the commit input and return to the repo view.
+    pub fn cancel_commit(&mut self) {
+        self.view = View::Repo;
+        self.commit_message.clear();
+    }
+
+    /// Stage-aware commit of `self.commit_message`; returns to the repo view.
+    ///
+    /// Success clears the input and refreshes status (convention 5); failure
+    /// keeps the typed message and shows the reason on the status line.
+    pub fn submit_commit(&mut self) {
+        self.view = View::Repo;
+        let message = self.commit_message.clone();
+        let Some(repo_idx) = self.current_repo else {
+            self.set_error("commit 失败: 未打开仓库");
+            return;
+        };
+        if repo_idx >= self.repos.len() {
+            self.set_error("commit 失败: 仓库索引失效");
+            return;
+        }
+        let repo_path = self.repos[repo_idx].path.clone();
+        self.remote_status = None;
+        match git::commit(&repo_path, &message) {
+            Ok(oid) => {
+                self.commit_message.clear();
+                self.set_info(format!("commit 成功 {}", short_oid(&oid)));
+                self.refresh_repo_status(repo_idx);
+            }
+            Err(e) => {
+                self.set_error(format!("commit 失败: {e}"));
+            }
+        }
+    }
+
+    /// Start a background push (`op == "push"`) or pull (`op == "pull"`).
+    ///
+    /// The task runs off the UI thread; progress arrives on an mpsc channel
+    /// consumed each frame (convention 1), so the UI stays interactive while
+    /// the operation runs. No-op while another remote op is in flight or
+    /// outside the repo view.
+    pub fn start_remote(&mut self, op: &'static str) {
+        if self.view != View::Repo || self.remote_rx.is_some() {
+            return;
+        }
+        let Some(repo_idx) = self.current_repo else {
+            return;
+        };
+        if repo_idx >= self.repos.len() {
+            return;
+        }
+        let repo_path = self.repos[repo_idx].path.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.remote_rx = Some(rx);
+        self.remote_op = op;
+        self.remote_status = Some(RemoteStatus::Progress(Progress {
+            percent: 0,
+            message: if op == "push" {
+                "正在 push…".to_string()
+            } else {
+                "正在 pull…".to_string()
+            },
+        }));
+        self.status = None;
+        tokio::spawn(async move {
+            let result = match op {
+                "push" => {
+                    let sink = tx.clone();
+                    git::push(&repo_path, move |p| {
+                        let _ = sink.send(RemoteEvent::Progress(p));
+                    })
+                    .await
+                }
+                _ => {
+                    let sink = tx.clone();
+                    git::pull(&repo_path, move |p| {
+                        let _ = sink.send(RemoteEvent::Progress(p));
+                    })
+                    .await
+                }
+            };
+            let _ = tx.send(RemoteEvent::Done(result.map_err(|e| e.to_string())));
+        });
+    }
+
+    /// Drain pending progress events; called once per frame (convention 1).
+    pub fn poll_remote(&mut self) {
+        let Some(rx) = self.remote_rx.as_mut() else {
+            return;
+        };
+        loop {
+            match rx.try_recv() {
+                Ok(RemoteEvent::Progress(p)) => {
+                    self.remote_status = Some(RemoteStatus::Progress(p));
+                }
+                Ok(RemoteEvent::Done(Ok(()))) => {
+                    self.remote_status = Some(RemoteStatus::Success);
+                    self.remote_rx = None;
+                    if let Some(idx) = self.current_repo {
+                        if idx < self.repos.len() {
+                            self.refresh_repo_status(idx);
+                        }
+                    }
+                    return;
+                }
+                Ok(RemoteEvent::Done(Err(err))) => {
+                    self.remote_status = Some(RemoteStatus::Error(err));
+                    self.remote_rx = None;
+                    return;
+                }
+                Err(mpsc::error::TryRecvError::Empty) => return,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.remote_status =
+                        Some(RemoteStatus::Error("远端任务意外退出".to_string()));
+                    self.remote_rx = None;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Re-query status for `idx` after a commit/push/pull (convention 5).
+    fn refresh_repo_status(&mut self, idx: usize) {
+        let repo_path = self.repos[idx].path.clone();
+        match git::query_status(&repo_path) {
+            Ok(info) => self.repos[idx] = info,
+            Err(e) => self.set_error(format!("刷新状态失败: {e}")),
+        }
+        self.load_file_entries();
+    }
+
     /// Dispatch a key press for the current view; returns `false` when the app should exit.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
@@ -353,6 +534,18 @@ impl App {
                             self.start_discard();
                             true
                         }
+                        KeyCode::Char('c') => {
+                            self.open_commit();
+                            true
+                        }
+                        KeyCode::Char('p') => {
+                            self.start_remote("push");
+                            true
+                        }
+                        KeyCode::Char('l') => {
+                            self.start_remote("pull");
+                            true
+                        }
                         _ => true,
                     }
                 }
@@ -374,7 +567,31 @@ impl App {
                 KeyCode::Char('q') => false,
                 _ => true,
             },
-            // Fallback for Commit/Branches: Esc steps back to Dashboard.
+            // Single-line commit input (convention 9): Enter submits, Esc cancels.
+            View::Commit => match key.code {
+                KeyCode::Esc => {
+                    self.cancel_commit();
+                    true
+                }
+                KeyCode::Enter => {
+                    self.submit_commit();
+                    true
+                }
+                KeyCode::Backspace => {
+                    self.commit_message.pop();
+                    true
+                }
+                KeyCode::Char(c)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.commit_message.push(c);
+                    true
+                }
+                _ => true,
+            },
+            // Fallback for Branches: Esc steps back to Dashboard.
             _ => match key.code {
                 KeyCode::Esc => {
                     self.view = View::Dashboard;
@@ -385,6 +602,11 @@ impl App {
             },
         }
     }
+}
+
+/// Render the first 7 hex characters of a commit id for the status line.
+fn short_oid(oid: &git2::Oid) -> String {
+    oid.to_string().chars().take(7).collect()
 }
 
 /// Run the TUI until the user quits (`q` / `Esc` on the dashboard).
@@ -405,15 +627,20 @@ pub async fn run() -> Result<()> {
     run_result.and(restore_result)
 }
 
-/// Blocking event loop: draw a frame, then wait for the next terminal event.
+/// Event loop: draw, wait up to 200ms for input, then drain background
+/// push/pull progress so the status line stays live during remote ops
+/// (convention 1: the UI never blocks on an in-flight operation).
 fn event_loop(terminal: &mut Tui, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|f| crate::ui::render(f, app))?;
-        if let Event::Key(key) = event::read()? {
-            if !app.handle_key(key) {
-                return Ok(());
+        if event::poll(Duration::from_millis(200))? {
+            if let Event::Key(key) = event::read()? {
+                if !app.handle_key(key) {
+                    return Ok(());
+                }
             }
         }
+        app.poll_remote();
     }
 }
 
