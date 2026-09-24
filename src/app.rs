@@ -1033,17 +1033,12 @@ impl App {
     /// later subtasks; Esc steps back one level.
     fn handle_repo_key(&mut self, key: KeyEvent) -> bool {
         if self.show_discard_confirm {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.confirm_discard();
-                    true
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.cancel_discard();
-                    true
-                }
-                _ => true,
+            match confirm_modal_key(key) {
+                ConfirmOutcome::Yes => self.confirm_discard(),
+                ConfirmOutcome::No => self.cancel_discard(),
+                ConfirmOutcome::Ignored => {}
             }
+            true
         } else {
             match key.code {
                 KeyCode::Esc => {
@@ -1119,71 +1114,35 @@ impl App {
     /// Key handler for the single-line commit input (convention 9): Enter
     /// submits, Esc cancels.
     fn handle_commit_key(&mut self, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Esc => {
-                self.cancel_commit();
-                true
-            }
-            KeyCode::Enter => {
-                self.submit_commit();
-                true
-            }
-            KeyCode::Backspace => {
-                self.commit_message.pop();
-                true
-            }
-            KeyCode::Char(c)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                self.commit_message.push(c);
-                true
-            }
-            _ => true,
+        match input_modal_key(key, &mut self.commit_message) {
+            InputOutcome::Cancel => self.cancel_commit(),
+            InputOutcome::Submit => self.submit_commit(),
+            InputOutcome::Consumed => {}
         }
+        true
     }
 
     /// Key handler for the branch panel: modal input / delete-confirm take
     /// precedence over list navigation; Esc returns to the view it was
     /// opened from.
     fn handle_branches_key(&mut self, key: KeyEvent) -> bool {
+        // The input overlay and the delete confirm are mutually exclusive
+        // (`start_branch_*` always clears the other flag); the input is
+        // checked first, matching the config panel.
         if self.show_branch_input {
-            match key.code {
-                KeyCode::Esc => {
-                    self.cancel_branch_create();
-                    true
-                }
-                KeyCode::Enter => {
-                    self.submit_branch_create();
-                    true
-                }
-                KeyCode::Backspace => {
-                    self.branch_input.pop();
-                    true
-                }
-                KeyCode::Char(c)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    self.branch_input.push(c);
-                    true
-                }
-                _ => true,
+            match input_modal_key(key, &mut self.branch_input) {
+                InputOutcome::Cancel => self.cancel_branch_create(),
+                InputOutcome::Submit => self.submit_branch_create(),
+                InputOutcome::Consumed => {}
             }
+            true
         } else if self.show_branch_delete_confirm {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.confirm_branch_delete();
-                    true
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.cancel_branch_delete();
-                    true
-                }
-                _ => true,
+            match confirm_modal_key(key) {
+                ConfirmOutcome::Yes => self.confirm_branch_delete(),
+                ConfirmOutcome::No => self.cancel_branch_delete(),
+                ConfirmOutcome::Ignored => {}
             }
+            true
         } else {
             match key.code {
                 KeyCode::Esc => {
@@ -1224,42 +1183,23 @@ impl App {
     /// precedence over list navigation; Esc returns to the dashboard, q
     /// exits the program.
     fn handle_config_key(&mut self, key: KeyEvent) -> bool {
-        if self.show_config_delete_confirm {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.confirm_config_delete();
-                    true
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.cancel_config_delete();
-                    true
-                }
-                _ => true,
+        // The input overlay and the delete confirm are mutually exclusive
+        // (`start_config_*` always clears the other flag); the input is
+        // checked first, matching the branch panel.
+        if self.show_config_input {
+            match input_modal_key(key, &mut self.config_input) {
+                InputOutcome::Cancel => self.cancel_config_add(),
+                InputOutcome::Submit => self.submit_config_add(),
+                InputOutcome::Consumed => {}
             }
-        } else if self.show_config_input {
-            match key.code {
-                KeyCode::Esc => {
-                    self.cancel_config_add();
-                    true
-                }
-                KeyCode::Enter => {
-                    self.submit_config_add();
-                    true
-                }
-                KeyCode::Backspace => {
-                    self.config_input.pop();
-                    true
-                }
-                KeyCode::Char(c)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    self.config_input.push(c);
-                    true
-                }
-                _ => true,
+            true
+        } else if self.show_config_delete_confirm {
+            match confirm_modal_key(key) {
+                ConfirmOutcome::Yes => self.confirm_config_delete(),
+                ConfirmOutcome::No => self.cancel_config_delete(),
+                ConfirmOutcome::Ignored => {}
             }
+            true
         } else {
             match key.code {
                 KeyCode::Esc => {
@@ -1304,6 +1244,62 @@ fn move_selection(state: &mut ListState, len: usize, down: bool) {
         state.selected().map_or(0, |i| i.saturating_sub(1))
     };
     state.select(Some(next));
+}
+
+/// Outcome of routing one key press through [`input_modal_key`].
+enum InputOutcome {
+    /// Esc: the caller cancels the overlay.
+    Cancel,
+    /// Enter: the caller submits the overlay.
+    Submit,
+    /// The key was consumed editing the buffer (or swallowed): the modal
+    /// stays open and the caller does nothing further.
+    Consumed,
+}
+
+/// Route one key press through the shared single-line input modal
+/// (convention 9): Esc cancels, Enter submits; Backspace and plain
+/// characters edit `buf` in place, while control/alt chords and any other
+/// key are swallowed. Every key is consumed while the modal is open.
+fn input_modal_key(key: KeyEvent, buf: &mut String) -> InputOutcome {
+    match key.code {
+        KeyCode::Esc => InputOutcome::Cancel,
+        KeyCode::Enter => InputOutcome::Submit,
+        KeyCode::Backspace => {
+            buf.pop();
+            InputOutcome::Consumed
+        }
+        KeyCode::Char(c)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            buf.push(c);
+            InputOutcome::Consumed
+        }
+        _ => InputOutcome::Consumed,
+    }
+}
+
+/// Outcome of routing one key press through [`confirm_modal_key`].
+enum ConfirmOutcome {
+    /// y/Y: the caller runs the confirmed action.
+    Yes,
+    /// n/N/Esc: the caller dismisses the dialog.
+    No,
+    /// Any other key, swallowed while the dialog is open.
+    Ignored,
+}
+
+/// Route one key press through the shared y/n confirmation modal
+/// (discard-style, convention 8): y/Y confirms, n/N/Esc cancels, and every
+/// other key is swallowed while the dialog is open.
+fn confirm_modal_key(key: KeyEvent) -> ConfirmOutcome {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => ConfirmOutcome::Yes,
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => ConfirmOutcome::No,
+        _ => ConfirmOutcome::Ignored,
+    }
 }
 
 /// Render the first 7 hex characters of a commit id for the status line.
