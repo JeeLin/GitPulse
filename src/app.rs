@@ -980,158 +980,210 @@ impl App {
             return true;
         }
         match self.view {
-            View::Dashboard => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => false,
+            View::Dashboard => self.handle_dashboard_key(key),
+            View::Repo => self.handle_repo_key(key),
+            View::Diff => self.handle_diff_key(key),
+            View::Commit => self.handle_commit_key(key),
+            View::Branches => self.handle_branches_key(key),
+            View::Config => self.handle_config_key(key),
+        }
+    }
+
+    /// Key handler for the dashboard: list navigation and view entry points.
+    fn handle_dashboard_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => false,
+            KeyCode::Char('j') | KeyCode::Down => {
+                if !self.repos.is_empty() {
+                    let next = self
+                        .dashboard_state
+                        .selected()
+                        .map_or(0, |i| i.saturating_add(1).min(self.repos.len() - 1));
+                    self.dashboard_state.select(Some(next));
+                }
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if !self.repos.is_empty() {
+                    let prev = self
+                        .dashboard_state
+                        .selected()
+                        .map_or(0, |i| i.saturating_sub(1));
+                    self.dashboard_state.select(Some(prev));
+                }
+                true
+            }
+            KeyCode::Char('r') => {
+                self.refresh_repos();
+                true
+            }
+            KeyCode::Char('l') => {
+                self.start_batch("pull");
+                true
+            }
+            KeyCode::Char('f') => {
+                self.start_batch("fetch");
+                true
+            }
+            KeyCode::Char('b') => {
+                self.enter_branches();
+                true
+            }
+            KeyCode::Char('c') => {
+                self.enter_config();
+                true
+            }
+            KeyCode::Enter => {
+                self.enter_repo();
+                true
+            }
+            _ => true,
+        }
+    }
+
+    /// Key handler for the single-repo view. Entered from the dashboard by
+    /// later subtasks; Esc steps back one level.
+    fn handle_repo_key(&mut self, key: KeyEvent) -> bool {
+        if self.show_discard_confirm {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.confirm_discard();
+                    true
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.cancel_discard();
+                    true
+                }
+                _ => true,
+            }
+        } else {
+            match key.code {
+                KeyCode::Esc => {
+                    self.view = View::Dashboard;
+                    true
+                }
+                KeyCode::Char('q') => false,
                 KeyCode::Char('j') | KeyCode::Down => {
-                    if !self.repos.is_empty() {
+                    if !self.file_entries.is_empty() {
                         let next = self
-                            .dashboard_state
+                            .file_state
                             .selected()
-                            .map_or(0, |i| i.saturating_add(1).min(self.repos.len() - 1));
-                        self.dashboard_state.select(Some(next));
+                            .map_or(0, |i| i.saturating_add(1).min(self.file_entries.len() - 1));
+                        self.file_state.select(Some(next));
                     }
                     true
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    if !self.repos.is_empty() {
+                    if !self.file_entries.is_empty() {
                         let prev = self
-                            .dashboard_state
+                            .file_state
                             .selected()
                             .map_or(0, |i| i.saturating_sub(1));
-                        self.dashboard_state.select(Some(prev));
+                        self.file_state.select(Some(prev));
                     }
                     true
                 }
-                KeyCode::Char('r') => {
-                    self.refresh_repos();
+                KeyCode::Char('d') => {
+                    self.view_file_diff();
+                    true
+                }
+                KeyCode::Char('s') => {
+                    self.stage_current();
+                    true
+                }
+                KeyCode::Char('u') => {
+                    self.unstage_current();
+                    true
+                }
+                KeyCode::Char('x') => {
+                    self.start_discard();
+                    true
+                }
+                KeyCode::Char('c') => {
+                    self.open_commit();
+                    true
+                }
+                KeyCode::Char('p') => {
+                    self.start_remote("push");
                     true
                 }
                 KeyCode::Char('l') => {
-                    self.start_batch("pull");
-                    true
-                }
-                KeyCode::Char('f') => {
-                    self.start_batch("fetch");
+                    self.start_remote("pull");
                     true
                 }
                 KeyCode::Char('b') => {
                     self.enter_branches();
                     true
                 }
-                KeyCode::Char('c') => {
-                    self.enter_config();
-                    true
-                }
-                KeyCode::Enter => {
-                    self.enter_repo();
-                    true
-                }
                 _ => true,
-            },
-            // Entered from the dashboard by later subtasks; Esc steps back one level.
-            View::Repo => {
-                if self.show_discard_confirm {
-                    match key.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            self.confirm_discard();
-                            true
-                        }
-                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                            self.cancel_discard();
-                            true
-                        }
-                        _ => true,
-                    }
-                } else {
-                    match key.code {
-                        KeyCode::Esc => {
-                            self.view = View::Dashboard;
-                            true
-                        }
-                        KeyCode::Char('q') => false,
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            if !self.file_entries.is_empty() {
-                                let next = self.file_state.selected().map_or(0, |i| {
-                                    i.saturating_add(1).min(self.file_entries.len() - 1)
-                                });
-                                self.file_state.select(Some(next));
-                            }
-                            true
-                        }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            if !self.file_entries.is_empty() {
-                                let prev = self
-                                    .file_state
-                                    .selected()
-                                    .map_or(0, |i| i.saturating_sub(1));
-                                self.file_state.select(Some(prev));
-                            }
-                            true
-                        }
-                        KeyCode::Char('d') => {
-                            self.view_file_diff();
-                            true
-                        }
-                        KeyCode::Char('s') => {
-                            self.stage_current();
-                            true
-                        }
-                        KeyCode::Char('u') => {
-                            self.unstage_current();
-                            true
-                        }
-                        KeyCode::Char('x') => {
-                            self.start_discard();
-                            true
-                        }
-                        KeyCode::Char('c') => {
-                            self.open_commit();
-                            true
-                        }
-                        KeyCode::Char('p') => {
-                            self.start_remote("push");
-                            true
-                        }
-                        KeyCode::Char('l') => {
-                            self.start_remote("pull");
-                            true
-                        }
-                        KeyCode::Char('b') => {
-                            self.enter_branches();
-                            true
-                        }
-                        _ => true,
-                    }
-                }
             }
-            View::Diff => match key.code {
+        }
+    }
+
+    /// Key handler for the diff viewer: vertical scroll and exit.
+    fn handle_diff_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.view = View::Repo;
+                true
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.diff_scroll = self.diff_scroll.saturating_add(1);
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.diff_scroll = self.diff_scroll.saturating_sub(1);
+                true
+            }
+            KeyCode::Char('q') => false,
+            _ => true,
+        }
+    }
+
+    /// Key handler for the single-line commit input (convention 9): Enter
+    /// submits, Esc cancels.
+    fn handle_commit_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.cancel_commit();
+                true
+            }
+            KeyCode::Enter => {
+                self.submit_commit();
+                true
+            }
+            KeyCode::Backspace => {
+                self.commit_message.pop();
+                true
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.commit_message.push(c);
+                true
+            }
+            _ => true,
+        }
+    }
+
+    /// Key handler for the branch panel: modal input / delete-confirm take
+    /// precedence over list navigation; Esc returns to the view it was
+    /// opened from.
+    fn handle_branches_key(&mut self, key: KeyEvent) -> bool {
+        if self.show_branch_input {
+            match key.code {
                 KeyCode::Esc => {
-                    self.view = View::Repo;
-                    true
-                }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    self.diff_scroll = self.diff_scroll.saturating_add(1);
-                    true
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    self.diff_scroll = self.diff_scroll.saturating_sub(1);
-                    true
-                }
-                KeyCode::Char('q') => false,
-                _ => true,
-            },
-            // Single-line commit input (convention 9): Enter submits, Esc cancels.
-            View::Commit => match key.code {
-                KeyCode::Esc => {
-                    self.cancel_commit();
+                    self.cancel_branch_create();
                     true
                 }
                 KeyCode::Enter => {
-                    self.submit_commit();
+                    self.submit_branch_create();
                     true
                 }
                 KeyCode::Backspace => {
-                    self.commit_message.pop();
+                    self.branch_input.pop();
                     true
                 }
                 KeyCode::Char(c)
@@ -1139,173 +1191,146 @@ impl App {
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
-                    self.commit_message.push(c);
+                    self.branch_input.push(c);
                     true
                 }
                 _ => true,
-            },
-            // Branch panel: modal input / delete-confirm take precedence over
-            // list navigation; Esc returns to the view it was opened from.
-            View::Branches => {
-                if self.show_branch_input {
-                    match key.code {
-                        KeyCode::Esc => {
-                            self.cancel_branch_create();
-                            true
-                        }
-                        KeyCode::Enter => {
-                            self.submit_branch_create();
-                            true
-                        }
-                        KeyCode::Backspace => {
-                            self.branch_input.pop();
-                            true
-                        }
-                        KeyCode::Char(c)
-                            if !key
-                                .modifiers
-                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                        {
-                            self.branch_input.push(c);
-                            true
-                        }
-                        _ => true,
-                    }
-                } else if self.show_branch_delete_confirm {
-                    match key.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            self.confirm_branch_delete();
-                            true
-                        }
-                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                            self.cancel_branch_delete();
-                            true
-                        }
-                        _ => true,
-                    }
-                } else {
-                    match key.code {
-                        KeyCode::Esc => {
-                            self.leave_branches();
-                            true
-                        }
-                        KeyCode::Char('q') => false,
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            if !self.branches.is_empty() {
-                                let next = self.branch_state.selected().map_or(0, |i| {
-                                    i.saturating_add(1).min(self.branches.len() - 1)
-                                });
-                                self.branch_state.select(Some(next));
-                            }
-                            true
-                        }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            if !self.branches.is_empty() {
-                                let prev = self
-                                    .branch_state
-                                    .selected()
-                                    .map_or(0, |i| i.saturating_sub(1));
-                                self.branch_state.select(Some(prev));
-                            }
-                            true
-                        }
-                        KeyCode::Enter => {
-                            self.switch_to_selected_branch();
-                            true
-                        }
-                        KeyCode::Char('n') => {
-                            self.start_branch_create();
-                            true
-                        }
-                        KeyCode::Char('d') => {
-                            self.start_branch_delete();
-                            true
-                        }
-                        KeyCode::Char('r') => {
-                            self.load_branches();
-                            true
-                        }
-                        _ => true,
-                    }
-                }
             }
-            // Config panel: modal input / delete-confirm take precedence over
-            // list navigation; Esc returns to the dashboard, q exits the
-            // program.
-            View::Config => {
-                if self.show_config_delete_confirm {
-                    match key.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            self.confirm_config_delete();
-                            true
-                        }
-                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                            self.cancel_config_delete();
-                            true
-                        }
-                        _ => true,
-                    }
-                } else if self.show_config_input {
-                    match key.code {
-                        KeyCode::Esc => {
-                            self.cancel_config_add();
-                            true
-                        }
-                        KeyCode::Enter => {
-                            self.submit_config_add();
-                            true
-                        }
-                        KeyCode::Backspace => {
-                            self.config_input.pop();
-                            true
-                        }
-                        KeyCode::Char(c)
-                            if !key
-                                .modifiers
-                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                        {
-                            self.config_input.push(c);
-                            true
-                        }
-                        _ => true,
-                    }
-                } else {
-                    match key.code {
-                        KeyCode::Esc => {
-                            self.leave_config();
-                            true
-                        }
-                        KeyCode::Char('q') => false,
-                        KeyCode::Char('a') => {
-                            self.start_config_add();
-                            true
-                        }
-                        KeyCode::Char('d') => {
-                            self.start_config_delete();
-                            true
-                        }
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            if !self.config.scan_dirs.is_empty() {
-                                let next = self.config_state.selected().map_or(0, |i| {
-                                    i.saturating_add(1).min(self.config.scan_dirs.len() - 1)
-                                });
-                                self.config_state.select(Some(next));
-                            }
-                            true
-                        }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            if !self.config.scan_dirs.is_empty() {
-                                let prev = self
-                                    .config_state
-                                    .selected()
-                                    .map_or(0, |i| i.saturating_sub(1));
-                                self.config_state.select(Some(prev));
-                            }
-                            true
-                        }
-                        _ => true,
-                    }
+        } else if self.show_branch_delete_confirm {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.confirm_branch_delete();
+                    true
                 }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.cancel_branch_delete();
+                    true
+                }
+                _ => true,
+            }
+        } else {
+            match key.code {
+                KeyCode::Esc => {
+                    self.leave_branches();
+                    true
+                }
+                KeyCode::Char('q') => false,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if !self.branches.is_empty() {
+                        let next = self
+                            .branch_state
+                            .selected()
+                            .map_or(0, |i| i.saturating_add(1).min(self.branches.len() - 1));
+                        self.branch_state.select(Some(next));
+                    }
+                    true
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if !self.branches.is_empty() {
+                        let prev = self
+                            .branch_state
+                            .selected()
+                            .map_or(0, |i| i.saturating_sub(1));
+                        self.branch_state.select(Some(prev));
+                    }
+                    true
+                }
+                KeyCode::Enter => {
+                    self.switch_to_selected_branch();
+                    true
+                }
+                KeyCode::Char('n') => {
+                    self.start_branch_create();
+                    true
+                }
+                KeyCode::Char('d') => {
+                    self.start_branch_delete();
+                    true
+                }
+                KeyCode::Char('r') => {
+                    self.load_branches();
+                    true
+                }
+                _ => true,
+            }
+        }
+    }
+
+    /// Key handler for the config panel: modal input / delete-confirm take
+    /// precedence over list navigation; Esc returns to the dashboard, q
+    /// exits the program.
+    fn handle_config_key(&mut self, key: KeyEvent) -> bool {
+        if self.show_config_delete_confirm {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.confirm_config_delete();
+                    true
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.cancel_config_delete();
+                    true
+                }
+                _ => true,
+            }
+        } else if self.show_config_input {
+            match key.code {
+                KeyCode::Esc => {
+                    self.cancel_config_add();
+                    true
+                }
+                KeyCode::Enter => {
+                    self.submit_config_add();
+                    true
+                }
+                KeyCode::Backspace => {
+                    self.config_input.pop();
+                    true
+                }
+                KeyCode::Char(c)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.config_input.push(c);
+                    true
+                }
+                _ => true,
+            }
+        } else {
+            match key.code {
+                KeyCode::Esc => {
+                    self.leave_config();
+                    true
+                }
+                KeyCode::Char('q') => false,
+                KeyCode::Char('a') => {
+                    self.start_config_add();
+                    true
+                }
+                KeyCode::Char('d') => {
+                    self.start_config_delete();
+                    true
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if !self.config.scan_dirs.is_empty() {
+                        let next = self.config_state.selected().map_or(0, |i| {
+                            i.saturating_add(1).min(self.config.scan_dirs.len() - 1)
+                        });
+                        self.config_state.select(Some(next));
+                    }
+                    true
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if !self.config.scan_dirs.is_empty() {
+                        let prev = self
+                            .config_state
+                            .selected()
+                            .map_or(0, |i| i.saturating_sub(1));
+                        self.config_state.select(Some(prev));
+                    }
+                    true
+                }
+                _ => true,
             }
         }
     }
