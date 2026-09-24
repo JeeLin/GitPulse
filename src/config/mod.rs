@@ -5,7 +5,7 @@
 mod path;
 mod types;
 
-pub use path::config_path;
+pub use path::{config_path, home_dir};
 pub use types::Config;
 
 use std::fs;

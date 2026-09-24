@@ -1,6 +1,6 @@
 //! Scan-dir configuration panel: `scan_dirs` list with add/delete overlays.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -28,13 +28,21 @@ pub struct ConfigState<'a> {
     pub input: &'a str,
     /// Whether the delete-scan-dir confirmation overlay is shown.
     pub show_delete_confirm: bool,
+    /// Whether the interactive directory picker overlay is shown.
+    pub show_picker: bool,
+    /// Directory currently browsed by the picker (path line).
+    pub picker_dir: &'a Path,
+    /// Subdirectories listed by the picker (row 0 is "select current").
+    pub picker_entries: &'a [PathBuf],
+    /// Selection cursor for the picker list.
+    pub picker_state: &'a mut ListState,
 }
 
 /// Render the scan-dir list with the bottom status line and key hints, plus
-/// the add-scan-dir input overlay when active.
+/// the add-scan-dir overlays (directory picker or manual input) when active.
 ///
-/// While the input is open the bottom hints switch to `Enter 确认 / Esc 取消`;
-/// the delete confirmation renders a `y/n` overlay over the list.
+/// While an overlay is open the bottom hints switch to its keys; the delete
+/// confirmation renders a `y/n` overlay over the list.
 pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
     let area = f.area();
     let chunks = Layout::default()
@@ -50,8 +58,22 @@ pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
 
     super::render_status_line(f, chunks[1], state.status);
 
-    f.render_widget(Paragraph::new(key_hints(state.show_input)), chunks[2]);
+    f.render_widget(
+        Paragraph::new(key_hints(state.show_picker, state.show_input)),
+        chunks[2],
+    );
 
+    // The picker renders inside the list area so the status line and key
+    // hints stay visible while browsing (errors surface there).
+    if state.show_picker {
+        render_dir_picker(
+            f,
+            chunks[0],
+            state.picker_dir,
+            state.picker_entries,
+            state.picker_state,
+        );
+    }
     if state.show_input {
         render_add_input(f, area, state.input);
     }
@@ -64,9 +86,23 @@ pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
     }
 }
 
-/// Bottom key-hint row: list navigation normally, submit/cancel in input mode.
-fn key_hints(input_open: bool) -> Line<'static> {
-    if input_open {
+/// Bottom key-hint row: picker keys while browsing, submit/cancel while
+/// typing, list navigation otherwise.
+fn key_hints(picker_open: bool, input_open: bool) -> Line<'static> {
+    if picker_open {
+        Line::from(vec![
+            Span::styled("j/k", Style::default().fg(Color::Cyan)),
+            Span::raw(" 移动  "),
+            Span::styled("Enter", Style::default().fg(Color::Cyan)),
+            Span::raw(" 选择  "),
+            Span::styled("l/h", Style::default().fg(Color::Cyan)),
+            Span::raw(" 进入/上级  "),
+            Span::styled("i", Style::default().fg(Color::Cyan)),
+            Span::raw(" 手动  "),
+            Span::styled("Esc", Style::default().fg(Color::Cyan)),
+            Span::raw(" 取消"),
+        ])
+    } else if input_open {
         Line::from(vec![
             Span::styled("Enter", Style::default().fg(Color::Cyan)),
             Span::raw(" 确认  "),
@@ -79,6 +115,8 @@ fn key_hints(input_open: bool) -> Line<'static> {
             Span::raw(" 选择  "),
             Span::styled("a", Style::default().fg(Color::Cyan)),
             Span::raw(" 添加  "),
+            Span::styled("i", Style::default().fg(Color::Cyan)),
+            Span::raw(" 手动  "),
             Span::styled("d", Style::default().fg(Color::Cyan)),
             Span::raw(" 删除  "),
             Span::styled("Esc", Style::default().fg(Color::Cyan)),
@@ -100,6 +138,87 @@ fn render_add_input(f: &mut Frame, area: Rect, input: &str) {
         Span::styled("▌", Style::default().fg(Color::Cyan)),
     ]);
     f.render_widget(Paragraph::new(line).block(block), popup_area);
+}
+
+/// Interactive directory browser overlay: the current path on the first row,
+/// then a virtual "select current directory" row plus each subdirectory.
+/// Row 0 / highlighted subdirectory are what Enter submits; the list scrolls
+/// with the cursor.
+fn render_dir_picker(
+    f: &mut Frame,
+    area: Rect,
+    dir: &Path,
+    entries: &[PathBuf],
+    list_state: &mut ListState,
+) {
+    // Fit the popup to small terminals instead of overflowing the frame.
+    let height = area.height.saturating_sub(4).clamp(6, 16).min(area.height);
+    let popup_area = centered_rect(70, height, area);
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(format!("选择扫描目录 ({})", entries.len()))
+        .borders(Borders::ALL);
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
+
+    // Path line, truncated so long paths stay on one row (char count ≈
+    // columns for ASCII paths; CJK segments are clipped by the paragraph).
+    let path = ellipsize(&dir.display().to_string(), inner.width as usize);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            path,
+            Style::default().fg(Color::Yellow),
+        ))),
+        rows[0],
+    );
+
+    let mut items = vec![ListItem::new(Line::from(vec![
+        Span::styled("↳ ", Style::default().fg(Color::Cyan)),
+        Span::raw("选择当前目录"),
+    ]))];
+    items.extend(entries.iter().map(|entry| {
+        let name = entry
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| entry.display().to_string());
+        ListItem::new(Line::from(format!("{name}/")))
+    }));
+
+    let list = List::new(items)
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("► ");
+    f.render_stateful_widget(list, rows[1], list_state);
+}
+
+/// Shorten `text` to at most `max` characters around a middle ellipsis, so
+/// long directory paths remain readable on a single line.
+fn ellipsize(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        return text.to_string();
+    }
+    if max <= 1 {
+        return "…".to_string();
+    }
+    let head = (max - 1) / 2;
+    let tail = max - 1 - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(chars[chars.len() - tail..].iter());
+    out
 }
 
 /// Delete confirmation overlay (discard-style, convention 8): y confirms,
@@ -175,6 +294,27 @@ mod tests {
         raw.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
+    /// Base render state: list mode, no overlays; picker fields inert.
+    fn base_state<'a>(
+        scan_dirs: &'a [PathBuf],
+        status: Option<&'a StatusLine>,
+        list_state: &'a mut ListState,
+        picker_state: &'a mut ListState,
+    ) -> ConfigState<'a> {
+        ConfigState {
+            scan_dirs,
+            status,
+            list_state,
+            show_input: false,
+            input: "",
+            show_delete_confirm: false,
+            show_picker: false,
+            picker_dir: Path::new(""),
+            picker_entries: &[],
+            picker_state,
+        }
+    }
+
     #[test]
     fn render_list_shows_title_dirs_and_hints() {
         let dirs = vec![
@@ -183,14 +323,8 @@ mod tests {
         ];
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let text = render_to_text(ConfigState {
-            scan_dirs: &dirs,
-            status: None,
-            list_state: &mut list_state,
-            show_input: false,
-            input: "",
-            show_delete_confirm: false,
-        });
+        let mut picker_state = ListState::default();
+        let text = render_to_text(base_state(&dirs, None, &mut list_state, &mut picker_state));
         assert!(text.contains("扫描目录配置(2)"), "missing title: {text}");
         assert!(
             text.contains("/home/user/repos"),
@@ -199,6 +333,7 @@ mod tests {
         assert!(text.contains("/opt/projects"), "missing second dir: {text}");
         assert!(text.contains("j/k选择"), "missing nav hint: {text}");
         assert!(text.contains("a添加"), "missing add hint: {text}");
+        assert!(text.contains("i手动"), "missing manual hint: {text}");
         assert!(text.contains("d删除"), "missing delete hint: {text}");
         assert!(text.contains("Esc返回"), "missing back hint: {text}");
     }
@@ -206,14 +341,8 @@ mod tests {
     #[test]
     fn render_empty_list_keeps_title_and_hints() {
         let mut list_state = ListState::default();
-        let text = render_to_text(ConfigState {
-            scan_dirs: &[],
-            status: None,
-            list_state: &mut list_state,
-            show_input: false,
-            input: "",
-            show_delete_confirm: false,
-        });
+        let mut picker_state = ListState::default();
+        let text = render_to_text(base_state(&[], None, &mut list_state, &mut picker_state));
         assert!(text.contains("扫描目录配置(0)"), "missing title: {text}");
         assert!(text.contains("Esc返回"), "missing back hint: {text}");
     }
@@ -225,14 +354,13 @@ mod tests {
             is_error: true,
         };
         let mut list_state = ListState::default();
-        let text = render_to_text(ConfigState {
-            scan_dirs: &[],
-            status: Some(&status),
-            list_state: &mut list_state,
-            show_input: false,
-            input: "",
-            show_delete_confirm: false,
-        });
+        let mut picker_state = ListState::default();
+        let text = render_to_text(base_state(
+            &[],
+            Some(&status),
+            &mut list_state,
+            &mut picker_state,
+        ));
         assert!(text.contains("目录不能为空"), "missing error: {text}");
     }
 
@@ -241,14 +369,11 @@ mod tests {
         let dirs = vec![PathBuf::from("/a")];
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let text = render_to_text(ConfigState {
-            scan_dirs: &dirs,
-            status: None,
-            list_state: &mut list_state,
-            show_input: true,
-            input: "/home/user",
-            show_delete_confirm: false,
-        });
+        let mut picker_state = ListState::default();
+        let mut state = base_state(&dirs, None, &mut list_state, &mut picker_state);
+        state.show_input = true;
+        state.input = "/home/user";
+        let text = render_to_text(state);
         assert!(text.contains("添加扫描目录"), "missing title: {text}");
         assert!(text.contains(">/home/user"), "missing input: {text}");
         assert!(text.contains("▌"), "missing cursor: {text}");
@@ -263,14 +388,10 @@ mod tests {
         let dirs = vec![PathBuf::from("/home/user/repos")];
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let text = render_to_text(ConfigState {
-            scan_dirs: &dirs,
-            status: None,
-            list_state: &mut list_state,
-            show_input: false,
-            input: "",
-            show_delete_confirm: true,
-        });
+        let mut picker_state = ListState::default();
+        let mut state = base_state(&dirs, None, &mut list_state, &mut picker_state);
+        state.show_delete_confirm = true;
+        let text = render_to_text(state);
         assert!(text.contains("移除该目录"), "missing prompt: {text}");
         assert!(
             text.contains("/home/user/repos"),
@@ -278,5 +399,62 @@ mod tests {
         );
         assert!(text.contains("y确认"), "missing confirm key: {text}");
         assert!(text.contains("n取消"), "missing cancel key: {text}");
+    }
+
+    #[test]
+    fn render_dir_picker_shows_path_rows_and_hints() {
+        let dirs = vec![PathBuf::from("/a")];
+        let mut list_state = ListState::default();
+        let mut picker_state = ListState::default();
+        picker_state.select(Some(1));
+        let entries = vec![
+            PathBuf::from("/home/user/code"),
+            PathBuf::from("/home/user/docs"),
+        ];
+        let mut state = base_state(&dirs, None, &mut list_state, &mut picker_state);
+        state.show_picker = true;
+        state.picker_dir = Path::new("/home/user");
+        state.picker_entries = &entries;
+        let text = render_to_text(state);
+        assert!(text.contains("选择扫描目录(2)"), "missing title: {text}");
+        assert!(text.contains("↳选择当前目录"), "missing select row: {text}");
+        assert!(text.contains("code/"), "missing subdir row: {text}");
+        assert!(text.contains("docs/"), "missing subdir row: {text}");
+        assert!(text.contains("►"), "missing highlight: {text}");
+        assert!(text.contains("/home/user"), "missing path line: {text}");
+        assert!(text.contains("j/k移动"), "missing move hint: {text}");
+        assert!(text.contains("Enter选择"), "missing select hint: {text}");
+        assert!(text.contains("l/h进入/上级"), "missing nav hint: {text}");
+        assert!(text.contains("i手动"), "missing manual hint: {text}");
+        assert!(text.contains("Esc取消"), "missing cancel hint: {text}");
+        // The list hints are replaced while browsing.
+        assert!(!text.contains("j/k选择"), "list hints leaked: {text}");
+        assert!(!text.contains("d删除"), "list hints leaked: {text}");
+    }
+
+    #[test]
+    fn render_dir_picker_truncates_long_paths() {
+        let long = format!("/{}", vec!["segment"; 40].join("/"));
+        assert!(long.chars().count() > 40, "fixture must be long");
+        let dirs = vec![PathBuf::from("/a")];
+        let mut list_state = ListState::default();
+        let mut picker_state = ListState::default();
+        picker_state.select(Some(0));
+        let mut state = base_state(&dirs, None, &mut list_state, &mut picker_state);
+        state.show_picker = true;
+        state.picker_dir = Path::new(&long);
+        let text = render_to_text(state);
+        assert!(text.contains('…'), "missing ellipsis: {text}");
+        assert!(!text.contains(&long), "full path must be truncated: {text}");
+    }
+
+    #[test]
+    fn ellipsize_keeps_short_text_and_heads_tails_long_text() {
+        assert_eq!(ellipsize("abc", 10), "abc");
+        let long = "a".repeat(20);
+        let out = ellipsize(&long, 9);
+        assert_eq!(out.chars().count(), 9, "must fit: {out}");
+        assert!(out.contains('…'), "missing ellipsis: {out}");
+        assert_eq!(ellipsize("xy", 1), "…");
     }
 }

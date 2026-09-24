@@ -118,6 +118,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 show_input: app.show_config_input,
                 input: &app.config_input,
                 show_delete_confirm: app.show_config_delete_confirm,
+                show_picker: app.show_config_picker,
+                picker_dir: &app.picker_dir,
+                picker_entries: &app.picker_entries,
+                picker_state: &mut app.picker_state,
             };
             config::render_config(f, state);
         }
@@ -261,6 +265,7 @@ mod tests {
         );
         assert!(text.contains("j/k选择"), "missing nav hint: {text}");
         assert!(text.contains("a添加"), "missing add hint: {text}");
+        assert!(text.contains("i手动"), "missing manual hint: {text}");
         assert!(text.contains("d删除"), "missing delete hint: {text}");
         assert!(text.contains("Esc返回"), "missing back hint: {text}");
     }
@@ -291,5 +296,22 @@ mod tests {
         assert!(text.contains("移除该目录"), "missing prompt: {text}");
         assert!(text.contains("y确认"), "missing confirm key: {text}");
         assert!(text.contains("n取消"), "missing cancel key: {text}");
+    }
+
+    #[test]
+    fn config_view_picker_overlay_renders_via_dispatch() {
+        let mut app = base_app();
+        app.view = View::Config;
+        app.show_config_picker = true;
+        app.picker_dir = std::path::PathBuf::from("/home/user");
+        app.picker_entries = vec![std::path::PathBuf::from("/home/user/code")];
+        app.picker_state.select(Some(1));
+        let text = render_compact(&mut app);
+        assert!(text.contains("选择扫描目录"), "missing title: {text}");
+        assert!(text.contains("↳选择当前目录"), "missing select row: {text}");
+        assert!(text.contains("code/"), "missing subdir row: {text}");
+        assert!(text.contains("/home/user"), "missing path line: {text}");
+        assert!(text.contains("Enter选择"), "missing select hint: {text}");
+        assert!(text.contains("Esc取消"), "missing cancel hint: {text}");
     }
 }

@@ -16,6 +16,14 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// The user's home directory, falling back to `/` when it cannot be resolved.
+///
+/// Used as the directory picker's start-dir fallback; like [`config_dir`],
+/// this is the only place that may call `dirs`.
+pub fn home_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -31,6 +39,19 @@ mod tests {
             dir.file_name().and_then(|n| n.to_str()),
             Some(".gitpulse"),
             "unexpected config dir: {}",
+            dir.display()
+        );
+    }
+
+    #[test]
+    fn home_dir_is_absolute_or_root_fallback() {
+        // Serialized with the one-time HOME redirect in `config_io_guard`:
+        // reading HOME while another test calls `set_var` would race.
+        let _io = config_io_guard();
+        let dir = home_dir();
+        assert!(
+            dir.is_absolute(),
+            "home must be absolute: {}",
             dir.display()
         );
     }

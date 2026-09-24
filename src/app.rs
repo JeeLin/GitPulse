@@ -169,6 +169,15 @@ pub struct App {
     pub config_input: String,
     /// Whether the delete-scan-dir confirmation dialog is shown.
     pub show_config_delete_confirm: bool,
+    /// Whether the interactive directory picker overlay is shown.
+    pub show_config_picker: bool,
+    /// Directory currently browsed by the directory picker.
+    pub picker_dir: std::path::PathBuf,
+    /// Subdirectories of `picker_dir`, sorted by name. Row 0 of the picker
+    /// list is a virtual "select current directory" row, not an entry here.
+    pub picker_entries: Vec<std::path::PathBuf>,
+    /// Selection cursor for the directory picker list.
+    pub picker_state: ListState,
 }
 
 impl App {
@@ -204,6 +213,10 @@ impl App {
             show_config_input: false,
             config_input: String::new(),
             show_config_delete_confirm: false,
+            show_config_picker: false,
+            picker_dir: std::path::PathBuf::new(),
+            picker_entries: Vec::new(),
+            picker_state: ListState::default(),
         }
     }
 
@@ -673,24 +686,136 @@ impl App {
     /// Leave the configuration panel back to the dashboard (`Esc`).
     pub fn leave_config(&mut self) {
         self.view = View::Dashboard;
-        self.show_config_input = false;
-        self.config_input.clear();
+        self.cancel_config_add();
         self.show_config_delete_confirm = false;
         self.clear_error();
     }
 
-    /// Open the add-scan-dir input overlay (config panel `a`).
+    /// Open the interactive directory picker overlay (config panel `a`).
+    ///
+    /// Browsing starts at the parent of the first configured scan dir when
+    /// readable, otherwise the home directory, then `/`, so the picker
+    /// always lands somewhere useful on the first open.
     pub fn start_config_add(&mut self) {
+        self.cancel_config_add();
+        self.status = None;
+        self.show_config_picker = true;
+        let start = self.picker_start_dir();
+        self.set_picker_dir(start);
+    }
+
+    /// Open the manual path input overlay (config list / picker `i`).
+    ///
+    /// Kept as a fallback for paths that are awkward to browse to.
+    pub fn start_config_manual(&mut self) {
         self.config_input.clear();
         self.show_config_input = true;
+        self.show_config_picker = false;
         self.show_config_delete_confirm = false;
         self.status = None;
     }
 
-    /// Cancel the add-scan-dir input, discarding the typed path (convention 9).
+    /// Cancel the add-scan-dir overlays (picker and input), discarding the
+    /// typed path and the browse state (convention 9).
     pub fn cancel_config_add(&mut self) {
         self.show_config_input = false;
         self.config_input.clear();
+        self.show_config_picker = false;
+        self.picker_dir = std::path::PathBuf::new();
+        self.picker_entries.clear();
+        self.picker_state.select(None);
+    }
+
+    /// Resolve the directory the picker opens at: the parent of the first
+    /// scan dir when readable, else the home directory, else `/`.
+    fn picker_start_dir(&self) -> std::path::PathBuf {
+        let from_scan = self
+            .config
+            .scan_dirs
+            .first()
+            .and_then(|dir| dir.parent())
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf);
+        from_scan
+            .into_iter()
+            .chain([crate::config::home_dir(), std::path::PathBuf::from("/")])
+            .find(|candidate| std::fs::read_dir(candidate).is_ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("/"))
+    }
+
+    /// Point the picker at `dir` and reload its subdirectory listing.
+    ///
+    /// A read failure keeps the previous listing and reports the reason on
+    /// the status line, so an unreadable directory never looks like an
+    /// empty one (checkpoint 2).
+    fn set_picker_dir(&mut self, dir: std::path::PathBuf) {
+        match read_picker_entries(&dir) {
+            Ok(entries) => {
+                self.picker_dir = dir;
+                self.picker_entries = entries;
+                self.picker_state.select(Some(0));
+                self.clear_error();
+            }
+            Err(err) => self.set_error(format!("无法读取目录 {}: {err}", dir.display())),
+        }
+    }
+
+    /// Number of picker rows: the virtual "select current" row plus each
+    /// subdirectory.
+    fn picker_row_count(&self) -> usize {
+        1 + self.picker_entries.len()
+    }
+
+    /// Subdirectory highlighted in the picker, if any (row 0 is the virtual
+    /// "select current directory" row and yields `None`).
+    fn picker_selected_entry(&self) -> Option<std::path::PathBuf> {
+        let row = self.picker_state.selected()?;
+        if row == 0 {
+            return None;
+        }
+        self.picker_entries.get(row - 1).cloned()
+    }
+
+    /// Enter the highlighted subdirectory (picker `l` / `→`).
+    fn picker_descend(&mut self) {
+        if let Some(target) = self.picker_selected_entry() {
+            self.set_picker_dir(target);
+        }
+    }
+
+    /// Move to the parent directory (picker `h` / `←` / Backspace).
+    ///
+    /// At the filesystem root there is no parent: report that on the status
+    /// line instead of silently ignoring the key.
+    fn picker_ascend(&mut self) {
+        let parent = self
+            .picker_dir
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf);
+        match parent {
+            Some(parent) => self.set_picker_dir(parent),
+            None => self.set_info("已在根目录，无法返回上级"),
+        }
+    }
+
+    /// Submit the picker selection (Enter): row 0 picks the current
+    /// directory, other rows pick the highlighted subdirectory. The path
+    /// still goes through [`App::submit_config_add`] validation; a failure
+    /// keeps the picker open with the error on the status line.
+    fn picker_submit(&mut self) {
+        let path = match self.picker_state.selected() {
+            Some(0) if !self.picker_dir.as_os_str().is_empty() => {
+                self.picker_dir.display().to_string()
+            }
+            Some(row) if row > 0 => match self.picker_entries.get(row - 1) {
+                Some(entry) => entry.display().to_string(),
+                None => return,
+            },
+            _ => return,
+        };
+        self.config_input = path;
+        self.submit_config_add();
     }
 
     /// Validate the typed path, persist it, and rescan (convention 5).
@@ -746,6 +871,7 @@ impl App {
         }
         clamp_selection(&mut self.config_state, self.config.scan_dirs.len());
         self.show_config_input = false;
+        self.show_config_picker = false;
         self.show_config_delete_confirm = true;
     }
 
@@ -1162,10 +1288,13 @@ impl App {
     /// precedence over list navigation; Esc returns to the dashboard, q
     /// exits the program.
     fn handle_config_key(&mut self, key: KeyEvent) -> bool {
-        // The input overlay and the delete confirm are mutually exclusive
-        // (`start_config_*` always clears the other flag); the input is
-        // checked first, matching the branch panel.
-        if self.show_config_input {
+        // The picker / input overlay / delete confirm are mutually exclusive
+        // (`start_config_*` always clears the other flags); the picker is
+        // checked first, then the input, matching the branch panel.
+        if self.show_config_picker {
+            self.handle_config_picker_key(key);
+            true
+        } else if self.show_config_input {
             match input_modal_key(key, &mut self.config_input) {
                 InputOutcome::Cancel => self.cancel_config_add(),
                 InputOutcome::Submit => self.submit_config_add(),
@@ -1190,6 +1319,10 @@ impl App {
                     self.start_config_add();
                     true
                 }
+                KeyCode::Char('i') => {
+                    self.start_config_manual();
+                    true
+                }
                 KeyCode::Char('d') => {
                     self.start_config_delete();
                     true
@@ -1206,6 +1339,43 @@ impl App {
             }
         }
     }
+
+    /// Key handler for the directory picker overlay: list navigation,
+    /// descend/ascend, selection routed through `submit_config_add`, and a
+    /// switch to the manual input. `Esc` cancels; `q` is swallowed (quitting
+    /// stays one Esc away on the list, not mid-browse).
+    fn handle_config_picker_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.cancel_config_add(),
+            KeyCode::Char('i') => self.start_config_manual(),
+            KeyCode::Char('j') | KeyCode::Down => {
+                let len = self.picker_row_count();
+                move_selection(&mut self.picker_state, len, true);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                let len = self.picker_row_count();
+                move_selection(&mut self.picker_state, len, false);
+            }
+            KeyCode::Char('l') | KeyCode::Right => self.picker_descend(),
+            KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => self.picker_ascend(),
+            KeyCode::Enter => self.picker_submit(),
+            _ => {}
+        }
+    }
+}
+
+/// List the subdirectories of `dir`, sorted by name.
+///
+/// Entries that vanish or cannot be inspected mid-read are skipped; only a
+/// failed `read_dir` (missing path, no permission) is reported as an error.
+fn read_picker_entries(dir: &std::path::Path) -> io::Result<Vec<std::path::PathBuf>> {
+    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    entries.sort();
+    Ok(entries)
 }
 
 /// Move the selection in `state` one row within a list of `len` items:
@@ -2028,8 +2198,13 @@ mod tests {
         let mut app = App::new(Config::default());
         app.enter_config();
 
-        // a opens a clean input; keys type and edit the path.
+        // a opens a clean picker; i switches to the manual input, where
+        // keys type and edit the path.
         assert!(app.handle_key(key(KeyCode::Char('a'))));
+        assert!(app.show_config_picker);
+        assert!(!app.show_config_input);
+        assert!(app.handle_key(key(KeyCode::Char('i'))));
+        assert!(!app.show_config_picker);
         assert!(app.show_config_input);
         assert!(app.config_input.is_empty());
         for c in "ab".chars() {
@@ -2045,7 +2220,7 @@ mod tests {
 
         // Empty path: error, input stays open.
         app.cancel_config_add();
-        app.start_config_add();
+        app.start_config_manual();
         app.submit_config_add();
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
@@ -2105,6 +2280,7 @@ mod tests {
         let mut app = App::new(Config::default());
         app.enter_config();
         app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Char('i')));
         for c in dir.display().to_string().chars() {
             app.handle_key(key(KeyCode::Char(c)));
         }
@@ -2130,6 +2306,250 @@ mod tests {
         assert_eq!(st.message, format!("已添加扫描目录: {}", dir.display()));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- config add: interactive directory picker ----------
+
+    /// Temp base directory containing two empty subdirectories (`alpha`,
+    /// `beta`) for the picker to browse.
+    fn picker_base(tag: &str) -> std::path::PathBuf {
+        let base = temp_dir(tag);
+        std::fs::create_dir_all(base.join("alpha")).unwrap();
+        std::fs::create_dir_all(base.join("beta")).unwrap();
+        base
+    }
+
+    #[test]
+    fn read_picker_entries_lists_only_directories_sorted() {
+        let base = temp_dir("picker-list");
+        std::fs::create_dir_all(base.join("b")).unwrap();
+        std::fs::create_dir_all(base.join("a")).unwrap();
+        std::fs::write(base.join("file.txt"), "x").unwrap();
+        let entries = read_picker_entries(&base).unwrap();
+        assert_eq!(entries, vec![base.join("a"), base.join("b")]);
+        // A missing directory is an error the picker surfaces (not an
+        // empty listing that looks like success).
+        assert!(read_picker_entries(&base.join("nope")).is_err());
+    }
+
+    #[test]
+    fn config_add_opens_picker_at_scan_parent_and_navigates() {
+        let base = picker_base("picker-open");
+        let scan = base.join("alpha");
+
+        let mut app = App::new(Config::default());
+        app.config.scan_dirs = vec![scan.clone()];
+        app.enter_config();
+
+        // a opens the picker (not the manual input) at the parent of the
+        // first scan dir, listing its subdirectories.
+        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        assert!(app.show_config_picker);
+        assert!(!app.show_config_input);
+        assert_eq!(app.picker_dir, base);
+        assert_eq!(
+            app.picker_entries,
+            vec![base.join("alpha"), base.join("beta")]
+        );
+        assert_eq!(app.picker_state.selected(), Some(0));
+
+        // j/k/方向键 move across the virtual row + entries, clamping at
+        // both ends.
+        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(app.picker_state.selected(), Some(0));
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.picker_state.selected(), Some(1));
+        assert!(app.handle_key(key(KeyCode::Down)));
+        assert_eq!(app.picker_state.selected(), Some(2));
+        assert!(app.handle_key(key(KeyCode::Down)));
+        assert_eq!(app.picker_state.selected(), Some(2));
+        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(app.picker_state.selected(), Some(1));
+
+        // l descends into the highlighted subdirectory; selection resets
+        // to the virtual row of the new listing.
+        assert!(app.handle_key(key(KeyCode::Char('l'))));
+        assert_eq!(app.picker_dir, scan);
+        assert!(app.picker_entries.is_empty());
+        assert_eq!(app.picker_state.selected(), Some(0));
+
+        // h / 方向左 return to the parent directory.
+        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        assert_eq!(app.picker_dir, base);
+        assert!(app.handle_key(key(KeyCode::Backspace)));
+        assert_eq!(app.picker_dir, std::env::temp_dir());
+        // (Up-at-root is covered by config_picker_at_root_reports_no_parent.)
+
+        // Esc cancels: overlay closed, browse state cleared, still in panel.
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(!app.show_config_picker);
+        assert!(app.picker_entries.is_empty());
+        assert!(app.config_input.is_empty());
+        assert_eq!(app.view, View::Config);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn config_picker_falls_back_to_home_without_scan_dirs() {
+        let mut app = App::new(Config::default());
+        app.enter_config();
+        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        let home = crate::config::home_dir();
+        let expected = if std::fs::read_dir(&home).is_ok() {
+            home
+        } else {
+            std::path::PathBuf::from("/")
+        };
+        assert_eq!(app.picker_dir, expected);
+        assert_eq!(app.picker_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn config_picker_at_root_reports_no_parent() {
+        let mut app = App::new(Config::default());
+        app.enter_config();
+        app.show_config_picker = true;
+        app.picker_dir = std::path::PathBuf::from("/");
+        app.picker_state.select(Some(0));
+        app.set_error("stale".to_string());
+
+        // Up keys at the root stay put and report why (info, not error).
+        for code in [KeyCode::Char('h'), KeyCode::Left, KeyCode::Backspace] {
+            assert!(app.handle_key(key(code)));
+            assert_eq!(app.picker_dir, std::path::PathBuf::from("/"));
+            let st = app.status.as_ref().unwrap();
+            assert!(!st.is_error, "{code:?}: {}", st.message);
+            assert!(st.message.contains("根目录"), "{code:?}: {}", st.message);
+        }
+    }
+
+    #[test]
+    fn config_picker_descend_failure_keeps_listing_and_reports_error() {
+        let base = temp_dir("picker-denied");
+        let child = base.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+
+        let mut app = App::new(Config::default());
+        app.enter_config();
+        app.show_config_picker = true;
+        app.picker_dir = base.clone();
+        app.picker_entries = vec![child.clone()];
+        app.picker_state.select(Some(1));
+        // The child disappears between listing and descend: read fails.
+        std::fs::remove_dir_all(&child).unwrap();
+
+        assert!(app.handle_key(key(KeyCode::Char('l'))));
+        assert_eq!(
+            app.picker_dir, base,
+            "failed descend must keep the previous listing"
+        );
+        assert_eq!(app.picker_entries, vec![child]);
+        assert_eq!(app.picker_state.selected(), Some(1));
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("无法读取目录"), "{}", st.message);
+    }
+
+    #[test]
+    fn config_picker_duplicate_selection_reports_error_and_stays_open() {
+        let base = picker_base("picker-dup");
+        let taken = base.join("alpha");
+
+        let mut app = App::new(Config::default());
+        app.config.scan_dirs = vec![taken.clone()];
+        app.enter_config();
+        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        assert_eq!(app.picker_dir, base);
+
+        // Highlight `alpha` (row 1) and submit: duplicate is rejected by
+        // the existing validation, without writing to the list.
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.picker_state.selected(), Some(1));
+        assert!(app.handle_key(key(KeyCode::Enter)));
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert_eq!(st.message, "目录已在列表中");
+        assert!(app.show_config_picker, "picker must stay open: {st:?}");
+        assert_eq!(app.config.scan_dirs, vec![taken]);
+
+        // Esc cancels the picker and clears any residual typed path.
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(!app.show_config_picker);
+        assert!(app.config_input.is_empty());
+        assert_eq!(app.view, View::Config);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn config_picker_selection_saves_validates_and_refreshes() {
+        // Holds the I/O guard: the saves below write the redirected config.
+        let _io = crate::config::config_io_guard();
+
+        let base = picker_base("picker-save");
+        let mut app = App::new(Config::default());
+        app.enter_config();
+        app.show_config_picker = true;
+        app.picker_dir = base.clone();
+        app.picker_entries = vec![base.join("alpha"), base.join("beta")];
+        app.picker_state.select(Some(2));
+
+        // Enter on a subdirectory row adds that directory through the
+        // shared submit path (save + rescan + success message).
+        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(!app.show_config_picker, "success closes the picker");
+        assert!(app.config_input.is_empty());
+        assert_eq!(app.config.scan_dirs, vec![base.join("beta")]);
+        assert_eq!(app.config_state.selected(), Some(0));
+        let loaded = Config::load().expect("load saved config");
+        assert_eq!(loaded.scan_dirs, vec![base.join("beta")]);
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error, "{}", st.message);
+        assert_eq!(
+            st.message,
+            format!("已添加扫描目录: {}", base.join("beta").display())
+        );
+
+        // Enter on row 0 adds the current directory itself.
+        app.show_config_picker = true;
+        app.picker_dir = base.clone();
+        app.picker_entries.clear();
+        app.picker_state.select(Some(0));
+        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(!app.show_config_picker);
+        assert_eq!(app.config.scan_dirs, vec![base.join("beta"), base.clone()]);
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error, "{}", st.message);
+        assert_eq!(st.message, format!("已添加扫描目录: {}", base.display()));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn config_i_opens_manual_input_from_list_and_picker() {
+        let base = picker_base("picker-i");
+        let mut app = App::new(Config::default());
+        app.config.scan_dirs = vec![base.join("alpha")];
+        app.enter_config();
+
+        // From the list, i opens the manual input directly.
+        assert!(app.handle_key(key(KeyCode::Char('i'))));
+        assert!(app.show_config_input);
+        assert!(!app.show_config_picker);
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(!app.show_config_input);
+
+        // From the picker, i switches over to manual entry.
+        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        assert!(app.show_config_picker);
+        assert!(app.handle_key(key(KeyCode::Char('i'))));
+        assert!(!app.show_config_picker);
+        assert!(app.show_config_input);
+        assert!(app.handle_key(key(KeyCode::Char('/'))));
+        assert_eq!(app.config_input, "/");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     // ---------- B: branch panel ----------
