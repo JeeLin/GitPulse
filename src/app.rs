@@ -15,14 +15,13 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::git::{self, FileEntry, Progress, RepoInfo};
+use crate::git::{self, BranchInfo, FileEntry, Progress, RepoInfo};
 
 /// Terminal type used by the TUI.
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 /// Top-level view of the view state machine; stack depth is 2 (Dashboard ↔ other views).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum View {
     /// Multi-repo overview and entry point.
     #[default]
@@ -65,6 +64,42 @@ enum RemoteEvent {
     Done(Result<(), String>),
 }
 
+/// One line of the dashboard batch progress log: one repository (convention 6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchLogLine {
+    /// Repository name, resolved when the event was sent.
+    pub name: String,
+    /// Status text from `git::batch`: `进行中` / `成功` / `失败: <reason>`.
+    pub message: String,
+    /// `true` when the message reports a failure.
+    pub is_error: bool,
+    /// `true` when the repository finished successfully.
+    pub is_success: bool,
+}
+
+impl BatchLogLine {
+    /// Build a log line, deriving the style flags from the message prefixes
+    /// documented in `git::batch`.
+    fn new(name: String, message: String) -> Self {
+        let is_error = message.starts_with("失败");
+        let is_success = message.starts_with("成功");
+        Self {
+            name,
+            message,
+            is_error,
+            is_success,
+        }
+    }
+}
+
+/// Message sent from a background batch pull/fetch task over its channel.
+enum BatchEvent {
+    /// Status update for the named repository.
+    Line { name: String, message: String },
+    /// Terminal per-repository results of the batch run.
+    Done(Vec<(String, Result<()>)>),
+}
+
 /// Application state shared across views.
 pub struct App {
     /// Current view; key presses are dispatched per view in [`App::handle_key`].
@@ -99,6 +134,26 @@ pub struct App {
     pub remote_op: &'static str,
     /// Receiver for background push/pull progress and completion events.
     remote_rx: Option<mpsc::UnboundedReceiver<RemoteEvent>>,
+    /// Rolling per-repository batch progress log (convention 6).
+    pub batch_log: Vec<BatchLogLine>,
+    /// Label of the running/last batch operation (`pull` / `fetch`).
+    pub batch_op: &'static str,
+    /// Receiver for background batch pull/fetch progress and completion events.
+    batch_rx: Option<mpsc::UnboundedReceiver<BatchEvent>>,
+    /// Local branches shown in the branch panel.
+    pub branches: Vec<BranchInfo>,
+    /// Selection cursor for the branch list.
+    pub branch_state: ListState,
+    /// Index into `repos` whose branches the branch panel edits.
+    branch_repo: Option<usize>,
+    /// View the branch panel returns to on Esc.
+    branches_from: View,
+    /// Single-line branch name being typed in create mode.
+    pub branch_input: String,
+    /// Whether the branch-create input overlay is shown.
+    pub show_branch_input: bool,
+    /// Whether the branch-delete confirmation dialog is shown.
+    pub show_branch_delete_confirm: bool,
 }
 
 impl App {
@@ -121,6 +176,16 @@ impl App {
             remote_status: None,
             remote_op: "",
             remote_rx: None,
+            batch_log: Vec::new(),
+            batch_op: "",
+            batch_rx: None,
+            branches: Vec::new(),
+            branch_state: ListState::default(),
+            branch_repo: None,
+            branches_from: View::Dashboard,
+            branch_input: String::new(),
+            show_branch_input: false,
+            show_branch_delete_confirm: false,
         }
     }
 
@@ -424,8 +489,7 @@ impl App {
                 }
                 Err(mpsc::error::TryRecvError::Empty) => return,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.remote_status =
-                        Some(RemoteStatus::Error("远端任务意外退出".to_string()));
+                    self.remote_status = Some(RemoteStatus::Error("远端任务意外退出".to_string()));
                     self.remote_rx = None;
                     return;
                 }
@@ -433,14 +497,314 @@ impl App {
         }
     }
 
-    /// Re-query status for `idx` after a commit/push/pull (convention 5).
+    /// Re-query status for `idx` after a commit/push/pull/branch change
+    /// (convention 5). File entries reload only when the repo view shows
+    /// this repository, so unrelated views are left untouched.
     fn refresh_repo_status(&mut self, idx: usize) {
         let repo_path = self.repos[idx].path.clone();
         match git::query_status(&repo_path) {
             Ok(info) => self.repos[idx] = info,
             Err(e) => self.set_error(format!("刷新状态失败: {e}")),
         }
-        self.load_file_entries();
+        if self.current_repo == Some(idx) {
+            self.load_file_entries();
+        }
+    }
+
+    /// Start a background batch `pull` (`op == "pull"`) or `fetch`
+    /// (`op == "fetch"`) across every discovered repository.
+    ///
+    /// Progress arrives on an mpsc channel consumed each frame (convention 1)
+    /// and renders as a rolling per-repository log at the bottom of the
+    /// dashboard (convention 6). No-op while a batch or remote op is in
+    /// flight, or when there are no repositories.
+    pub fn start_batch(&mut self, op: &'static str) {
+        if self.view != View::Dashboard || self.batch_rx.is_some() || self.remote_rx.is_some() {
+            return;
+        }
+        if self.repos.is_empty() {
+            self.set_info("没有仓库，无法执行批量操作");
+            return;
+        }
+        let repos = self.repos.clone();
+        let names: Vec<String> = repos.iter().map(|r| r.name.clone()).collect();
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.batch_rx = Some(rx);
+        self.batch_op = op;
+        self.batch_log.clear();
+        self.status = None;
+        tokio::spawn(async move {
+            let progress = {
+                let sink = tx.clone();
+                move |index: usize, message: &str| {
+                    let name = names.get(index).cloned().unwrap_or_default();
+                    let _ = sink.send(BatchEvent::Line {
+                        name,
+                        message: message.to_string(),
+                    });
+                }
+            };
+            let results = match op {
+                "fetch" => git::batch_fetch(&repos, progress).await,
+                _ => git::batch_pull(&repos, progress).await,
+            };
+            let _ = tx.send(BatchEvent::Done(results));
+        });
+    }
+
+    /// Drain pending batch events; called once per frame (convention 1).
+    ///
+    /// Each repository keeps a single log line that advances from `进行中`
+    /// to `成功` / `失败: <reason>`; on completion every repository status is
+    /// refreshed (convention 5) before the summary is written.
+    pub fn poll_batch(&mut self) {
+        let Some(rx) = self.batch_rx.as_mut() else {
+            return;
+        };
+        loop {
+            match rx.try_recv() {
+                Ok(BatchEvent::Line { name, message }) => {
+                    let line = BatchLogLine::new(name, message);
+                    if let Some(existing) = self.batch_log.iter_mut().find(|l| l.name == line.name)
+                    {
+                        *existing = line;
+                    } else {
+                        self.batch_log.push(line);
+                    }
+                }
+                Ok(BatchEvent::Done(results)) => {
+                    self.batch_rx = None;
+                    let total = results.len();
+                    let failed = results.iter().filter(|(_, r)| r.is_err()).count();
+                    self.refresh_repos();
+                    if failed == 0 {
+                        self.set_info(format!("批量 {} 完成: {total} 个仓库成功", self.batch_op));
+                    } else {
+                        self.set_error(format!(
+                            "批量 {} 完成: {} 成功 / {} 失败",
+                            self.batch_op,
+                            total - failed,
+                            failed
+                        ));
+                    }
+                    return;
+                }
+                Err(mpsc::error::TryRecvError::Empty) => return,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.set_error("批量任务意外退出".to_string());
+                    self.batch_rx = None;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Enter the branch panel for the selected (dashboard) or current (repo)
+    /// repository.
+    ///
+    /// The origin view is recorded so Esc returns there; the branch list is
+    /// loaded immediately, with failures surfacing as an error status rather
+    /// than an empty list masquerading as success (checkpoint 2).
+    pub fn enter_branches(&mut self) {
+        let origin = self.view;
+        let idx = match origin {
+            View::Dashboard => self.dashboard_state.selected(),
+            View::Repo => self.current_repo,
+            _ => return,
+        };
+        let Some(idx) = idx.filter(|i| *i < self.repos.len()) else {
+            return;
+        };
+        self.branch_repo = Some(idx);
+        self.branches_from = origin;
+        self.branch_state.select(None);
+        self.branch_input.clear();
+        self.show_branch_input = false;
+        self.show_branch_delete_confirm = false;
+        self.view = View::Branches;
+        self.load_branches();
+    }
+
+    /// Return from the branch panel to the view it was opened from.
+    pub fn leave_branches(&mut self) {
+        self.view = self.branches_from;
+        self.show_branch_input = false;
+        self.show_branch_delete_confirm = false;
+        self.branch_input.clear();
+        self.clear_error();
+    }
+
+    /// Whether a background batch operation is currently running.
+    pub fn batch_running(&self) -> bool {
+        self.batch_rx.is_some()
+    }
+
+    /// Name of the repository the branch panel edits (empty when invalid).
+    pub fn branch_repo_name(&self) -> &str {
+        self.branch_repo
+            .filter(|i| *i < self.repos.len())
+            .map_or("", |i| &self.repos[i].name)
+    }
+
+    /// Path of the repository the branch panel edits, when still valid.
+    fn branch_repo_path(&self) -> Option<std::path::PathBuf> {
+        self.branch_repo
+            .filter(|i| *i < self.repos.len())
+            .map(|i| self.repos[i].path.clone())
+    }
+
+    /// Name of the currently selected branch, if any.
+    fn selected_branch(&self) -> Option<String> {
+        self.branch_state
+            .selected()
+            .and_then(|i| self.branches.get(i))
+            .map(|b| b.name.clone())
+    }
+
+    /// Load (or reload) the branch list for the branch panel.
+    ///
+    /// The cursor keeps its position when still valid and otherwise falls
+    /// back to the HEAD branch. On failure the list is cleared and the error
+    /// is shown so a failed load never looks like an empty repository
+    /// (checkpoint 2).
+    pub fn load_branches(&mut self) {
+        let Some(path) = self.branch_repo_path() else {
+            self.set_error("分支面板: 仓库索引失效".to_string());
+            self.branches.clear();
+            self.branch_state.select(None);
+            return;
+        };
+        match git::list_branches(&path) {
+            Ok(branches) => {
+                let head = branches.iter().position(|b| b.is_head).unwrap_or(0);
+                let keep = self
+                    .branch_state
+                    .selected()
+                    .filter(|i| *i < branches.len())
+                    .unwrap_or(head);
+                let selected = if branches.is_empty() {
+                    None
+                } else {
+                    Some(keep.min(branches.len() - 1))
+                };
+                self.branches = branches;
+                self.branch_state.select(selected);
+                self.clear_error();
+            }
+            Err(e) => {
+                self.set_error(format!("加载分支列表失败: {e}"));
+                self.branches.clear();
+                self.branch_state.select(None);
+            }
+        }
+    }
+
+    /// Switch to the selected branch, then refresh the affected views
+    /// (convention 5).
+    pub fn switch_to_selected_branch(&mut self) {
+        let (Some(path), Some(name)) = (self.branch_repo_path(), self.selected_branch()) else {
+            return;
+        };
+        match git::switch_branch(&path, &name) {
+            Ok(()) => {
+                self.after_branch_change();
+                self.set_info_unless_error(format!("已切换到 {name}"));
+            }
+            Err(e) => self.set_error(format!("切换分支失败: {e}")),
+        }
+    }
+
+    /// Open the single-line branch name input (convention 9).
+    pub fn start_branch_create(&mut self) {
+        if self.branch_repo_path().is_none() {
+            return;
+        }
+        self.branch_input.clear();
+        self.show_branch_input = true;
+        self.show_branch_delete_confirm = false;
+        self.status = None;
+    }
+
+    /// Cancel the branch-create input, keeping the branch list as it was.
+    pub fn cancel_branch_create(&mut self) {
+        self.show_branch_input = false;
+        self.branch_input.clear();
+    }
+
+    /// Create the branch named in the input and select it in the list.
+    ///
+    /// An empty name keeps the input open with an error; a git-side failure
+    /// also keeps the typed text so it can be corrected (convention 9).
+    pub fn submit_branch_create(&mut self) {
+        let name = self.branch_input.trim().to_string();
+        if name.is_empty() {
+            self.set_error("分支名不能为空".to_string());
+            return;
+        }
+        let Some(path) = self.branch_repo_path() else {
+            self.set_error("创建分支失败: 仓库索引失效".to_string());
+            return;
+        };
+        match git::create_branch(&path, &name) {
+            Ok(()) => {
+                self.show_branch_input = false;
+                self.branch_input.clear();
+                self.after_branch_change();
+                if let Some(i) = self.branches.iter().position(|b| b.name == name) {
+                    self.branch_state.select(Some(i));
+                }
+                self.set_info_unless_error(format!("已创建分支 {name}"));
+            }
+            Err(e) => self.set_error(format!("创建分支失败: {e}")),
+        }
+    }
+
+    /// Open the delete confirmation for the selected branch (discard-style
+    /// confirmation, convention 8).
+    pub fn start_branch_delete(&mut self) {
+        if self.branch_repo_path().is_some() && self.selected_branch().is_some() {
+            self.show_branch_delete_confirm = true;
+            self.show_branch_input = false;
+        }
+    }
+
+    /// Cancel the branch-delete confirmation.
+    pub fn cancel_branch_delete(&mut self) {
+        self.show_branch_delete_confirm = false;
+    }
+
+    /// Delete the confirmed branch, then refresh the affected views
+    /// (convention 5).
+    pub fn confirm_branch_delete(&mut self) {
+        self.show_branch_delete_confirm = false;
+        let (Some(path), Some(name)) = (self.branch_repo_path(), self.selected_branch()) else {
+            return;
+        };
+        match git::delete_branch(&path, &name) {
+            Ok(()) => {
+                self.after_branch_change();
+                self.set_info_unless_error(format!("已删除分支 {name}"));
+            }
+            Err(e) => self.set_error(format!("删除分支失败: {e}")),
+        }
+    }
+
+    /// Refresh repo status and the branch list after a branch mutation
+    /// (convention 5: auto-refresh the affected views).
+    fn after_branch_change(&mut self) {
+        if let Some(idx) = self.branch_repo.filter(|i| *i < self.repos.len()) {
+            self.refresh_repo_status(idx);
+        }
+        self.load_branches();
+    }
+
+    /// Record a success message unless an error already surfaced while
+    /// refreshing; errors keep priority on the status line (convention 3).
+    fn set_info_unless_error(&mut self, message: impl Into<String>) {
+        let has_error = self.status.as_ref().is_some_and(|s| s.is_error);
+        if !has_error {
+            self.set_info(message);
+        }
     }
 
     /// Dispatch a key press for the current view; returns `false` when the app should exit.
@@ -453,24 +817,38 @@ impl App {
                 KeyCode::Char('q') | KeyCode::Esc => false,
                 KeyCode::Char('j') | KeyCode::Down => {
                     if !self.repos.is_empty() {
-                        let next = self.dashboard_state.selected().map_or(0, |i| {
-                            i.saturating_add(1).min(self.repos.len() - 1)
-                        });
+                        let next = self
+                            .dashboard_state
+                            .selected()
+                            .map_or(0, |i| i.saturating_add(1).min(self.repos.len() - 1));
                         self.dashboard_state.select(Some(next));
                     }
                     true
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     if !self.repos.is_empty() {
-                        let prev = self.dashboard_state.selected().map_or(0, |i| {
-                            i.saturating_sub(1)
-                        });
+                        let prev = self
+                            .dashboard_state
+                            .selected()
+                            .map_or(0, |i| i.saturating_sub(1));
                         self.dashboard_state.select(Some(prev));
                     }
                     true
                 }
                 KeyCode::Char('r') => {
                     self.refresh_repos();
+                    true
+                }
+                KeyCode::Char('l') => {
+                    self.start_batch("pull");
+                    true
+                }
+                KeyCode::Char('f') => {
+                    self.start_batch("fetch");
+                    true
+                }
+                KeyCode::Char('b') => {
+                    self.enter_branches();
                     true
                 }
                 KeyCode::Enter => {
@@ -511,9 +889,10 @@ impl App {
                         }
                         KeyCode::Char('k') | KeyCode::Up => {
                             if !self.file_entries.is_empty() {
-                                let prev = self.file_state.selected().map_or(0, |i| {
-                                    i.saturating_sub(1)
-                                });
+                                let prev = self
+                                    .file_state
+                                    .selected()
+                                    .map_or(0, |i| i.saturating_sub(1));
                                 self.file_state.select(Some(prev));
                             }
                             true
@@ -544,6 +923,10 @@ impl App {
                         }
                         KeyCode::Char('l') => {
                             self.start_remote("pull");
+                            true
+                        }
+                        KeyCode::Char('b') => {
+                            self.enter_branches();
                             true
                         }
                         _ => true,
@@ -591,15 +974,91 @@ impl App {
                 }
                 _ => true,
             },
-            // Fallback for Branches: Esc steps back to Dashboard.
-            _ => match key.code {
-                KeyCode::Esc => {
-                    self.view = View::Dashboard;
-                    true
+            // Branch panel: modal input / delete-confirm take precedence over
+            // list navigation; Esc returns to the view it was opened from.
+            View::Branches => {
+                if self.show_branch_input {
+                    match key.code {
+                        KeyCode::Esc => {
+                            self.cancel_branch_create();
+                            true
+                        }
+                        KeyCode::Enter => {
+                            self.submit_branch_create();
+                            true
+                        }
+                        KeyCode::Backspace => {
+                            self.branch_input.pop();
+                            true
+                        }
+                        KeyCode::Char(c)
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
+                            self.branch_input.push(c);
+                            true
+                        }
+                        _ => true,
+                    }
+                } else if self.show_branch_delete_confirm {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            self.confirm_branch_delete();
+                            true
+                        }
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            self.cancel_branch_delete();
+                            true
+                        }
+                        _ => true,
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Esc => {
+                            self.leave_branches();
+                            true
+                        }
+                        KeyCode::Char('q') => false,
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            if !self.branches.is_empty() {
+                                let next = self.branch_state.selected().map_or(0, |i| {
+                                    i.saturating_add(1).min(self.branches.len() - 1)
+                                });
+                                self.branch_state.select(Some(next));
+                            }
+                            true
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            if !self.branches.is_empty() {
+                                let prev = self
+                                    .branch_state
+                                    .selected()
+                                    .map_or(0, |i| i.saturating_sub(1));
+                                self.branch_state.select(Some(prev));
+                            }
+                            true
+                        }
+                        KeyCode::Enter => {
+                            self.switch_to_selected_branch();
+                            true
+                        }
+                        KeyCode::Char('n') => {
+                            self.start_branch_create();
+                            true
+                        }
+                        KeyCode::Char('d') => {
+                            self.start_branch_delete();
+                            true
+                        }
+                        KeyCode::Char('r') => {
+                            self.load_branches();
+                            true
+                        }
+                        _ => true,
+                    }
                 }
-                KeyCode::Char('q') => false,
-                _ => true,
-            },
+            }
         }
     }
 }
@@ -628,8 +1087,9 @@ pub async fn run() -> Result<()> {
 }
 
 /// Event loop: draw, wait up to 200ms for input, then drain background
-/// push/pull progress so the status line stays live during remote ops
-/// (convention 1: the UI never blocks on an in-flight operation).
+/// push/pull and batch progress so status and the dashboard batch log stay
+/// live during remote ops (convention 1: the UI never blocks on an
+/// in-flight operation).
 fn event_loop(terminal: &mut Tui, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|f| crate::ui::render(f, app))?;
@@ -641,6 +1101,7 @@ fn event_loop(terminal: &mut Tui, app: &mut App) -> Result<()> {
             }
         }
         app.poll_remote();
+        app.poll_batch();
     }
 }
 

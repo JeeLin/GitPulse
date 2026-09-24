@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::StatusLine;
+use crate::app::{BatchLogLine, StatusLine};
 use crate::git::RepoInfo;
 
 /// Borrowed render state for the dashboard, referencing `App.repos` directly
@@ -20,6 +20,12 @@ pub struct DashboardState<'a> {
     pub status: Option<&'a StatusLine>,
     /// Selection cursor shared across frames.
     pub list_state: &'a mut ListState,
+    /// Rolling per-repository batch progress log (convention 6).
+    pub batch_log: &'a [BatchLogLine],
+    /// Label of the running/last batch operation (`pull` / `fetch`).
+    pub batch_op: &'static str,
+    /// Whether the batch operation is still running.
+    pub batch_running: bool,
 }
 
 /// Render the repository dashboard overview.
@@ -28,11 +34,28 @@ pub struct DashboardState<'a> {
 /// masquerades as an empty list (checkpoint 2); any status also prints on
 /// the bottom status line (convention 3).
 pub fn render_dashboard(f: &mut Frame, state: &mut DashboardState<'_>) {
+    // Bottom scrolling batch log (convention 6) takes space only while it
+    // has content; the list keeps every remaining row otherwise.
+    let batch_rows = if state.batch_log.is_empty() {
+        0
+    } else {
+        (state.batch_log.len() as u16).saturating_add(2).min(8)
+    };
+    let mut constraints = vec![Constraint::Min(1)];
+    if batch_rows > 0 {
+        constraints.push(Constraint::Length(batch_rows));
+    }
+    constraints.push(Constraint::Length(1));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints(constraints)
         .split(f.area());
-    let (list_area, status_area) = (chunks[0], chunks[1]);
+    let list_area = chunks[0];
+    let (batch_area, status_area) = if batch_rows > 0 {
+        (Some(chunks[1]), chunks[2])
+    } else {
+        (None, chunks[1])
+    };
 
     if let Some(status) = state.status {
         if status.is_error {
@@ -100,9 +123,45 @@ pub fn render_dashboard(f: &mut Frame, state: &mut DashboardState<'_>) {
 
     f.render_stateful_widget(list, list_area, state.list_state);
 
+    if let Some(batch_area) = batch_area {
+        render_batch_log(f, batch_area, state);
+    }
+
     if let Some(status) = state.status {
         render_status_line(f, status_area, status);
     }
+}
+
+/// Draw the scrolling per-repository batch progress log (convention 6):
+/// the newest lines stay visible; failures render red, successes green.
+fn render_batch_log(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
+    let title = if state.batch_running {
+        format!("批量 {} 进度", state.batch_op)
+    } else {
+        format!("批量 {} 结果", state.batch_op)
+    };
+    let visible = state
+        .batch_log
+        .len()
+        .saturating_sub(area.height.saturating_sub(2) as usize);
+    let lines: Vec<Line> = state.batch_log[visible.min(state.batch_log.len())..]
+        .iter()
+        .map(|entry| {
+            let color = if entry.is_error {
+                Color::Red
+            } else if entry.is_success {
+                Color::Green
+            } else {
+                Color::DarkGray
+            };
+            Line::from(vec![
+                Span::styled(format!("{:<20}", entry.name), Style::default().fg(color)),
+                Span::styled(entry.message.clone(), Style::default().fg(color)),
+            ])
+        })
+        .collect();
+    let block = Block::default().title(title).borders(Borders::ALL);
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// Draw the one-line status bar; errors render red and persist until the
@@ -187,6 +246,9 @@ mod tests {
             repos: &repos,
             status: None,
             list_state: &mut list_state,
+            batch_log: &[],
+            batch_op: "",
+            batch_running: false,
         });
         assert!(text.contains("alpha"), "missing name: {text}");
         assert!(text.contains("beta"), "missing name: {text}");
@@ -206,6 +268,9 @@ mod tests {
             repos: &repos,
             status: Some(&status),
             list_state: &mut list_state,
+            batch_log: &[],
+            batch_op: "",
+            batch_running: false,
         });
         assert!(text.contains("error"), "missing error: {text}");
         assert!(!text.contains("alpha"), "repo list leaked: {text}");
@@ -224,6 +289,9 @@ mod tests {
             repos: &repos,
             status: Some(&status),
             list_state: &mut list_state,
+            batch_log: &[],
+            batch_op: "",
+            batch_running: false,
         });
         // Non-error status keeps the list and appends the status line.
         assert!(text.contains("alpha"), "list hidden: {text}");
@@ -245,9 +313,46 @@ mod tests {
             repos: &repos,
             status: Some(&status),
             list_state: &mut list_state,
+            batch_log: &[],
+            batch_op: "",
+            batch_running: false,
         });
         assert!(text.contains("error"), "missing error: {text}");
         assert!(!text.contains("alpha"), "repo list leaked: {text}");
+    }
+
+    #[test]
+    fn render_batch_log_shows_progress_lines() {
+        let repos = vec![make_repo("alpha", "main")];
+        let mut list_state = ListState::default();
+        let batch_log = vec![
+            BatchLogLine {
+                name: "alpha".to_string(),
+                message: "进行中".to_string(),
+                is_error: false,
+                is_success: false,
+            },
+            BatchLogLine {
+                name: "beta".to_string(),
+                message: "失败: 未配置远端".to_string(),
+                is_error: true,
+                is_success: false,
+            },
+        ];
+        let text = render_to_text(&mut DashboardState {
+            repos: &repos,
+            status: None,
+            list_state: &mut list_state,
+            batch_log: &batch_log,
+            batch_op: "pull",
+            batch_running: true,
+        });
+        // Wide CJK glyphs leave padding cells; compare whitespace-stripped.
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("alpha"), "missing repo line: {compact}");
+        assert!(compact.contains("进行中"), "missing progress: {compact}");
+        assert!(compact.contains("失败"), "missing failure: {compact}");
+        assert!(compact.contains("批量pull进度"), "missing title: {compact}");
     }
 
     #[test]

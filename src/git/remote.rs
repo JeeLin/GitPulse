@@ -91,10 +91,7 @@ fn git_output(repo_path: &Path, args: &[&str]) -> Result<std::process::Output> {
 ///
 /// Uses `git push -u <remote> <branch>` so the first push to a freshly
 /// configured remote also establishes the upstream tracking branch.
-pub async fn push(
-    repo_path: &Path,
-    on_progress: impl Fn(Progress) + Send + 'static,
-) -> Result<()> {
+pub async fn push(repo_path: &Path, on_progress: impl Fn(Progress) + Send + 'static) -> Result<()> {
     let repo_path: PathBuf = repo_path.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<()> {
         on_progress(Progress {
@@ -119,10 +116,7 @@ pub async fn push(
 /// Falls back to explicit `<remote> <branch>` arguments when the branch has
 /// no upstream yet; diverged histories fail with an explicit error
 /// (convention 7) instead of merging or rebasing.
-pub async fn pull(
-    repo_path: &Path,
-    on_progress: impl Fn(Progress) + Send + 'static,
-) -> Result<()> {
+pub async fn pull(repo_path: &Path, on_progress: impl Fn(Progress) + Send + 'static) -> Result<()> {
     let repo_path: PathBuf = repo_path.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<()> {
         on_progress(Progress {
@@ -153,10 +147,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn base_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "gitpulse-remote-{tag}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("gitpulse-remote-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -221,7 +213,9 @@ mod tests {
         let repo2 = Repository::clone(&origin_str, &other).unwrap();
         let mut config2 = repo2.config().unwrap();
         config2.set_str("user.name", "GitPulse Test").unwrap();
-        config2.set_str("user.email", "test@gitpulse.local").unwrap();
+        config2
+            .set_str("user.email", "test@gitpulse.local")
+            .unwrap();
         drop(config2);
         commit_file(&other, "b.txt", "v2\n", "v2");
         push(&other, |_| {}).await.expect("clone push must succeed");
@@ -236,19 +230,25 @@ mod tests {
             .unwrap();
         assert!(untrack.status.success(), "unset-upstream failed");
 
-        pull(&work, |_| {}).await.expect("ff-only pull must succeed");
+        pull(&work, |_| {})
+            .await
+            .expect("ff-only pull must succeed");
         assert!(
             work.join("b.txt").exists(),
             "pull did not bring the remote commit"
         );
 
         // An up-to-date push still succeeds (and re-sets the upstream).
-        push(&work, |_| {}).await.expect("up-to-date push must succeed");
+        push(&work, |_| {})
+            .await
+            .expect("up-to-date push must succeed");
 
         // Diverged histories: local commit + advanced remote -> ff-only error.
         commit_file(&work, "c.txt", "local\n", "local-only");
         commit_file(&other, "d.txt", "remote\n", "remote-only");
-        push(&other, |_| {}).await.expect("second clone push must succeed");
+        push(&other, |_| {})
+            .await
+            .expect("second clone push must succeed");
 
         let err = pull(&work, |_| {}).await.unwrap_err();
         let msg = err.to_string();

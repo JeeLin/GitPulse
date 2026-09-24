@@ -132,7 +132,7 @@ fn compute_ahead_behind(repo: &Repository) -> Result<(usize, usize)> {
     if !head.is_branch() {
         return Ok((0, 0));
     }
-    
+
     let branch = match repo.find_branch(
         head.shorthand().unwrap_or_default(),
         git2::BranchType::Local,
@@ -144,7 +144,7 @@ fn compute_ahead_behind(repo: &Repository) -> Result<(usize, usize)> {
         Ok(u) => u,
         Err(_) => return Ok((0, 0)),
     };
-    
+
     let head_commit = match head.peel_to_commit() {
         Ok(c) => c,
         Err(_) => return Ok((0, 0)),
@@ -153,7 +153,7 @@ fn compute_ahead_behind(repo: &Repository) -> Result<(usize, usize)> {
         Ok(c) => c,
         Err(_) => return Ok((0, 0)),
     };
-    
+
     let (ahead, behind) = repo.graph_ahead_behind(head_commit.id(), upstream_commit.id())?;
     Ok((ahead, behind))
 }

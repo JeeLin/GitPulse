@@ -1,5 +1,6 @@
 //! TUI rendering: view dispatch shared by all screens.
 
+pub mod branches;
 pub mod commit;
 pub mod dashboard;
 pub mod diff;
@@ -18,10 +19,14 @@ use crate::ui::dashboard::DashboardState;
 pub fn render(f: &mut Frame, app: &mut App) {
     match app.view {
         View::Dashboard => {
+            let batch_running = app.batch_running();
             let mut state = DashboardState {
                 repos: &app.repos,
                 status: app.status.as_ref(),
                 list_state: &mut app.dashboard_state,
+                batch_log: &app.batch_log,
+                batch_op: app.batch_op,
+                batch_running,
             };
             dashboard::render_dashboard(f, &mut state);
         }
@@ -62,6 +67,26 @@ pub fn render(f: &mut Frame, app: &mut App) {
             }
             commit::render_commit_popup(f, &app.commit_message);
         }
-        View::Branches => {}
+        View::Branches => {
+            let confirm = if app.show_branch_delete_confirm {
+                app.branch_state
+                    .selected()
+                    .and_then(|i| app.branches.get(i))
+            } else {
+                None
+            };
+            let repo_name = app.branch_repo_name().to_string();
+            let state = branches::BranchesState {
+                branches: &app.branches,
+                status: app.status.as_ref(),
+                list_state: &mut app.branch_state,
+                repo_name: &repo_name,
+                show_input: app.show_branch_input,
+                input: &app.branch_input,
+                show_delete_confirm: app.show_branch_delete_confirm,
+                confirm_branch: confirm,
+            };
+            branches::render_branches(f, state);
+        }
     }
 }
