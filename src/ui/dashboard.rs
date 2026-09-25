@@ -82,8 +82,8 @@ pub fn render_dashboard(f: &mut Frame, state: &mut DashboardState<'_>) {
         }
     }
 
-    // First-launch empty state: no configured scan dirs discovered any repo,
-    // so guide the user into the config panel instead of showing an empty list.
+    // Empty state: scan dirs may be unconfigured or simply contain no repos,
+    // so guide the user into the config panel instead of an empty list.
     if state.repos.is_empty() {
         render_empty_state(f, list_area);
     } else {
@@ -184,8 +184,9 @@ fn render_batch_log(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// Replace the list body with a centered first-launch hint that points at the
-/// config panel (`c`), keeping the usual bordered title and row count.
+/// Replace the list body with a centered hint that points at the config panel
+/// (`c`), keeping the usual bordered title and row count. The wording stays
+/// neutral because an empty list has more than one cause.
 fn render_empty_state(f: &mut Frame, area: Rect) {
     let block = Block::default()
         .title(dashboard_title(0))
@@ -202,7 +203,7 @@ fn render_empty_state(f: &mut Frame, area: Rect) {
         ])
         .split(inner);
     let hint = Line::from(vec![
-        Span::raw("扫描目录为空 — 按 "),
+        Span::raw("暂无仓库 — 按 "),
         Span::styled("c", Style::default().fg(Color::Cyan)),
         Span::raw(" 管理扫描目录"),
     ]);
@@ -433,7 +434,7 @@ mod tests {
         });
         let compact = compact(&text);
         assert!(
-            compact.contains("扫描目录为空—按c管理扫描目录"),
+            compact.contains("暂无仓库—按c管理扫描目录"),
             "missing empty-state hint: {compact}"
         );
         assert!(
@@ -458,7 +459,7 @@ mod tests {
         let compact = compact(&text);
         assert!(compact.contains("alpha"), "missing repo: {compact}");
         assert!(
-            !compact.contains("扫描目录为空"),
+            !compact.contains("暂无仓库"),
             "empty-state hint leaked: {compact}"
         );
     }
@@ -481,7 +482,7 @@ mod tests {
         let compact = compact(&text);
         assert!(compact.contains("error"), "missing error: {compact}");
         assert!(
-            !compact.contains("扫描目录为空"),
+            !compact.contains("暂无仓库"),
             "hint must not mask the error: {compact}"
         );
     }
