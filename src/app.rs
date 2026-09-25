@@ -2195,6 +2195,8 @@ mod tests {
 
     #[test]
     fn config_add_validation_reports_each_failure() {
+        let _io = crate::config::config_io_guard();
+
         let mut app = App::new(Config::default());
         app.enter_config();
 
@@ -2334,6 +2336,8 @@ mod tests {
 
     #[test]
     fn config_add_opens_picker_at_scan_parent_and_navigates() {
+        let _io = crate::config::config_io_guard();
+
         let base = picker_base("picker-open");
         let scan = base.join("alpha");
 
@@ -2392,6 +2396,8 @@ mod tests {
 
     #[test]
     fn config_picker_falls_back_to_home_without_scan_dirs() {
+        let _io = crate::config::config_io_guard();
+
         let mut app = App::new(Config::default());
         app.enter_config();
         assert!(app.handle_key(key(KeyCode::Char('a'))));
@@ -2453,6 +2459,8 @@ mod tests {
 
     #[test]
     fn config_picker_duplicate_selection_reports_error_and_stays_open() {
+        let _io = crate::config::config_io_guard();
+
         let base = picker_base("picker-dup");
         let taken = base.join("alpha");
 
@@ -2528,6 +2536,8 @@ mod tests {
 
     #[test]
     fn config_i_opens_manual_input_from_list_and_picker() {
+        let _io = crate::config::config_io_guard();
+
         let base = picker_base("picker-i");
         let mut app = App::new(Config::default());
         app.config.scan_dirs = vec![base.join("alpha")];
