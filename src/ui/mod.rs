@@ -98,7 +98,9 @@ pub fn render_confirm_overlay(
 /// Shared single-line input overlay (convention 9): a centered popup titled
 /// `title` showing `text` after a cyan `> ` prompt. `show_cursor` appends the
 /// `▌` caret (config manual input); popups whose hints live in the title
-/// (branch create, commit message) omit it.
+/// (branch create, commit message) omit it. The line scrolls horizontally by
+/// the width that does not fit so the tail — and with it the caret — always
+/// stays inside the popup instead of being cut off.
 pub fn render_input_overlay(f: &mut Frame, area: Rect, title: &str, text: &str, show_cursor: bool) {
     let popup = repo::centered_rect(60, 5, area);
     f.render_widget(Clear, popup);
@@ -111,7 +113,14 @@ pub fn render_input_overlay(f: &mut Frame, area: Rect, title: &str, text: &str, 
         spans.push(Span::styled("▌", Style::default().fg(Color::Cyan)));
     }
     let block = Block::default().title(title).borders(Borders::ALL);
-    f.render_widget(Paragraph::new(Line::from(spans)).block(block), popup);
+    // `"> "` prompt + text + optional caret, minus what the inner width can
+    // hold; callers without a caret scroll to the tail of `text` the same way.
+    let content_width = 2 + text.chars().count() + usize::from(show_cursor);
+    let scroll_x = content_width.saturating_sub(block.inner(popup).width as usize) as u16;
+    let paragraph = Paragraph::new(Line::from(spans))
+        .block(block)
+        .scroll((0, scroll_x));
+    f.render_widget(paragraph, popup);
 }
 
 /// Dispatch rendering to the active view.
@@ -392,6 +401,48 @@ mod tests {
         );
         assert!(text.contains("Enter确认"), "missing confirm hint: {text}");
         assert!(text.contains("Esc取消"), "missing cancel hint: {text}");
+    }
+
+    #[test]
+    fn input_overlay_scrolls_long_text_to_keep_cursor_visible() {
+        let mut app = base_app();
+        app.view = View::Config;
+        app.show_config_input = true;
+        app.config_input = format!("/home/user/repos/{}", "deep".repeat(20));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let raw: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            raw.contains('▌'),
+            "cursor scrolled out of the visible window: {raw}"
+        );
+        assert!(raw.contains("deep"), "tail of the long path missing: {raw}");
+
+        // Callers without a caret (commit message) scroll to the tail too.
+        let mut app = base_app();
+        app.view = View::Commit;
+        app.commit_message = format!("feat: {}", "tail".repeat(30));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let raw: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            raw.contains("tailtail"),
+            "tail of the long commit message missing: {raw}"
+        );
     }
 
     #[test]
