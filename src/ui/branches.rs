@@ -115,12 +115,8 @@ fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) 
 
     let list = List::new(items)
         .block(block)
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("► ");
+        .highlight_style(super::list_highlight())
+        .highlight_symbol(super::HIGHLIGHT_SYMBOL);
 
     f.render_stateful_widget(list, area, state.list_state);
 }

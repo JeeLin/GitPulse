@@ -10,7 +10,7 @@ pub mod repo;
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
@@ -18,6 +18,17 @@ use ratatui::{
 
 use crate::app::{App, StatusLine, View};
 use crate::ui::dashboard::DashboardState;
+
+/// Shared selection style for every list: dark background + bold keeps the
+/// cursor row readable on any block style.
+pub(crate) fn list_highlight() -> Style {
+    Style::default()
+        .bg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Marker rendered before the selected list row.
+pub(crate) const HIGHLIGHT_SYMBOL: &str = "► ";
 
 /// Draw the bottom status line shared by every view (convention 3): errors
 /// render red and persist until the next operation, anything else keeps the

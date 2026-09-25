@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
@@ -185,12 +185,8 @@ fn render_dir_picker(
     }));
 
     let list = List::new(items)
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("► ");
+        .highlight_style(super::list_highlight())
+        .highlight_symbol(super::HIGHLIGHT_SYMBOL);
     f.render_stateful_widget(list, rows[1], list_state);
 }
 
@@ -239,12 +235,8 @@ fn render_dir_list(f: &mut Frame, area: Rect, state: &mut ConfigState<'_>) {
 
     let list = List::new(items)
         .block(block)
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("► ");
+        .highlight_style(super::list_highlight())
+        .highlight_symbol(super::HIGHLIGHT_SYMBOL);
 
     f.render_stateful_widget(list, area, state.list_state);
 }
