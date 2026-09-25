@@ -75,7 +75,10 @@ pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
         );
     }
     if state.show_input {
-        render_add_input(f, area, state.input);
+        // Single-line add-scan-dir input (convention 9): typed path plus
+        // cursor, titled 添加扫描目录; Enter confirms, Esc cancels via the
+        // bottom hints.
+        super::render_input_overlay(f, area, "添加扫描目录", state.input, true);
     }
     if state.show_delete_confirm {
         let dir = state
@@ -123,12 +126,6 @@ fn key_hints(picker_open: bool, input_open: bool) -> Line<'static> {
             Span::raw(" 返回"),
         ])
     }
-}
-
-/// Single-line add-scan-dir input (convention 9): typed path plus cursor,
-/// titled 添加扫描目录; Enter confirms, Esc cancels via the bottom hints.
-fn render_add_input(f: &mut Frame, area: Rect, input: &str) {
-    super::render_input_overlay(f, area, "添加扫描目录", input, true);
 }
 
 /// Interactive directory browser overlay: the current path on the first row,
