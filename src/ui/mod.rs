@@ -78,12 +78,12 @@ pub fn render_confirm_overlay(
 
     let mut lines = body;
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("y", Style::default().fg(Color::Cyan)),
-        Span::raw(" 确认  "),
-        Span::styled("n", Style::default().fg(Color::Cyan)),
-        Span::raw(" 取消"),
-    ]));
+    lines.push(
+        [hint("y", "确认"), hint("n", "取消")]
+            .into_iter()
+            .flatten()
+            .collect::<Line>(),
+    );
 
     let paragraph = Paragraph::new(lines).block(block);
     let paragraph = if wrap {
