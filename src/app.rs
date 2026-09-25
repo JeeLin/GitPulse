@@ -804,15 +804,18 @@ impl App {
     /// still goes through [`App::submit_config_add`] validation; a failure
     /// keeps the picker open with the error on the status line.
     fn picker_submit(&mut self) {
-        let path = match self.picker_state.selected() {
-            Some(0) if !self.picker_dir.as_os_str().is_empty() => {
-                self.picker_dir.display().to_string()
+        let path = if let Some(0) = self.picker_state.selected() {
+            // Row 0 submits the browsed directory; an empty one (picker
+            // opened at an unreadable start dir) submits nothing, as before.
+            if self.picker_dir.as_os_str().is_empty() {
+                return;
             }
-            Some(row) if row > 0 => match self.picker_entries.get(row - 1) {
-                Some(entry) => entry.display().to_string(),
-                None => return,
-            },
-            _ => return,
+            self.picker_dir.display().to_string()
+        } else {
+            let Some(entry) = self.picker_selected_entry() else {
+                return;
+            };
+            entry.display().to_string()
         };
         self.config_input = path;
         self.submit_config_add();
