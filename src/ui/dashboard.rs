@@ -30,6 +30,13 @@ pub struct DashboardState<'a> {
     pub batch_running: bool,
 }
 
+/// Bordered-block title shared by every dashboard state: the product label
+/// plus the visible repository count, so the empty state (`0`) and the list
+/// state stay word-identical.
+fn dashboard_title(count: usize) -> String {
+    format!("GitPulse 仓库状态 ({count})")
+}
+
 /// Render the repository dashboard overview.
 ///
 /// An error status replaces the repository list so a failed load never
@@ -134,7 +141,7 @@ fn render_repo_list(f: &mut Frame, area: Rect, state: &mut DashboardState<'_>) {
         .collect();
 
     let block = Block::default()
-        .title(format!("GitPulse 仓库状态 ({})", state.repos.len()))
+        .title(dashboard_title(state.repos.len()))
         .borders(Borders::ALL);
 
     let list = List::new(items)
@@ -181,7 +188,7 @@ fn render_batch_log(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
 /// config panel (`c`), keeping the usual bordered title and row count.
 fn render_empty_state(f: &mut Frame, area: Rect) {
     let block = Block::default()
-        .title("GitPulse 仓库状态 (0)")
+        .title(dashboard_title(0))
         .borders(Borders::ALL);
     let inner = block.inner(area);
     f.render_widget(block, area);
