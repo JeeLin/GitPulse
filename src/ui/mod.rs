@@ -30,11 +30,17 @@ pub(crate) fn list_highlight() -> Style {
 /// Marker rendered before the selected list row.
 pub(crate) const HIGHLIGHT_SYMBOL: &str = "► ";
 
-/// Key-hint span shared by every bottom hint row: the `k` key in cyan
-/// followed by a single space and `desc`; callers separate pairs with a
-/// single-space [`Span::raw`] so widths stay consistent across views.
-pub(crate) fn hint(k: &str, desc: &str) -> Span<'static> {
-    Span::styled(format!("{k} {desc}"), Style::default().fg(Color::Cyan))
+/// Key-hint fragment shared by every bottom hint row: the `k` key in cyan,
+/// then `desc` in the default color, then the single-space separator, so a
+/// full row composes from `[hint(..), hint(..), ..]` without hand-written
+/// [`Span::raw(" ")`] separators between pairs.
+pub(crate) fn hint(k: &str, desc: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(k.to_string(), Style::default().fg(Color::Cyan)),
+        Span::raw(" "),
+        Span::raw(desc.to_string()),
+        Span::raw(" "),
+    ])
 }
 
 /// Draw the bottom status line shared by every view (convention 3): errors
@@ -239,6 +245,32 @@ mod tests {
         assert!(
             text.contains("GitPulse仓库状态(0)"),
             "missing dashboard title: {text}"
+        );
+    }
+
+    #[test]
+    fn hint_row_keeps_description_in_default_color() {
+        let mut app = base_app();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let hint_row = buffer.area.height - 1;
+        let mut key_fg = None;
+        let mut desc_fg = None;
+        for x in 0..buffer.area.width {
+            let cell = &buffer[(x, hint_row)];
+            match cell.symbol() {
+                "j" if key_fg.is_none() => key_fg = Some(cell.fg),
+                "选" => desc_fg = Some(cell.fg),
+                _ => {}
+            }
+        }
+        assert_eq!(key_fg, Some(Color::Cyan), "hint key must stay cyan");
+        assert_eq!(
+            desc_fg,
+            Some(Color::Reset),
+            "hint description must keep the default color"
         );
     }
 

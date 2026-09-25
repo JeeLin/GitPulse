@@ -204,23 +204,19 @@ fn render_empty_state(f: &mut Frame, area: Rect) {
 
 /// Bottom key-hint row for every dashboard state; `c` opens the config panel.
 fn render_key_hints(f: &mut Frame, area: Rect) {
-    let hints = Line::from(vec![
+    let hints = [
         hint("j/k", "选择"),
-        Span::raw(" "),
         hint("Enter", "进入"),
-        Span::raw(" "),
         hint("r", "刷新"),
-        Span::raw(" "),
         hint("l", "pull"),
-        Span::raw(" "),
         hint("f", "fetch"),
-        Span::raw(" "),
         hint("b", "分支"),
-        Span::raw(" "),
         hint("c", "配置"),
-        Span::raw(" "),
         hint("q", "退出"),
-    ]);
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Line>();
     f.render_widget(Paragraph::new(hints), area);
 }
 

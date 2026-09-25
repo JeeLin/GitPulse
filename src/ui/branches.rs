@@ -54,19 +54,17 @@ pub fn render_branches(f: &mut Frame, mut state: BranchesState<'_>) {
 
     super::render_status_line(f, chunks[1], state.status);
 
-    let hints = Line::from(vec![
+    let hints = [
         hint("j/k", "选择"),
-        Span::raw(" "),
         hint("Enter", "切换"),
-        Span::raw(" "),
         hint("n", "新建"),
-        Span::raw(" "),
         hint("d", "删除"),
-        Span::raw(" "),
         hint("r", "刷新"),
-        Span::raw(" "),
         hint("Esc", "返回"),
-    ]);
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Line>();
     f.render_widget(Paragraph::new(hints), chunks[2]);
 
     if state.show_delete_confirm {

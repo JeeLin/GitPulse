@@ -28,13 +28,10 @@ pub fn render_diff(f: &mut Frame, app: &crate::app::App) {
     render_diff_content(f, diff_area, &app.diff_content, app.diff_scroll);
 
     // Render key hints
-    let hints = Line::from(vec![
-        hint("j/k", "滚动"),
-        Span::raw(" "),
-        hint("Esc", "返回"),
-        Span::raw(" "),
-        hint("q", "退出"),
-    ]);
+    let hints = [hint("j/k", "滚动"), hint("Esc", "返回"), hint("q", "退出")]
+        .into_iter()
+        .flatten()
+        .collect::<Line>();
     f.render_widget(Paragraph::new(hints).style(Style::default()), hints_area);
 }
 

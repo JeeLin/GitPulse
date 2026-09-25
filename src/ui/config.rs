@@ -94,35 +94,32 @@ pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
 /// typing, list navigation otherwise.
 fn key_hints(picker_open: bool, input_open: bool) -> Line<'static> {
     if picker_open {
-        Line::from(vec![
+        [
             hint("j/k", "移动"),
-            Span::raw(" "),
             hint("Enter", "选择"),
-            Span::raw(" "),
             hint("l/h", "进入/上级"),
-            Span::raw(" "),
             hint("i", "手动"),
-            Span::raw(" "),
             hint("Esc", "取消"),
-        ])
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     } else if input_open {
-        Line::from(vec![
-            hint("Enter", "确认"),
-            Span::raw(" "),
-            hint("Esc", "取消"),
-        ])
+        [hint("Enter", "确认"), hint("Esc", "取消")]
+            .into_iter()
+            .flatten()
+            .collect()
     } else {
-        Line::from(vec![
+        [
             hint("j/k", "选择"),
-            Span::raw(" "),
             hint("a", "添加"),
-            Span::raw(" "),
             hint("i", "手动"),
-            Span::raw(" "),
             hint("d", "删除"),
-            Span::raw(" "),
             hint("Esc", "返回"),
-        ])
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 }
 

@@ -49,25 +49,20 @@ pub fn render_repo(f: &mut Frame, mut state: RepoState<'_>) {
     }
 
     // Render key hints (single-space separators keep the line under 80 cols)
-    let hints = Line::from(vec![
+    let hints = [
         hint("j/k", "选择"),
-        Span::raw(" "),
         hint("d", "diff"),
-        Span::raw(" "),
         hint("s", "stage"),
-        Span::raw(" "),
         hint("u", "unstage"),
-        Span::raw(" "),
         hint("x", "discard"),
-        Span::raw(" "),
         hint("c", "commit"),
-        Span::raw(" "),
         hint("p", "push"),
-        Span::raw(" "),
         hint("l", "pull"),
-        Span::raw(" "),
         hint("Esc", "返回"),
-    ]);
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Line>();
     f.render_widget(Paragraph::new(hints).style(Style::default()), hints_area);
 
     // Overlay discard confirmation dialog
