@@ -99,8 +99,8 @@ pub fn render_confirm_overlay(
 /// `title` showing `text` after a cyan `> ` prompt. `show_cursor` appends the
 /// `▌` caret (config manual input); popups whose hints live in the title
 /// (branch create, commit message) omit it. The line scrolls horizontally by
-/// the width that does not fit so the tail — and with it the caret — always
-/// stays inside the popup instead of being cut off.
+/// the display width that does not fit so the tail — and with it the caret —
+/// always stays inside the popup instead of being cut off.
 pub fn render_input_overlay(f: &mut Frame, area: Rect, title: &str, text: &str, show_cursor: bool) {
     let popup = repo::centered_rect(60, 5, area);
     f.render_widget(Clear, popup);
@@ -113,14 +113,32 @@ pub fn render_input_overlay(f: &mut Frame, area: Rect, title: &str, text: &str, 
         spans.push(Span::styled("▌", Style::default().fg(Color::Cyan)));
     }
     let block = Block::default().title(title).borders(Borders::ALL);
-    // `"> "` prompt + text + optional caret, minus what the inner width can
-    // hold; callers without a caret scroll to the tail of `text` the same way.
-    let content_width = 2 + text.chars().count() + usize::from(show_cursor);
-    let scroll_x = content_width.saturating_sub(block.inner(popup).width as usize) as u16;
-    let paragraph = Paragraph::new(Line::from(spans))
-        .block(block)
-        .scroll((0, scroll_x));
+    let line = Line::from(spans);
+    let scroll_x = tail_scroll(&line, block.inner(popup).width as usize);
+    let paragraph = Paragraph::new(line).block(block).scroll((0, scroll_x));
     f.render_widget(paragraph, popup);
+}
+
+/// Horizontal scroll that keeps the last `inner_width` display columns of
+/// `line` — and with them the caret — inside the popup.
+///
+/// ratatui consumes the offset in display cells (a CJK glyph costs 2), so a
+/// char-counted offset under-scrolls wide text; and because a wide glyph that
+/// straddles the offset is drawn in full, the offset is rounded up to the
+/// next grapheme boundary instead of landing mid-glyph.
+fn tail_scroll(line: &Line, inner_width: usize) -> u16 {
+    let needed = line.width().saturating_sub(inner_width);
+    if needed == 0 {
+        return 0;
+    }
+    let mut skipped = 0;
+    for grapheme in line.styled_graphemes(Style::default()) {
+        skipped += Span::raw(grapheme.symbol).width();
+        if skipped >= needed {
+            break;
+        }
+    }
+    skipped as u16
 }
 
 /// Dispatch rendering to the active view.
@@ -442,6 +460,37 @@ mod tests {
         assert!(
             raw.contains("tailtail"),
             "tail of the long commit message missing: {raw}"
+        );
+    }
+
+    /// Wide CJK glyphs cost two display cells each while `chars().count()`
+    /// charges one, so a long Chinese path under-scrolls and drops the caret
+    /// unless the offset is measured by display width.
+    #[test]
+    fn input_overlay_scrolls_wide_cjk_path_to_keep_cursor_visible() {
+        let mut app = base_app();
+        app.view = View::Config;
+        app.show_config_input = true;
+        app.config_input = format!("/数据/项目/{}", "中文目录".repeat(20));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let raw: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            raw.contains('▌'),
+            "cursor scrolled out of the visible window: {raw}"
+        );
+        // Wide glyphs leave a padding cell, so match the tail whitespace-free.
+        let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact.contains("目录"),
+            "tail of the CJK path missing: {compact}"
         );
     }
 
