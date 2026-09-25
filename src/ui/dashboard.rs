@@ -11,7 +11,7 @@ use ratatui::{
 use crate::app::{BatchLogLine, StatusLine};
 use crate::git::RepoInfo;
 
-use super::render_status_line;
+use super::{hint, render_status_line};
 
 /// Borrowed render state for the dashboard, referencing `App.repos` directly
 /// so no mock data source exists (checkpoint 2).
@@ -205,22 +205,21 @@ fn render_empty_state(f: &mut Frame, area: Rect) {
 /// Bottom key-hint row for every dashboard state; `c` opens the config panel.
 fn render_key_hints(f: &mut Frame, area: Rect) {
     let hints = Line::from(vec![
-        Span::styled("j/k", Style::default().fg(Color::Cyan)),
-        Span::raw(" 选择  "),
-        Span::styled("Enter", Style::default().fg(Color::Cyan)),
-        Span::raw(" 进入  "),
-        Span::styled("r", Style::default().fg(Color::Cyan)),
-        Span::raw(" 刷新  "),
-        Span::styled("l", Style::default().fg(Color::Cyan)),
-        Span::raw(" pull  "),
-        Span::styled("f", Style::default().fg(Color::Cyan)),
-        Span::raw(" fetch  "),
-        Span::styled("b", Style::default().fg(Color::Cyan)),
-        Span::raw(" 分支  "),
-        Span::styled("c", Style::default().fg(Color::Cyan)),
-        Span::raw(" 配置  "),
-        Span::styled("q", Style::default().fg(Color::Cyan)),
-        Span::raw(" 退出"),
+        hint("j/k", "选择"),
+        Span::raw(" "),
+        hint("Enter", "进入"),
+        Span::raw(" "),
+        hint("r", "刷新"),
+        Span::raw(" "),
+        hint("l", "pull"),
+        Span::raw(" "),
+        hint("f", "fetch"),
+        Span::raw(" "),
+        hint("b", "分支"),
+        Span::raw(" "),
+        hint("c", "配置"),
+        Span::raw(" "),
+        hint("q", "退出"),
     ]);
     f.render_widget(Paragraph::new(hints), area);
 }

@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::{remote, render_confirm_overlay, render_status_line};
+use super::{hint, remote, render_confirm_overlay, render_status_line};
 use crate::app::{RemoteStatus, StatusLine};
 use crate::git::{FileEntry, FileState};
 
@@ -50,24 +50,23 @@ pub fn render_repo(f: &mut Frame, mut state: RepoState<'_>) {
 
     // Render key hints (single-space separators keep the line under 80 cols)
     let hints = Line::from(vec![
-        Span::styled("j/k", Style::default().fg(Color::Cyan)),
-        Span::raw(" 选择 "),
-        Span::styled("d", Style::default().fg(Color::Cyan)),
-        Span::raw(" diff "),
-        Span::styled("s", Style::default().fg(Color::Cyan)),
-        Span::raw(" stage "),
-        Span::styled("u", Style::default().fg(Color::Cyan)),
-        Span::raw(" unstage "),
-        Span::styled("x", Style::default().fg(Color::Cyan)),
-        Span::raw(" discard "),
-        Span::styled("c", Style::default().fg(Color::Cyan)),
-        Span::raw(" commit "),
-        Span::styled("p", Style::default().fg(Color::Cyan)),
-        Span::raw(" push "),
-        Span::styled("l", Style::default().fg(Color::Cyan)),
-        Span::raw(" pull "),
-        Span::styled("Esc", Style::default().fg(Color::Cyan)),
-        Span::raw(" 返回"),
+        hint("j/k", "选择"),
+        Span::raw(" "),
+        hint("d", "diff"),
+        Span::raw(" "),
+        hint("s", "stage"),
+        Span::raw(" "),
+        hint("u", "unstage"),
+        Span::raw(" "),
+        hint("x", "discard"),
+        Span::raw(" "),
+        hint("c", "commit"),
+        Span::raw(" "),
+        hint("p", "push"),
+        Span::raw(" "),
+        hint("l", "pull"),
+        Span::raw(" "),
+        hint("Esc", "返回"),
     ]);
     f.render_widget(Paragraph::new(hints).style(Style::default()), hints_area);
 

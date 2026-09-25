@@ -11,6 +11,8 @@ use ratatui::{
 use crate::app::StatusLine;
 use crate::git::BranchInfo;
 
+use super::hint;
+
 /// Borrowed render state for the branch panel, referencing `App.branches`
 /// directly so no mock data source exists (checkpoint 2).
 pub struct BranchesState<'a> {
@@ -53,18 +55,17 @@ pub fn render_branches(f: &mut Frame, mut state: BranchesState<'_>) {
     super::render_status_line(f, chunks[1], state.status);
 
     let hints = Line::from(vec![
-        Span::styled("j/k", Style::default().fg(Color::Cyan)),
-        Span::raw(" 选择 "),
-        Span::styled("Enter", Style::default().fg(Color::Cyan)),
-        Span::raw(" 切换 "),
-        Span::styled("n", Style::default().fg(Color::Cyan)),
-        Span::raw(" 新建 "),
-        Span::styled("d", Style::default().fg(Color::Cyan)),
-        Span::raw(" 删除 "),
-        Span::styled("r", Style::default().fg(Color::Cyan)),
-        Span::raw(" 刷新 "),
-        Span::styled("Esc", Style::default().fg(Color::Cyan)),
-        Span::raw(" 返回"),
+        hint("j/k", "选择"),
+        Span::raw(" "),
+        hint("Enter", "切换"),
+        Span::raw(" "),
+        hint("n", "新建"),
+        Span::raw(" "),
+        hint("d", "删除"),
+        Span::raw(" "),
+        hint("r", "刷新"),
+        Span::raw(" "),
+        hint("Esc", "返回"),
     ]);
     f.render_widget(Paragraph::new(hints), chunks[2]);
 

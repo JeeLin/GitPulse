@@ -30,6 +30,13 @@ pub(crate) fn list_highlight() -> Style {
 /// Marker rendered before the selected list row.
 pub(crate) const HIGHLIGHT_SYMBOL: &str = "► ";
 
+/// Key-hint span shared by every bottom hint row: the `k` key in cyan
+/// followed by a single space and `desc`; callers separate pairs with a
+/// single-space [`Span::raw`] so widths stay consistent across views.
+pub(crate) fn hint(k: &str, desc: &str) -> Span<'static> {
+    Span::styled(format!("{k} {desc}"), Style::default().fg(Color::Cyan))
+}
+
 /// Draw the bottom status line shared by every view (convention 3): errors
 /// render red and persist until the next operation, anything else keeps the
 /// default style. `None` leaves the row blank.

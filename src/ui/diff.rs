@@ -8,6 +8,8 @@ use ratatui::{
     Frame,
 };
 
+use super::hint;
+
 /// Render the diff content with syntax highlighting for +/- lines.
 pub fn render_diff(f: &mut Frame, app: &crate::app::App) {
     let area = f.area();
@@ -27,12 +29,11 @@ pub fn render_diff(f: &mut Frame, app: &crate::app::App) {
 
     // Render key hints
     let hints = Line::from(vec![
-        Span::styled("j/k", Style::default().fg(Color::Cyan)),
-        Span::raw(" 滚动  "),
-        Span::styled("Esc", Style::default().fg(Color::Cyan)),
-        Span::raw(" 返回  "),
-        Span::styled("q", Style::default().fg(Color::Cyan)),
-        Span::raw(" 退出"),
+        hint("j/k", "滚动"),
+        Span::raw(" "),
+        hint("Esc", "返回"),
+        Span::raw(" "),
+        hint("q", "退出"),
     ]);
     f.render_widget(Paragraph::new(hints).style(Style::default()), hints_area);
 }

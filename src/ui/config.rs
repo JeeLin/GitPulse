@@ -10,6 +10,7 @@ use ratatui::{
     Frame,
 };
 
+use super::hint;
 use super::repo::centered_rect;
 use crate::app::StatusLine;
 
@@ -94,36 +95,33 @@ pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
 fn key_hints(picker_open: bool, input_open: bool) -> Line<'static> {
     if picker_open {
         Line::from(vec![
-            Span::styled("j/k", Style::default().fg(Color::Cyan)),
-            Span::raw(" 移动  "),
-            Span::styled("Enter", Style::default().fg(Color::Cyan)),
-            Span::raw(" 选择  "),
-            Span::styled("l/h", Style::default().fg(Color::Cyan)),
-            Span::raw(" 进入/上级  "),
-            Span::styled("i", Style::default().fg(Color::Cyan)),
-            Span::raw(" 手动  "),
-            Span::styled("Esc", Style::default().fg(Color::Cyan)),
-            Span::raw(" 取消"),
+            hint("j/k", "移动"),
+            Span::raw(" "),
+            hint("Enter", "选择"),
+            Span::raw(" "),
+            hint("l/h", "进入/上级"),
+            Span::raw(" "),
+            hint("i", "手动"),
+            Span::raw(" "),
+            hint("Esc", "取消"),
         ])
     } else if input_open {
         Line::from(vec![
-            Span::styled("Enter", Style::default().fg(Color::Cyan)),
-            Span::raw(" 确认  "),
-            Span::styled("Esc", Style::default().fg(Color::Cyan)),
-            Span::raw(" 取消"),
+            hint("Enter", "确认"),
+            Span::raw(" "),
+            hint("Esc", "取消"),
         ])
     } else {
         Line::from(vec![
-            Span::styled("j/k", Style::default().fg(Color::Cyan)),
-            Span::raw(" 选择  "),
-            Span::styled("a", Style::default().fg(Color::Cyan)),
-            Span::raw(" 添加  "),
-            Span::styled("i", Style::default().fg(Color::Cyan)),
-            Span::raw(" 手动  "),
-            Span::styled("d", Style::default().fg(Color::Cyan)),
-            Span::raw(" 删除  "),
-            Span::styled("Esc", Style::default().fg(Color::Cyan)),
-            Span::raw(" 返回"),
+            hint("j/k", "选择"),
+            Span::raw(" "),
+            hint("a", "添加"),
+            Span::raw(" "),
+            hint("i", "手动"),
+            Span::raw(" "),
+            hint("d", "删除"),
+            Span::raw(" "),
+            hint("Esc", "返回"),
         ])
     }
 }
