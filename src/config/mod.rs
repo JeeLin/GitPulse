@@ -110,30 +110,36 @@ fn save_to(config: &Config, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Serialize tests that exercise the real config path, pointing `HOME` at a
-/// throwaway directory so `Config::save` never clobbers the developer's
-/// `~/.gitpulse/config.toml`.
+/// Serialize tests that exercise the shared, redirected config file.
 ///
 /// Every test that calls [`Config::save`], [`Config::load`], or otherwise
-/// resolves the config path must hold this guard for its whole body: the
-/// redirected config file is shared (so concurrent save/load pairs would
-/// race), and the one-time `HOME` redirect must not interleave with other
-/// HOME readers.
+/// resolves the config path must hold this guard for its whole body: they all
+/// resolve the same throwaway [`config_path`] override, so concurrent save /
+/// load pairs would race on that one file.
+///
+/// The redirect itself is installed through
+/// [`set_config_path_override`](path::set_config_path_override) rather than by
+/// mutating `HOME`: `dirs` and libgit2 keep reading a stable environment, so
+/// there is no `setenv`/`getenv` data race and no timing dependency on when
+/// the first guarded test runs.
 #[cfg(test)]
 pub(crate) fn config_io_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    static TEST_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     let guard = LOCK
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _ = TEST_HOME.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("gitpulse-test-home-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("create test home");
-        std::env::set_var("HOME", &dir);
-        dir
-    });
+    path::set_config_path_override(test_config_path());
     guard
+}
+
+/// Throwaway config file shared by every [`config_io_guard`] holder.
+#[cfg(test)]
+fn test_config_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "gitpulse-test-config-{}/config.toml",
+        std::process::id()
+    ))
 }
 
 #[cfg(test)]
@@ -197,7 +203,8 @@ mod tests {
 
     #[test]
     fn config_save_persists_scan_dirs_via_public_api() {
-        // Holds the I/O guard: writes the redirected (temp-HOME) config file.
+        // Holds the I/O guard: it points `config_path` at a throwaway file and
+        // serializes access to that shared redirect.
         let _io = super::config_io_guard();
         let config = Config {
             scan_dirs: vec![
