@@ -153,8 +153,8 @@ fn render_dir_picker(
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(inner);
 
-    // Path line, truncated so long paths stay on one row (char count ≈
-    // columns for ASCII paths; CJK segments are clipped by the paragraph).
+    // Path line, truncated by display width so long paths stay on one row
+    // and the ellipsis fits within the frame.
     let path = ellipsize(&dir.display().to_string(), inner.width as usize);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -182,21 +182,52 @@ fn render_dir_picker(
     f.render_stateful_widget(list, rows[1], list_state);
 }
 
-/// Shorten `text` to at most `max` characters around a middle ellipsis, so
-/// long directory paths remain readable on a single line.
+/// Shorten `text` to at most `max` display columns around a middle
+/// ellipsis, so long directory paths remain readable on a single line.
+/// Width is measured in terminal cells (CJK chars count as 2), matching how
+/// ratatui lays out the rendered line.
 fn ellipsize(text: &str, max: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max {
+    let width = |s: &str| Span::raw(s.to_string()).width();
+    if width(text) <= max {
         return text.to_string();
     }
     if max <= 1 {
         return "…".to_string();
     }
-    let head = (max - 1) / 2;
-    let tail = max - 1 - head;
-    let mut out: String = chars[..head].iter().collect();
+    let head_budget = (max - 1) / 2;
+    let tail_budget = max - 1 - head_budget;
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut head_end = 0;
+    let mut head_width = 0;
+    for (i, c) in chars.iter().enumerate() {
+        let cw = width(&c.to_string());
+        if head_width + cw > head_budget {
+            break;
+        }
+        head_width += cw;
+        head_end = i + 1;
+    }
+    // Never drop the head entirely: one cell over budget beats no context.
+    if head_end == 0 && !chars.is_empty() {
+        head_end = 1;
+    }
+
+    let mut tail_start = chars.len();
+    let mut tail_width = 0;
+    while tail_start > head_end {
+        let c = chars[tail_start - 1];
+        let cw = width(&c.to_string());
+        if tail_width + cw > tail_budget {
+            break;
+        }
+        tail_width += cw;
+        tail_start -= 1;
+    }
+
+    let mut out: String = chars[..head_end].iter().collect();
     out.push('…');
-    out.extend(chars[chars.len() - tail..].iter());
+    out.extend(chars[tail_start..].iter());
     out
 }
 
@@ -416,5 +447,19 @@ mod tests {
         assert_eq!(out.chars().count(), 9, "must fit: {out}");
         assert!(out.contains('…'), "missing ellipsis: {out}");
         assert_eq!(ellipsize("xy", 1), "…");
+
+        // CJK chars occupy 2 columns each: measure in display width, not chars.
+        let cjk = format!("/{}", vec!["中文目录"; 10].join("/"));
+        let out = ellipsize(&cjk, 12);
+        assert!(out.contains('…'), "missing ellipsis: {out}");
+        assert!(
+            out.chars().count() <= 12,
+            "width-based slice must not exceed 12 cells: {out}"
+        );
+        use ratatui::text::Span;
+        assert!(
+            Span::raw(out.clone()).width() <= 12,
+            "display width must fit 12 cells: {out}"
+        );
     }
 }
