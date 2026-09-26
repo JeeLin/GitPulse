@@ -834,21 +834,31 @@ impl App {
             self.set_error("目录不能为空");
             return;
         }
-        if !std::path::Path::new(&path).exists() {
+        let dir = std::path::PathBuf::from(&path);
+        if !dir.exists() {
             self.set_error(format!("目录不存在: {path}"));
             return;
         }
-        if !std::path::Path::new(&path).is_dir() {
+        if !dir.is_dir() {
             self.set_error(format!("不是目录: {path}"));
             return;
         }
-        let dir = std::path::PathBuf::from(&path);
-        if self.config.scan_dirs.contains(&dir) {
+        // Compare and store the canonical form so `..`/`.` traversal,
+        // symlinks, and relative spellings of an entry already in the list
+        // collapse into one path (and a relative input cannot drift with the
+        // working directory).
+        let normalized = canonical_or_self(&dir);
+        let duplicate = self
+            .config
+            .scan_dirs
+            .iter()
+            .any(|existing| canonical_or_self(existing) == normalized);
+        if duplicate {
             self.set_error("目录已在列表中");
             return;
         }
 
-        self.config.scan_dirs.push(dir);
+        self.config.scan_dirs.push(normalized);
         if let Err(err) = self.config.save() {
             // Keep memory and disk consistent, and keep the typed text so the
             // save can be retried (convention 9).
@@ -1379,6 +1389,15 @@ fn read_picker_entries(dir: &std::path::Path) -> io::Result<Vec<std::path::PathB
         .collect();
     entries.sort();
     Ok(entries)
+}
+
+/// Canonical form of `path` for scan-dir comparison and storage.
+///
+/// Falls back to the path itself when canonicalization fails (it vanished or
+/// is unreadable between checks), so deduplication degrades to a literal
+/// comparison instead of rejecting the entry outright.
+fn canonical_or_self(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Move the selection in `state` one row within a list of `len` items:
@@ -2309,6 +2328,102 @@ mod tests {
         let st = app.status.as_ref().unwrap();
         assert!(!st.is_error, "{}", st.message);
         assert_eq!(st.message, format!("已添加扫描目录: {}", dir.display()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_add_rejects_equivalent_spelling_of_existing_dir() {
+        let _io = crate::config::config_io_guard();
+
+        let base = temp_dir("config-canon");
+        let dir = base.join("alpha");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut app = App::new(Config::default());
+        app.enter_config();
+        app.start_config_manual();
+        app.config_input = dir.display().to_string();
+        app.submit_config_add();
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error, "{}", st.message);
+        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
+
+        // Reaching the same directory through `..` traversal canonicalizes
+        // to the stored entry, so it is a duplicate: the list is untouched.
+        app.start_config_manual();
+        app.config_input = base.join("alpha/../alpha").display().to_string();
+        app.submit_config_add();
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert_eq!(st.message, "目录已在列表中");
+        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_add_rejects_symlink_alias_of_existing_dir() {
+        let _io = crate::config::config_io_guard();
+
+        let base = temp_dir("config-symlink");
+        let dir = base.join("alpha");
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = base.join("alias");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+
+        let mut app = App::new(Config::default());
+        app.enter_config();
+        app.start_config_manual();
+        app.config_input = dir.display().to_string();
+        app.submit_config_add();
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error, "{}", st.message);
+        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
+
+        // The symlink names the same directory after canonicalization.
+        app.start_config_manual();
+        app.config_input = link.display().to_string();
+        app.submit_config_add();
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert_eq!(st.message, "目录已在列表中");
+        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn config_add_canonicalizes_relative_path_and_dedupes_absolute_spelling() {
+        let _io = crate::config::config_io_guard();
+
+        // Sits under the crate root, which is the test process cwd, so the
+        // relative spelling below resolves without depending on /tmp.
+        let name = format!("target/gitpulse-rel-{}", std::process::id());
+        let dir = std::env::current_dir().unwrap().join(&name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut app = App::new(Config::default());
+        app.enter_config();
+        app.start_config_manual();
+        app.config_input = name.clone();
+        app.submit_config_add();
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error, "{}", st.message);
+        // Stored as the canonical absolute path: no cwd drift on reload.
+        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
+
+        // The absolute spelling of the same directory now maps onto that
+        // canonical entry.
+        app.start_config_manual();
+        app.config_input = dir.display().to_string();
+        app.submit_config_add();
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert_eq!(st.message, "目录已在列表中");
+        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
