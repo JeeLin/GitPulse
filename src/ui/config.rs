@@ -60,7 +60,11 @@ pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
     super::render_status_line(f, chunks[1], state.status);
 
     f.render_widget(
-        Paragraph::new(key_hints(state.show_picker, state.show_input)),
+        Paragraph::new(key_hints(
+            state.show_picker,
+            state.show_input,
+            state.show_delete_confirm,
+        )),
         chunks[2],
     );
 
@@ -91,9 +95,21 @@ pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
 }
 
 /// Bottom key-hint row: picker keys while browsing, submit/cancel while
-/// typing, list navigation otherwise.
-fn key_hints(picker_open: bool, input_open: bool) -> Line<'static> {
-    if picker_open {
+/// typing, y/n/Esc while the delete confirmation is open, list navigation
+/// otherwise.
+fn key_hints(picker_open: bool, input_open: bool, confirm_open: bool) -> Line<'static> {
+    if confirm_open {
+        // Same y/n wording as the overlay itself; every other list key is
+        // swallowed while the dialog is open, so none of them may be shown.
+        [
+            hint("y", "确认"),
+            hint("n", "取消"),
+            hint("Esc", "取消对话框"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    } else if picker_open {
         [
             hint("j/k", "移动"),
             hint("Enter", "选择"),
@@ -398,6 +414,16 @@ mod tests {
         );
         assert!(text.contains("y确认"), "missing confirm key: {text}");
         assert!(text.contains("n取消"), "missing cancel key: {text}");
+        assert!(
+            text.contains("Esc取消对话框"),
+            "missing dismiss hint on the bottom row: {text}"
+        );
+        // The list hints are replaced while the dialog is open: a/d/j/k and
+        // Esc-returns are swallowed by `confirm_modal_key`.
+        assert!(!text.contains("a添加"), "list hints leaked: {text}");
+        assert!(!text.contains("d删除"), "list hints leaked: {text}");
+        assert!(!text.contains("j/k选择"), "list hints leaked: {text}");
+        assert!(!text.contains("Esc返回"), "list hints leaked: {text}");
     }
 
     #[test]
