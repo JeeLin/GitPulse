@@ -195,7 +195,6 @@ fn ellipsize(text: &str, max: usize) -> String {
         return "…".to_string();
     }
     let head_budget = (max - 1) / 2;
-    let tail_budget = max - 1 - head_budget;
 
     let chars: Vec<char> = text.chars().collect();
     let mut head_end = 0;
@@ -208,10 +207,14 @@ fn ellipsize(text: &str, max: usize) -> String {
         head_width += cw;
         head_end = i + 1;
     }
-    // Never drop the head entirely: one cell over budget beats no context.
+    // Never drop the head entirely: force one cell (or a 2-cell CJK char)
+    // even when it exceeds the budget, and pay for it out of the tail so the
+    // total still fits within `max` columns.
     if head_end == 0 && !chars.is_empty() {
         head_end = 1;
+        head_width = width(&chars[0].to_string());
     }
+    let tail_budget = (max - 1).saturating_sub(head_width);
 
     let mut tail_start = chars.len();
     let mut tail_width = 0;
@@ -449,14 +452,9 @@ mod tests {
         assert_eq!(ellipsize("xy", 1), "…");
 
         // CJK chars occupy 2 columns each: measure in display width, not chars.
-        let cjk = format!("/{}", vec!["中文目录"; 10].join("/"));
+        let cjk = format!("/{}", ["中文目录"; 10].join("/"));
         let out = ellipsize(&cjk, 12);
         assert!(out.contains('…'), "missing ellipsis: {out}");
-        assert!(
-            out.chars().count() <= 12,
-            "width-based slice must not exceed 12 cells: {out}"
-        );
-        use ratatui::text::Span;
         assert!(
             Span::raw(out.clone()).width() <= 12,
             "display width must fit 12 cells: {out}"
