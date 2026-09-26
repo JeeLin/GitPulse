@@ -1,5 +1,6 @@
 //! Repository discovery: scan directories for git repositories, skipping symlinks.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -14,12 +15,27 @@ use super::status::{query_status, RepoInfo};
 /// and recursion stops at repository boundaries so nested repos are not
 /// visited. Per-repository query failures are skipped rather than aborting
 /// the whole scan.
+///
+/// Overlapping scan directories (e.g. `/code` and `/code/rust`) can report
+/// the same repository twice, so results are deduplicated by canonical path
+/// with the first occurrence winning.
 pub fn discover_repos(dirs: &[PathBuf]) -> Result<Vec<RepoInfo>> {
     let mut repos = Vec::new();
     for dir in dirs {
         discover_in_dir(dir, &mut repos);
     }
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    repos.retain(|repo| seen.insert(canonical_or_self(&repo.path)));
     Ok(repos)
+}
+
+/// Canonical form of `path` for deduplication.
+///
+/// Falls back to the path itself when canonicalization fails (it vanished or
+/// is unreadable between checks), so deduplication degrades to a literal
+/// comparison instead of dropping the entry outright.
+fn canonical_or_self(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Recursively discover git repositories under `dir`.
@@ -65,6 +81,14 @@ fn is_git_repo(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("gitpulse-discover-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn discover_finds_git_repos() {
         let scan_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -75,5 +99,30 @@ mod tests {
         assert!(repos
             .iter()
             .any(|r| r.path == PathBuf::from(env!("CARGO_MANIFEST_DIR"))));
+    }
+
+    #[test]
+    fn discover_dedupes_nested_scan_dirs() {
+        let outer = temp_dir("nested");
+        let repo_dir = outer.join("inner");
+        fs::create_dir_all(&repo_dir).unwrap();
+        git2::Repository::init(&repo_dir).unwrap();
+
+        // Outer directory plus the same repository reached through a path
+        // with a redundant `..` component: both walks find one repository but
+        // the literal paths differ, so only canonical dedup collapses them.
+        let alias = repo_dir.join("..").join("inner");
+        let repos = discover_repos(&[outer.clone(), alias]).unwrap();
+        let want = fs::canonicalize(&repo_dir).unwrap();
+        let hits = repos
+            .iter()
+            .filter(|r| fs::canonicalize(&r.path).unwrap() == want)
+            .count();
+        assert_eq!(
+            hits, 1,
+            "nested repository must be reported once: {repos:?}"
+        );
+
+        let _ = fs::remove_dir_all(&outer);
     }
 }
