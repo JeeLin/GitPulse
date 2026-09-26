@@ -209,10 +209,15 @@ fn ellipsize(text: &str, max: usize) -> String {
     }
     // Never drop the head entirely: force one cell (or a 2-cell CJK char)
     // even when it exceeds the budget, and pay for it out of the tail so the
-    // total still fits within `max` columns.
+    // total still fits within `max` columns. When head + ellipsis cannot fit
+    // at all (max == 2 with a 2-column first char), the head alone stands in
+    // for the truncated form.
     if head_end == 0 && !chars.is_empty() {
         head_end = 1;
         head_width = width(&chars[0].to_string());
+        if head_width + 1 > max {
+            return chars[0].to_string();
+        }
     }
     let tail_budget = (max - 1).saturating_sub(head_width);
 
@@ -458,6 +463,21 @@ mod tests {
         assert!(
             Span::raw(out.clone()).width() <= 12,
             "display width must fit 12 cells: {out}"
+        );
+
+        // Forced-head fallback path (head does not fit its budget): the
+        // result must still fit within `max` display columns.
+        for (text, max) in [("abcd", 2), ("中ab", 3), ("中文目录", 4), ("a中b", 5)] {
+            let out = ellipsize(text, max);
+            assert!(
+                Span::raw(out.clone()).width() <= max,
+                "fallback must fit {max} cells: {out}"
+            );
+        }
+        assert_eq!(
+            ellipsize("中ab", 2),
+            "中",
+            "head alone when no ellipsis fits"
         );
     }
 }
