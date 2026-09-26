@@ -89,7 +89,8 @@ pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
         let dir = state
             .list_state
             .selected()
-            .and_then(|i| state.scan_dirs.get(i));
+            .and_then(|i| state.scan_dirs.get(i))
+            .map(|p| p.as_path());
         render_delete_confirm(f, area, dir);
     }
 }
@@ -257,7 +258,7 @@ fn ellipsize(text: &str, max: usize) -> String {
 
 /// Delete confirmation overlay (discard-style, convention 8): y confirms,
 /// n cancels; names the selected directory when one is selected.
-fn render_delete_confirm(f: &mut Frame, area: Rect, dir: Option<&PathBuf>) {
+fn render_delete_confirm(f: &mut Frame, area: Rect, dir: Option<&Path>) {
     let mut body = vec![];
     if let Some(dir) = dir {
         body.push(Line::from(Span::styled(
