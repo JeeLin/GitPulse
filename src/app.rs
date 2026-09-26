@@ -800,8 +800,9 @@ impl App {
     }
 
     /// Submit the picker selection (Enter): row 0 picks the current
-    /// directory, other rows pick the highlighted subdirectory. The path
-    /// still goes through [`App::submit_config_add`] validation; a failure
+    /// directory, other rows pick the highlighted subdirectory. The
+    /// [`PathBuf`] goes straight into [`App::add_scan_dir`], so names that
+    /// are not valid UTF-8 never round-trip through `String`; a failure
     /// keeps the picker open with the error on the status line.
     fn picker_submit(&mut self) {
         let path = if let Some(0) = self.picker_state.selected() {
@@ -810,37 +811,50 @@ impl App {
             if self.picker_dir.as_os_str().is_empty() {
                 return;
             }
-            self.picker_dir.display().to_string()
+            self.picker_dir.clone()
         } else {
             let Some(entry) = self.picker_selected_entry() else {
                 return;
             };
-            entry.display().to_string()
+            entry
         };
-        self.config_input = path;
-        self.submit_config_add();
+        self.add_scan_dir(path);
     }
 
-    /// Validate the typed path, persist it, and rescan (convention 5).
+    /// Trim and validate the typed path, then hand it to
+    /// [`App::add_scan_dir`] (convention 5).
     ///
-    /// Each validation failure keeps the input open with the typed text so it
-    /// can be corrected: empty / missing / not a directory / duplicate.
-    /// On success the config is saved, repos refreshed, and the new entry
-    /// selected; the success message is written after the refresh, which
-    /// would otherwise clear it.
+    /// An empty / whitespace-only input reports the error here; everything
+    /// else is checked on the [`PathBuf`], keeping this function to the
+    /// `String → Path` boundary.
     pub fn submit_config_add(&mut self) {
         let path = self.config_input.trim().to_string();
         if path.is_empty() {
             self.set_error("目录不能为空");
             return;
         }
-        let dir = std::path::PathBuf::from(&path);
+        self.add_scan_dir(std::path::PathBuf::from(path));
+    }
+
+    /// Validate, deduplicate, persist, and rescan a scan dir (convention 5).
+    ///
+    /// The path is taken as a [`PathBuf`] so picker selections with non-UTF-8
+    /// names are checked against the real filesystem entry instead of a
+    /// lossy `display().to_string()` rendering. Each validation failure keeps
+    /// the input open so it can be corrected: missing / not a directory /
+    /// duplicate (empty input is [`App::submit_config_add`]'s job). The
+    /// canonical form is stored while the message echoes the submitted
+    /// spelling. On success the config is saved, repos refreshed, and the new
+    /// entry selected; the success message is written after the refresh,
+    /// which would otherwise clear it.
+    fn add_scan_dir(&mut self, dir: std::path::PathBuf) {
+        let shown = dir.display().to_string();
         if !dir.exists() {
-            self.set_error(format!("目录不存在: {path}"));
+            self.set_error(format!("目录不存在: {shown}"));
             return;
         }
         if !dir.is_dir() {
-            self.set_error(format!("不是目录: {path}"));
+            self.set_error(format!("不是目录: {shown}"));
             return;
         }
         // Compare and store the canonical form so `..`/`.` traversal,
@@ -860,8 +874,8 @@ impl App {
 
         self.config.scan_dirs.push(normalized);
         if let Err(err) = self.config.save() {
-            // Keep memory and disk consistent, and keep the typed text so the
-            // save can be retried (convention 9).
+            // Keep memory and disk consistent, and keep the submitted path
+            // visible so the save can be retried (convention 9).
             self.config.scan_dirs.pop();
             self.set_error(format!("保存配置失败: {err:#}"));
             return;
@@ -870,7 +884,7 @@ impl App {
         self.refresh_repos();
         self.config_state
             .select(Some(self.config.scan_dirs.len() - 1));
-        self.set_info_unless_error(format!("已添加扫描目录: {path}"));
+        self.set_info_unless_error(format!("已添加扫描目录: {shown}"));
     }
 
     /// Open the delete confirmation for the selected scan dir (config `d`).
@@ -1354,7 +1368,7 @@ impl App {
     }
 
     /// Key handler for the directory picker overlay: list navigation,
-    /// descend/ascend, selection routed through `submit_config_add`, and a
+    /// descend/ascend, selection routed through `add_scan_dir`, and a
     /// switch to the manual input. `Esc` cancels; `q` is swallowed (quitting
     /// stays one Esc away on the list, not mid-browse).
     fn handle_config_picker_key(&mut self, key: KeyEvent) {
@@ -2648,6 +2662,59 @@ mod tests {
         let st = app.status.as_ref().unwrap();
         assert!(!st.is_error, "{}", st.message);
         assert_eq!(st.message, format!("已添加扫描目录: {}", base.display()));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A directory name that is not valid UTF-8 is readable in the picker, so
+    /// submitting it must reach the filesystem checks unchanged: the old
+    /// `display().to_string()` round trip replaced the bytes with U+FFFD and
+    /// reported `目录不存在` for a directory that exists.
+    ///
+    /// The duplicate check needs no write, so it locks the lossless picker →
+    /// [`App::add_scan_dir`] hand-off on its own. A fresh submission is then
+    /// checked for the same symptom; whether such a path can be persisted at
+    /// all is up to the config layer (TOML strings are UTF-8, so serde rejects
+    /// a non-UTF-8 `PathBuf` and the save rolls the entry back).
+    #[cfg(unix)]
+    #[test]
+    fn config_picker_submits_non_utf8_dir_losslessly() {
+        use std::os::unix::ffi::OsStrExt;
+
+        // Holds the I/O guard: the submission below reaches `Config::save`.
+        let _io = crate::config::config_io_guard();
+
+        let base = temp_dir("picker-nonutf8");
+        let dir = base.join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+        std::fs::create_dir(&dir).unwrap();
+
+        let mut app = App::new(Config::default());
+        app.config.scan_dirs = vec![dir.clone()];
+        app.enter_config();
+        app.show_config_picker = true;
+        app.picker_dir = base.clone();
+        app.picker_entries = vec![dir.clone()];
+        app.picker_state.select(Some(1));
+
+        // A mangled spelling can never equal the real path: hitting the
+        // duplicate branch proves the PathBuf arrived intact.
+        assert!(app.handle_key(key(KeyCode::Enter)));
+        let st = app.status.as_ref().unwrap();
+        assert_eq!(st.message, "目录已在列表中");
+        assert!(
+            app.show_config_picker,
+            "failed submit keeps the picker open"
+        );
+        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
+
+        // The same directory submitted fresh is never reported missing or
+        // as a non-directory: validation ran against the real entry.
+        app.config.scan_dirs.clear();
+        app.add_scan_dir(dir.clone());
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.message.starts_with("目录不存在"), "{}", st.message);
+        assert!(!st.message.starts_with("不是目录"), "{}", st.message);
+        assert!(!st.message.contains('\u{FFFD}'), "{}", st.message);
 
         let _ = std::fs::remove_dir_all(&base);
     }
