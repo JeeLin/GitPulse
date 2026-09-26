@@ -49,27 +49,47 @@ pub fn render_repo(f: &mut Frame, mut state: RepoState<'_>) {
     }
 
     // Render key hints (single-space separators keep the line under 80 cols)
-    let hints = [
-        hint("j/k", "选择"),
-        hint("d", "diff"),
-        hint("s", "stage"),
-        hint("u", "unstage"),
-        hint("x", "discard"),
-        hint("c", "commit"),
-        hint("p", "push"),
-        hint("l", "pull"),
-        hint("Esc", "返回"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Line>();
-    f.render_widget(Paragraph::new(hints).style(Style::default()), hints_area);
+    f.render_widget(
+        Paragraph::new(key_hints(state.show_discard_confirm)).style(Style::default()),
+        hints_area,
+    );
 
     // Overlay discard confirmation dialog
     if state.show_discard_confirm {
         if let Some(file) = state.confirm_file {
             render_discard_dialog(f, area, file);
         }
+    }
+}
+
+/// Bottom key-hint row: y/n/Esc while the discard confirmation is open (every
+/// other list key is swallowed then), the file-list actions otherwise.
+fn key_hints(discard_confirm_open: bool) -> Line<'static> {
+    if discard_confirm_open {
+        // Same y/n wording as the overlay itself.
+        [
+            hint("y", "确认"),
+            hint("n", "取消"),
+            hint("Esc", "取消对话框"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    } else {
+        [
+            hint("j/k", "选择"),
+            hint("d", "diff"),
+            hint("s", "stage"),
+            hint("u", "unstage"),
+            hint("x", "discard"),
+            hint("c", "commit"),
+            hint("p", "push"),
+            hint("l", "pull"),
+            hint("Esc", "返回"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 }
 
@@ -193,6 +213,15 @@ mod tests {
         terminal.backend().buffer()[(0, 22)].fg
     }
 
+    /// Whitespace-stripped text of a single row (the bottom hints row is 23).
+    fn row_compact(terminal: &Terminal<TestBackend>, y: u16) -> String {
+        let buffer = terminal.backend().buffer();
+        let raw: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect();
+        raw.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
     #[test]
     fn render_file_list_shows_paths_states_and_status_line() {
         let entries = vec![
@@ -273,6 +302,31 @@ mod tests {
         assert!(text.contains("src/lib.rs"), "missing file name: {text}");
         assert!(text.contains("y确认"), "missing confirm key: {text}");
         assert!(text.contains("n取消"), "missing cancel key: {text}");
+    }
+
+    #[test]
+    fn render_discard_confirm_switches_bottom_key_hints() {
+        let entries = vec![entry("src/lib.rs", FileState::Modified)];
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        let mut state = base_state(&entries, &mut list_state, None);
+        state.show_discard_confirm = true;
+        state.confirm_file = entries.first();
+        let terminal = render_to_terminal(state);
+        let hints = row_compact(&terminal, 23);
+        // The dialog swallows every list key: none of them may be advertised.
+        for swallowed in [
+            "j/k", "diff", "stage", "unstage", "discard", "commit", "push", "pull",
+        ] {
+            assert!(
+                !hints.contains(swallowed),
+                "swallowed key {swallowed} still hinted: {hints}"
+            );
+        }
+        // Only the keys the confirmation actually handles are shown.
+        assert!(hints.contains("y确认"), "missing confirm hint: {hints}");
+        assert!(hints.contains("n取消"), "missing cancel hint: {hints}");
+        assert!(hints.contains("Esc取消对话框"), "missing Esc hint: {hints}");
     }
 
     #[test]
