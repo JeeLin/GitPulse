@@ -1667,6 +1667,14 @@ mod tests {
         dir
     }
 
+    /// Canonical form of `path`, matching what [`App`] stores for a scan
+    /// dir: `add_scan_dir` persists the canonicalized path, so asserting
+    /// against a literal `temp_dir()` spelling breaks when the temp
+    /// directory sits behind a symlink (macOS `/var`, a redirected `TMPDIR`).
+    fn canon(path: &std::path::Path) -> std::path::PathBuf {
+        git::canonical_or_self(path)
+    }
+
     fn init_repo_with_commit(dir: &std::path::Path) {
         let repo = git2::Repository::init(dir).unwrap();
         let mut config = repo.config().unwrap();
@@ -2318,16 +2326,16 @@ mod tests {
         // Input closed and cleared, list updated, new entry selected.
         assert!(!app.show_config_input);
         assert!(app.config_input.is_empty());
-        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
+        assert_eq!(app.config.scan_dirs, vec![canon(&dir)]);
         assert_eq!(app.config_state.selected(), Some(0));
 
         // Persisted to the config file (restart would load the same dirs).
         let loaded = Config::load().expect("load saved config");
-        assert_eq!(loaded.scan_dirs, vec![dir.clone()]);
+        assert_eq!(loaded.scan_dirs, vec![canon(&dir)]);
 
         // Auto-rescan discovered the repository under the new scan dir.
         assert_eq!(app.repos.len(), 1);
-        assert_eq!(app.repos[0].path, dir);
+        assert_eq!(app.repos[0].path, canon(&dir));
 
         // Success message survives the refresh (which clears the status).
         let st = app.status.as_ref().unwrap();
@@ -2352,7 +2360,7 @@ mod tests {
         app.submit_config_add();
         let st = app.status.as_ref().unwrap();
         assert!(!st.is_error, "{}", st.message);
-        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
+        assert_eq!(app.config.scan_dirs, vec![canon(&dir)]);
 
         // Reaching the same directory through `..` traversal canonicalizes
         // to the stored entry, so it is a duplicate: the list is untouched.
@@ -2362,7 +2370,7 @@ mod tests {
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
         assert_eq!(st.message, "目录已在列表中");
-        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
+        assert_eq!(app.config.scan_dirs, vec![canon(&dir)]);
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -2385,7 +2393,7 @@ mod tests {
         app.submit_config_add();
         let st = app.status.as_ref().unwrap();
         assert!(!st.is_error, "{}", st.message);
-        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
+        assert_eq!(app.config.scan_dirs, vec![canon(&dir)]);
 
         // The symlink names the same directory after canonicalization.
         app.start_config_manual();
@@ -2394,7 +2402,7 @@ mod tests {
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
         assert_eq!(st.message, "目录已在列表中");
-        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
+        assert_eq!(app.config.scan_dirs, vec![canon(&dir)]);
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -2418,7 +2426,7 @@ mod tests {
         let st = app.status.as_ref().unwrap();
         assert!(!st.is_error, "{}", st.message);
         // Stored as the canonical absolute path: no cwd drift on reload.
-        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
+        assert_eq!(app.config.scan_dirs, vec![canon(&dir)]);
 
         // The absolute spelling of the same directory now maps onto that
         // canonical entry.
@@ -2428,7 +2436,7 @@ mod tests {
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
         assert_eq!(st.message, "目录已在列表中");
-        assert_eq!(app.config.scan_dirs, vec![dir.clone()]);
+        assert_eq!(app.config.scan_dirs, vec![canon(&dir)]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2631,10 +2639,10 @@ mod tests {
         assert!(app.handle_key(key(KeyCode::Enter)));
         assert!(!app.show_config_picker, "success closes the picker");
         assert!(app.config_input.is_empty());
-        assert_eq!(app.config.scan_dirs, vec![base.join("beta")]);
+        assert_eq!(app.config.scan_dirs, vec![canon(&base.join("beta"))]);
         assert_eq!(app.config_state.selected(), Some(0));
         let loaded = Config::load().expect("load saved config");
-        assert_eq!(loaded.scan_dirs, vec![base.join("beta")]);
+        assert_eq!(loaded.scan_dirs, vec![canon(&base.join("beta"))]);
         let st = app.status.as_ref().unwrap();
         assert!(!st.is_error, "{}", st.message);
         assert_eq!(
@@ -2649,7 +2657,10 @@ mod tests {
         app.picker_state.select(Some(0));
         assert!(app.handle_key(key(KeyCode::Enter)));
         assert!(!app.show_config_picker);
-        assert_eq!(app.config.scan_dirs, vec![base.join("beta"), base.clone()]);
+        assert_eq!(
+            app.config.scan_dirs,
+            vec![canon(&base.join("beta")), canon(&base)]
+        );
         let st = app.status.as_ref().unwrap();
         assert!(!st.is_error, "{}", st.message);
         assert_eq!(st.message, format!("已添加扫描目录: {}", base.display()));
