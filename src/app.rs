@@ -861,12 +861,12 @@ impl App {
         // symlinks, and relative spellings of an entry already in the list
         // collapse into one path (and a relative input cannot drift with the
         // working directory).
-        let normalized = canonical_or_self(&dir);
+        let normalized = git::canonical_or_self(&dir);
         let duplicate = self
             .config
             .scan_dirs
             .iter()
-            .any(|existing| canonical_or_self(existing) == normalized);
+            .any(|existing| git::canonical_or_self(existing) == normalized);
         if duplicate {
             self.set_error("目录已在列表中");
             return;
@@ -1403,15 +1403,6 @@ fn read_picker_entries(dir: &std::path::Path) -> io::Result<Vec<std::path::PathB
         .collect();
     entries.sort();
     Ok(entries)
-}
-
-/// Canonical form of `path` for scan-dir comparison and storage.
-///
-/// Falls back to the path itself when canonicalization fails (it vanished or
-/// is unreadable between checks), so deduplication degrades to a literal
-/// comparison instead of rejecting the entry outright.
-fn canonical_or_self(path: &std::path::Path) -> std::path::PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Move the selection in `state` one row within a list of `len` items:

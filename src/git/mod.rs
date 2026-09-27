@@ -11,7 +11,7 @@ mod status;
 pub use batch::{batch_fetch, batch_pull};
 pub use branch::{create_branch, delete_branch, list_branches, switch_branch, BranchInfo};
 pub use commit::commit;
-pub use discover::discover_repos;
+pub use discover::{canonical_or_self, discover_repos};
 pub use file::{diff_file, discard, list_file_status, stage, unstage, FileEntry, FileState};
 pub use remote::{pull, push, Progress};
 // part of the public Git API contract (M1 subtask 3)

@@ -29,12 +29,15 @@ pub fn discover_repos(dirs: &[PathBuf]) -> Result<Vec<RepoInfo>> {
     Ok(repos)
 }
 
-/// Canonical form of `path` for deduplication.
+/// Canonical form of `path` for deduplication and scan-dir storage.
+///
+/// Shared by repository discovery and the config panel's scan-dir add path so
+/// both sides agree on what counts as "the same directory".
 ///
 /// Falls back to the path itself when canonicalization fails (it vanished or
 /// is unreadable between checks), so deduplication degrades to a literal
-/// comparison instead of dropping the entry outright.
-fn canonical_or_self(path: &Path) -> PathBuf {
+/// comparison instead of rejecting or dropping the entry outright.
+pub fn canonical_or_self(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
