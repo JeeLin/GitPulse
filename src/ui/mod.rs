@@ -174,6 +174,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 confirm_file,
                 remote_status: app.remote_status.as_ref(),
                 remote_op: app.remote_op,
+                show_commit_input: false,
             };
             repo::render_repo(f, state);
         }
@@ -191,6 +192,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     confirm_file: None,
                     remote_status: app.remote_status.as_ref(),
                     remote_op: app.remote_op,
+                    show_commit_input: true,
                 };
                 repo::render_repo(f, state);
             }

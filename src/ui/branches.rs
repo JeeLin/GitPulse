@@ -54,18 +54,10 @@ pub fn render_branches(f: &mut Frame, mut state: BranchesState<'_>) {
 
     super::render_status_line(f, chunks[1], state.status);
 
-    let hints = [
-        hint("j/k", "选择"),
-        hint("Enter", "切换"),
-        hint("n", "新建"),
-        hint("d", "删除"),
-        hint("r", "刷新"),
-        hint("Esc", "返回"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Line>();
-    f.render_widget(Paragraph::new(hints), chunks[2]);
+    f.render_widget(
+        Paragraph::new(key_hints(state.show_input, state.show_delete_confirm)),
+        chunks[2],
+    );
 
     if state.show_delete_confirm {
         if let Some(branch) = state.confirm_branch {
@@ -74,6 +66,44 @@ pub fn render_branches(f: &mut Frame, mut state: BranchesState<'_>) {
     }
     if state.show_input {
         render_create_input(f, area, state.input);
+    }
+}
+
+/// Bottom key-hint row: submit/cancel while the create input is open, y/n/Esc
+/// while the delete confirmation is open, list navigation otherwise.
+///
+/// Both modals swallow every list key (`input_modal_key` / `confirm_modal_key`
+/// consume the press), so the list row must not be advertised then; the wording
+/// mirrors each overlay's own title / `y n` line.
+fn key_hints(input_open: bool, confirm_open: bool) -> Line<'static> {
+    if confirm_open {
+        // Same y/n wording as the overlay itself.
+        [
+            hint("y", "确认"),
+            hint("n", "取消"),
+            hint("Esc", "取消对话框"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    } else if input_open {
+        // Matches the create-input title `新建分支 (Enter 创建 / Esc 取消)`.
+        [hint("Enter", "创建"), hint("Esc", "取消")]
+            .into_iter()
+            .flatten()
+            .collect()
+    } else {
+        [
+            hint("j/k", "选择"),
+            hint("Enter", "切换"),
+            hint("n", "新建"),
+            hint("d", "删除"),
+            hint("r", "刷新"),
+            hint("Esc", "返回"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 }
 
@@ -166,17 +196,41 @@ mod tests {
         }
     }
 
-    fn render_to_text(state: BranchesState<'_>) -> String {
-        let backend = TestBackend::new(80, 12);
+    fn render_to_terminal(state: BranchesState<'_>) -> Terminal<TestBackend> {
+        render_to_terminal_sized(state, 80, 12)
+    }
+
+    /// Taller frame for modal tests: the delete dialog is 8 rows high and
+    /// would otherwise cover the bottom hints row of a 12-row terminal.
+    fn render_to_terminal_sized(
+        state: BranchesState<'_>,
+        width: u16,
+        height: u16,
+    ) -> Terminal<TestBackend> {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| render_branches(f, state)).unwrap();
-        // Wide CJK glyphs leave padding cells; compare whitespace-stripped.
+        terminal
+    }
+
+    fn render_to_text(state: BranchesState<'_>) -> String {
+        let terminal = render_to_terminal(state);
         let raw: String = terminal
             .backend()
             .buffer()
             .content()
             .iter()
             .map(|cell| cell.symbol())
+            .collect();
+        // Wide CJK glyphs leave padding cells; compare whitespace-stripped.
+        raw.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// Whitespace-stripped text of one row (the bottom hints row is the last).
+    fn compact_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
+        let buffer = terminal.backend().buffer();
+        let raw: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
             .collect();
         raw.chars().filter(|c| !c.is_whitespace()).collect()
     }
@@ -239,5 +293,49 @@ mod tests {
         let text = render_to_text(base_state(&branches, &mut list_state, None));
         assert!(text.contains("Esc返回"), "missing hints: {text}");
         assert!(text.contains("n新建"), "missing create hint: {text}");
+    }
+
+    /// List keys the delete confirm swallows (`confirm_modal_key` takes only
+    /// y/n/Esc) must disappear from the bottom hints row.
+    #[test]
+    fn render_delete_confirm_switches_bottom_key_hints() {
+        let branches = vec![branch("feature", false, None)];
+        let mut list_state = ListState::default();
+        let mut state = base_state(&branches, &mut list_state, None);
+        state.show_delete_confirm = true;
+        state.confirm_branch = branches.first();
+        let terminal = render_to_terminal_sized(state, 80, 24);
+        let hints = compact_row(&terminal, 23);
+        for swallowed in ["选择", "切换", "新建", "删除", "刷新", "返回"] {
+            assert!(
+                !hints.contains(swallowed),
+                "swallowed key {swallowed} still hinted: {hints}"
+            );
+        }
+        // Only the keys the confirmation actually handles are shown.
+        assert!(hints.contains("y确认"), "missing confirm hint: {hints}");
+        assert!(hints.contains("n取消"), "missing cancel hint: {hints}");
+        assert!(hints.contains("Esc取消对话框"), "missing Esc hint: {hints}");
+    }
+
+    /// Same for the create input: every press goes to `input_modal_key`
+    /// (Enter submits, Esc cancels, the rest edits the buffer).
+    #[test]
+    fn render_create_input_switches_bottom_key_hints() {
+        let branches = vec![branch("main", true, None)];
+        let mut list_state = ListState::default();
+        let mut state = base_state(&branches, &mut list_state, None);
+        state.show_input = true;
+        state.input = "hotfix";
+        let terminal = render_to_terminal_sized(state, 80, 24);
+        let hints = compact_row(&terminal, 23);
+        for swallowed in ["选择", "切换", "新建", "删除", "刷新", "返回"] {
+            assert!(
+                !hints.contains(swallowed),
+                "swallowed key {swallowed} still hinted: {hints}"
+            );
+        }
+        assert!(hints.contains("Enter创建"), "missing submit hint: {hints}");
+        assert!(hints.contains("Esc取消"), "missing cancel hint: {hints}");
     }
 }

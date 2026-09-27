@@ -21,6 +21,9 @@ pub struct RepoState<'a> {
     pub remote_status: Option<&'a RemoteStatus>,
     /// Label of the running/last remote operation (`push` / `pull`).
     pub remote_op: &'a str,
+    /// Whether the commit message input is open (`View::Commit`), which
+    /// renders this view as the popup's background.
+    pub show_commit_input: bool,
 }
 
 /// Render the single-repo file status list with a bottom status line and key hints.
@@ -50,7 +53,11 @@ pub fn render_repo(f: &mut Frame, mut state: RepoState<'_>) {
 
     // Render key hints (single-space separators keep the line under 80 cols)
     f.render_widget(
-        Paragraph::new(key_hints(state.show_discard_confirm)).style(Style::default()),
+        Paragraph::new(key_hints(
+            state.show_discard_confirm,
+            state.show_commit_input,
+        ))
+        .style(Style::default()),
         hints_area,
     );
 
@@ -63,8 +70,10 @@ pub fn render_repo(f: &mut Frame, mut state: RepoState<'_>) {
 }
 
 /// Bottom key-hint row: y/n/Esc while the discard confirmation is open (every
-/// other list key is swallowed then), the file-list actions otherwise.
-fn key_hints(discard_confirm_open: bool) -> Line<'static> {
+/// other list key is swallowed then), Enter/Esc while the commit message input
+/// is open (`input_modal_key` eats the buffer keys), the file-list actions
+/// otherwise.
+fn key_hints(discard_confirm_open: bool, commit_input_open: bool) -> Line<'static> {
     if discard_confirm_open {
         // Same y/n wording as the overlay itself.
         [
@@ -75,6 +84,12 @@ fn key_hints(discard_confirm_open: bool) -> Line<'static> {
         .into_iter()
         .flatten()
         .collect()
+    } else if commit_input_open {
+        // Matches the popup title `提交信息 (Enter 提交 / Esc 取消)`.
+        [hint("Enter", "提交"), hint("Esc", "取消")]
+            .into_iter()
+            .flatten()
+            .collect()
     } else {
         [
             hint("j/k", "选择"),
@@ -186,6 +201,7 @@ mod tests {
             confirm_file: None,
             remote_status: None,
             remote_op: "",
+            show_commit_input: false,
         }
     }
 
@@ -327,6 +343,29 @@ mod tests {
         assert!(hints.contains("y确认"), "missing confirm hint: {hints}");
         assert!(hints.contains("n取消"), "missing cancel hint: {hints}");
         assert!(hints.contains("Esc取消对话框"), "missing Esc hint: {hints}");
+    }
+
+    /// The commit popup routes every press through `input_modal_key`, so the
+    /// list actions behind it may not be advertised either.
+    #[test]
+    fn render_commit_input_switches_bottom_key_hints() {
+        let entries = vec![entry("src/lib.rs", FileState::Modified)];
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        let mut state = base_state(&entries, &mut list_state, None);
+        state.show_commit_input = true;
+        let terminal = render_to_terminal(state);
+        let hints = row_compact(&terminal, 23);
+        for swallowed in [
+            "j/k", "diff", "stage", "unstage", "discard", "commit", "push", "pull",
+        ] {
+            assert!(
+                !hints.contains(swallowed),
+                "swallowed key {swallowed} still hinted: {hints}"
+            );
+        }
+        assert!(hints.contains("Enter提交"), "missing submit hint: {hints}");
+        assert!(hints.contains("Esc取消"), "missing cancel hint: {hints}");
     }
 
     #[test]
