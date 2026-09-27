@@ -2747,6 +2747,79 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A failed `Config::save` must leave memory and disk consistent: the
+    /// pushed entry is popped, the removed entry re-inserted, and the error
+    /// reported (convention 5 rollback branches).
+    ///
+    /// The save is forced to fail by replacing the shared config *file* with
+    /// a directory of the same name, so `fs::write` hits `EISDIR`; the
+    /// original bytes are restored afterwards to prove the failed operations
+    /// never reached the disk. Root ignores chmod, hence the directory trick.
+    #[test]
+    fn config_save_failure_rolls_back_add_and_delete() {
+        use std::fs;
+
+        // Holds the I/O guard: the config path below is the shared redirect.
+        let _io = crate::config::config_io_guard();
+        let cfg_path = crate::config::config_path();
+
+        let dir_a = temp_dir("save-fail-a");
+        let dir_b = temp_dir("save-fail-b");
+        let mut app = App::new(Config::default());
+        app.config.scan_dirs = vec![dir_a.clone()];
+
+        // Seed the disk, then snapshot the bytes the rollback must preserve.
+        app.config.save().expect("seed config");
+        let seeded = fs::read(&cfg_path).expect("read seeded config");
+
+        // Break the save: config.toml becomes a directory.
+        fs::remove_file(&cfg_path).expect("drop seeded file");
+        fs::create_dir_all(&cfg_path).expect("block config file");
+
+        // Add: the push is rolled back, the error surfaces, and the input
+        // stays open with the typed path for a retry (convention 9).
+        app.enter_config();
+        app.start_config_manual();
+        app.config_input = dir_b.display().to_string();
+        app.submit_config_add();
+        assert_eq!(app.config.scan_dirs, vec![dir_a.clone()], "add rolled back");
+        assert!(app.show_config_input, "input kept open for retry");
+        assert_eq!(app.config_input, dir_b.display().to_string());
+        let st = app.status.as_ref().expect("save error reported");
+        assert!(st.is_error, "{}", st.message);
+        assert!(
+            st.message.starts_with("保存配置失败"),
+            "unexpected message: {}",
+            st.message
+        );
+
+        // Delete: the removal is rolled back and the entry survives.
+        app.config_state.select(Some(0));
+        app.start_config_delete();
+        app.confirm_config_delete();
+        assert_eq!(
+            app.config.scan_dirs,
+            vec![dir_a.clone()],
+            "delete rolled back"
+        );
+        let st = app.status.as_ref().expect("save error reported");
+        assert!(st.is_error, "{}", st.message);
+        assert!(
+            st.message.starts_with("保存配置失败"),
+            "unexpected message: {}",
+            st.message
+        );
+
+        // Restore the seeded file: neither failed operation touched the disk.
+        fs::remove_dir_all(&cfg_path).expect("unblock config file");
+        fs::write(&cfg_path, &seeded).expect("restore seeded config");
+        let loaded = Config::load().expect("load restored config");
+        assert_eq!(loaded, app.config, "disk matches memory after rollbacks");
+
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&dir_b);
+    }
+
     // ---------- B: branch panel ----------
 
     #[test]
