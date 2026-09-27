@@ -2761,6 +2761,26 @@ mod tests {
     fn config_save_failure_rolls_back_add_and_delete() {
         use std::fs;
 
+        /// Restores the shared config file to `seeded` bytes on drop, so a
+        /// failing assertion after the file was replaced by a directory still
+        /// leaves the redirect writable for the lock-holding tests that run
+        /// next. Every step ignores errors: `Drop` must not panic.
+        struct ConfigFileGuard {
+            path: std::path::PathBuf,
+            seeded: Option<Vec<u8>>,
+        }
+
+        impl Drop for ConfigFileGuard {
+            fn drop(&mut self) {
+                if self.path.is_dir() {
+                    let _ = std::fs::remove_dir_all(&self.path);
+                }
+                if let Some(bytes) = self.seeded.take() {
+                    let _ = std::fs::write(&self.path, bytes);
+                }
+            }
+        }
+
         // Holds the I/O guard: the config path below is the shared redirect.
         let _io = crate::config::config_io_guard();
         let cfg_path = crate::config::config_path();
@@ -2773,6 +2793,13 @@ mod tests {
         // Seed the disk, then snapshot the bytes the rollback must preserve.
         app.config.save().expect("seed config");
         let seeded = fs::read(&cfg_path).expect("read seeded config");
+
+        // Armed before the break so a panic anywhere below still restores the
+        // seeded file (idempotent with the explicit restore at the end).
+        let _restore = ConfigFileGuard {
+            path: cfg_path.clone(),
+            seeded: Some(seeded.clone()),
+        };
 
         // Break the save: config.toml becomes a directory.
         fs::remove_file(&cfg_path).expect("drop seeded file");
