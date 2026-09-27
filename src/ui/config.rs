@@ -91,7 +91,9 @@ pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
             .selected()
             .and_then(|i| state.scan_dirs.get(i))
             .map(|p| p.as_path());
-        render_delete_confirm(f, area, dir);
+        // Anchor on the list area, like the picker above, so the taller
+        // wrapped dialog never covers the status line or the y/n/Esc hints.
+        render_delete_confirm(f, chunks[0], dir);
     }
 }
 
@@ -256,8 +258,18 @@ fn ellipsize(text: &str, max: usize) -> String {
     out
 }
 
+/// Delete-confirm popup geometry: `60%` of the frame width, `7` rows so the
+/// border (2 rows) plus up to three wrapped path lines, the blank spacer and
+/// the `y/n` hint row (5 rows) all fit — 80 columns give 46 inner columns,
+/// i.e. paths up to 138 characters stay complete.
+const CONFIRM_PERCENT_X: u16 = 60;
+const CONFIRM_HEIGHT: u16 = 7;
+
 /// Delete confirmation overlay (discard-style, convention 8): y confirms,
-/// n cancels; names the selected directory when one is selected.
+/// n cancels; names the selected directory when one is selected. The path
+/// wraps inside the popup like the repo discard dialog, so a long canonical
+/// path is never clipped mid-name without a hint. `area` is the list region,
+/// which keeps the status line and the y/n/Esc hints uncovered.
 fn render_delete_confirm(f: &mut Frame, area: Rect, dir: Option<&Path>) {
     let mut body = vec![];
     if let Some(dir) = dir {
@@ -266,7 +278,15 @@ fn render_delete_confirm(f: &mut Frame, area: Rect, dir: Option<&Path>) {
             Style::default().fg(Color::Yellow),
         )));
     }
-    super::render_confirm_overlay(f, area, "移除该目录？", 60, 5, body, false);
+    super::render_confirm_overlay(
+        f,
+        area,
+        "移除该目录？",
+        CONFIRM_PERCENT_X,
+        CONFIRM_HEIGHT,
+        body,
+        true,
+    );
 }
 
 /// Draw the bordered scan-dir list; the title carries the entry count.
@@ -425,6 +445,71 @@ mod tests {
         assert!(!text.contains("d删除"), "list hints leaked: {text}");
         assert!(!text.contains("j/k选择"), "list hints leaked: {text}");
         assert!(!text.contains("Esc返回"), "list hints leaked: {text}");
+    }
+
+    /// Whitespace-stripped interior of the delete-confirm popup (border
+    /// excluded): the wrapped target path lands on consecutive inner rows,
+    /// so joining them reassembles the path contiguously.
+    fn confirm_inner(terminal: &Terminal<TestBackend>, size: (u16, u16)) -> String {
+        // The popup is anchored inside the list area: the layout's last two
+        // rows belong to the status line and the key hints.
+        let list_area = Rect::new(0, 0, size.0, size.1.saturating_sub(2));
+        let popup = centered_rect(CONFIRM_PERCENT_X, CONFIRM_HEIGHT, list_area);
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in (popup.y + 1)..popup.bottom().saturating_sub(1) {
+            for x in (popup.x + 1)..popup.right().saturating_sub(1) {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        text.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// G1 regression: a path wider than the popup (46 inner columns at 80,
+    /// 70 at 120) must wrap onto extra rows instead of being clipped, while
+    /// the prompt and the y/n/Esc wording stay where they were.
+    #[test]
+    fn render_delete_confirm_wraps_long_path_inside_popup() {
+        let long =
+            "/tmp/very/long/path/for/delete/confirm/wrapping/2026/client-projects/frontend-build-cache/node_modules";
+        assert!(long.len() > 60, "fixture must be longer than one line");
+        let dirs = vec![PathBuf::from(long)];
+
+        for size in [(80u16, 12u16), (120u16, 24u16)] {
+            let mut list_state = ListState::default();
+            list_state.select(Some(0));
+            let mut picker_state = ListState::default();
+            let mut state = base_state(&dirs, None, &mut list_state, &mut picker_state);
+            state.show_delete_confirm = true;
+
+            let backend = TestBackend::new(size.0, size.1);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| render_config(f, state)).unwrap();
+
+            let inner = confirm_inner(&terminal, size);
+            assert!(
+                inner.contains(long),
+                "path clipped in {}x{} popup: {inner}",
+                size.0,
+                size.1
+            );
+            assert!(inner.contains("y确认"), "missing confirm key: {inner}");
+            assert!(inner.contains("n取消"), "missing cancel key: {inner}");
+
+            let full: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            let full: String = full.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(full.contains("移除该目录"), "missing prompt: {full}");
+            assert!(
+                full.contains("Esc取消对话框"),
+                "missing dismiss hint: {full}"
+            );
+        }
     }
 
     #[test]
