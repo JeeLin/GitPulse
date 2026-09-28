@@ -21,7 +21,9 @@ use super::status::RepoInfo;
 /// Run `git fetch --all --prune` for one repository (blocking; call from
 /// `spawn_blocking`).
 fn fetch_blocking(repo_path: &Path) -> Result<()> {
-    let output = Command::new("git")
+    let mut cmd = Command::new("git");
+    remote::configure_git_cmd(&mut cmd);
+    let output = cmd
         .arg("-C")
         .arg(repo_path)
         .args(["fetch", "--all", "--prune"])

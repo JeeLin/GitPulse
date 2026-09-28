@@ -79,7 +79,9 @@ mod tests {
         assert_eq!(head.id(), oid);
         assert_eq!(head.summary(), Some("test commit message"));
 
-        let log = Command::new("git")
+        let mut log_cmd = Command::new("git");
+        crate::git::remote::configure_git_cmd(&mut log_cmd);
+        let log = log_cmd
             .arg("-C")
             .arg(&dir)
             .args(["log", "--oneline"])

@@ -67,10 +67,39 @@ fn has_upstream(repo_path: &Path) -> bool {
     has_upstream
 }
 
+/// Apply the shared non-interactive configuration to a `git` child process.
+///
+/// Every `git` subprocess GitPulse spawns (push/pull, batch fetch and the CLI
+/// helpers in tests) must call this first, otherwise git opens the controlling
+/// terminal (`/dev/tty`, *not* stdin) and prints `Username for
+/// 'https://github.com':` where the TUI cannot answer it, hanging the batch
+/// operation. The TUI has no way to reply, so interactive fallbacks are
+/// disabled:
+///
+/// - `GIT_TERMINAL_PROMPT=0` — git fails fast instead of prompting on the
+///   terminal (the fix for the batch-pull credential hang).
+/// - `GIT_ASKPASS=` / `SSH_ASKPASS=` — external askpass dialogs would open
+///   outside the TUI, so they are disabled as well.
+///
+/// The parent environment is inherited untouched on purpose: `HOME`,
+/// `XDG_CONFIG_HOME`, `PATH` and `SSH_AUTH_SOCK` must reach the child so git
+/// keeps reading the user's global/system config and reuses the system
+/// credential helpers configured there (`gh`, `osxkeychain`, `libsecret`, ...).
+/// When no helper can supply credentials, git now exits immediately with
+/// `could not read Username ...: terminal prompts disabled`, which callers
+/// surface as a readable error instead of blocking forever.
+pub fn configure_git_cmd(cmd: &mut Command) -> &mut Command {
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .env("SSH_ASKPASS", "")
+}
+
 /// Run `git -C <repo> <args>` and return its output, or an error carrying
 /// the operation name and the child's stderr (shown on the status line).
 fn git_output(repo_path: &Path, args: &[&str]) -> Result<std::process::Output> {
-    let output = Command::new("git")
+    let mut cmd = Command::new("git");
+    configure_git_cmd(&mut cmd);
+    let output = cmd
         .arg("-C")
         .arg(repo_path)
         .args(args)
@@ -167,6 +196,104 @@ mod tests {
         crate::git::commit(dir, message).unwrap();
     }
 
+    /// The shared helper must switch git to non-interactive mode while
+    /// leaving the credential-relevant variables to be inherited (no
+    /// `env_clear`): `HOME`/`XDG_CONFIG_HOME` carry the global config that
+    /// holds the system credential helpers, `SSH_AUTH_SOCK` covers SSH remotes.
+    #[test]
+    fn configure_git_cmd_disables_prompts_and_keeps_inherited_env() {
+        let mut cmd = Command::new("git");
+        configure_git_cmd(&mut cmd);
+
+        let envs: std::collections::HashMap<String, Option<String>> = cmd
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            envs.get("GIT_TERMINAL_PROMPT").and_then(|v| v.as_deref()),
+            Some("0"),
+            "{envs:?}"
+        );
+        assert_eq!(envs.get("GIT_ASKPASS").and_then(|v| v.as_deref()), Some(""));
+        assert_eq!(envs.get("SSH_ASKPASS").and_then(|v| v.as_deref()), Some(""));
+
+        for key in [
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "PATH",
+            "SSH_AUTH_SOCK",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+        ] {
+            assert!(
+                !envs.contains_key(key),
+                "{key} must be inherited from the parent, not overridden: {envs:?}"
+            );
+        }
+    }
+
+    /// Runtime proof that a configured child sees both the non-interactive
+    /// flag and the inherited `HOME` of the parent process.
+    #[cfg(unix)]
+    #[test]
+    fn configure_git_cmd_child_inherits_home_at_runtime() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("printf '%s|%s' \"$GIT_TERMINAL_PROMPT\" \"$HOME\"");
+        configure_git_cmd(&mut cmd);
+        let output = cmd.output().expect("run /bin/sh");
+        assert!(output.status.success(), "{output:?}");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let (prompt, home) = text
+            .split_once('|')
+            .unwrap_or_else(|| panic!("unexpected output: {text}"));
+        assert_eq!(prompt, "0", "{text}");
+        let expected = std::env::var_os("HOME")
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert_eq!(home, expected, "HOME must be inherited unchanged");
+    }
+
+    /// Regression for the batch-pull hang: when no credential helper can
+    /// provide credentials, git must exit immediately with a readable reason
+    /// instead of printing `Username for ...` on the TUI's terminal.
+    #[test]
+    fn credential_lookup_fails_fast_instead_of_prompting() {
+        use std::io::Write;
+
+        let mut cmd = Command::new("git");
+        configure_git_cmd(&mut cmd);
+        // Clearing the helper list makes the case deterministic even on
+        // machines with a globally configured credential helper.
+        cmd.args(["-c", "credential.helper=", "credential", "fill"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn git credential fill");
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(b"protocol=https\nhost=example.invalid\n\n")
+            .expect("write credential request");
+        let output = child.wait_with_output().expect("wait for git");
+        assert!(
+            !output.status.success(),
+            "credential fill must fail when no helper has credentials"
+        );
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            err.contains("terminal prompts disabled"),
+            "expected a readable fast-failure, got: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn push_without_remote_reports_reason() {
         let dir = base_dir("noremote");
@@ -221,7 +348,9 @@ mod tests {
         push(&other, |_| {}).await.expect("clone push must succeed");
 
         // Drop the upstream so the pull exercises the explicit-args fallback.
-        let untrack = Command::new("git")
+        let mut untrack = Command::new("git");
+        configure_git_cmd(&mut untrack);
+        let untrack = untrack
             .arg("-C")
             .arg(&work)
             .arg("branch")

@@ -257,7 +257,9 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) {
-        let out = Command::new("git")
+        let mut cmd = Command::new("git");
+        crate::git::remote::configure_git_cmd(&mut cmd);
+        let out = cmd
             .arg("-C")
             .arg(dir)
             .args(["-c", "commit.gpgsign=false"])
