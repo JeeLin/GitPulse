@@ -15,6 +15,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
+use crate::git::history::{CommitDetail, CommitInfo, GraphCell};
 use crate::git::{self, BranchInfo, FileEntry, Progress, RepoInfo};
 
 /// Terminal type used by the TUI.
@@ -36,6 +37,82 @@ pub enum View {
     Branches,
     /// Scan-dir configuration panel.
     Config,
+    /// Commit history view (DAG, commit list and detail pane).
+    History,
+}
+
+/// Number of commits loaded into the history view (`App::enter_history`).
+const HISTORY_LIMIT: usize = 200;
+
+/// State of the commit-history view ([`View::History`]).
+///
+/// Owned by [`App`] and rendered by `ui::history` through a direct borrow
+/// (checkpoint 2: no separate mock data source).
+#[derive(Debug, Default)]
+pub struct HistoryState {
+    /// Commits newest-first, as returned by `git::history::list_commits`.
+    pub commits: Vec<CommitInfo>,
+    /// Index of the highlighted commit; always `0` when `commits` is empty.
+    pub selected: usize,
+    /// Detail payload of the highlighted commit, reloaded on every move.
+    pub detail: Option<CommitDetail>,
+    /// One DAG row per entry of `commits`, from `git::history::layout_graph`.
+    pub graph: Vec<Vec<GraphCell>>,
+    /// Selection cursor shared across frames, kept in sync with `selected`.
+    pub list_state: ListState,
+}
+
+impl HistoryState {
+    /// Install a freshly loaded history and land on the first row.
+    ///
+    /// The cursor is reset together with the data so a selection left over
+    /// from a previous repository never points past the new list.
+    pub fn set_commits(&mut self, commits: Vec<CommitInfo>, graph: Vec<Vec<GraphCell>>) {
+        self.commits = commits;
+        self.graph = graph;
+        self.detail = None;
+        self.select(0);
+    }
+
+    /// Drop the loaded history (failed load or empty repository).
+    pub fn clear(&mut self) {
+        self.commits.clear();
+        self.graph.clear();
+        self.detail = None;
+        self.selected = 0;
+        self.list_state.select(None);
+    }
+
+    /// Highlight `idx`, clamped to the last commit; an empty list clears the
+    /// cursor and keeps `selected` at `0`.
+    pub fn select(&mut self, idx: usize) {
+        if self.commits.is_empty() {
+            self.selected = 0;
+            self.list_state.select(None);
+            return;
+        }
+        self.selected = idx.min(self.commits.len() - 1);
+        self.list_state.select(Some(self.selected));
+    }
+
+    /// Move the cursor one row: `down` clamps at the last commit, `up` at
+    /// the first. An empty list never moves.
+    pub fn move_selection(&mut self, down: bool) {
+        if self.commits.is_empty() {
+            return;
+        }
+        let next = if down {
+            self.selected.saturating_add(1).min(self.commits.len() - 1)
+        } else {
+            self.selected.saturating_sub(1)
+        };
+        self.select(next);
+    }
+
+    /// The highlighted commit, or `None` for an empty history.
+    pub fn selected_commit(&self) -> Option<&CommitInfo> {
+        self.commits.get(self.selected)
+    }
 }
 
 /// Bottom status line content: short message or error (convention 3).
@@ -178,6 +255,8 @@ pub struct App {
     pub picker_entries: Vec<std::path::PathBuf>,
     /// Selection cursor for the directory picker list.
     pub picker_state: ListState,
+    /// Commit-history view state (`View::History`).
+    pub history: HistoryState,
 }
 
 impl App {
@@ -217,6 +296,7 @@ impl App {
             picker_dir: std::path::PathBuf::new(),
             picker_entries: Vec::new(),
             picker_state: ListState::default(),
+            history: HistoryState::default(),
         }
     }
 
@@ -672,6 +752,90 @@ impl App {
         self.clear_error();
     }
 
+    /// Path of the currently opened repository, when its index into
+    /// `repos` is still valid.
+    fn current_repo_path(&self) -> Option<std::path::PathBuf> {
+        self.current_repo
+            .filter(|i| *i < self.repos.len())
+            .map(|i| self.repos[i].path.clone())
+    }
+
+    /// Enter the commit-history view for the current repository (repo `h`).
+    ///
+    /// The list loads immediately with the first commit selected and its
+    /// detail preloaded; a repository without commits shows the empty state.
+    /// No-op when no valid repository is open, so a stale cursor can never
+    /// open the view against the wrong path.
+    pub fn enter_history(&mut self) {
+        if self.current_repo_path().is_none() {
+            return;
+        }
+        self.view = View::History;
+        self.clear_error();
+        self.load_history();
+    }
+
+    /// Leave the history view back to the repo view (`q` / `Esc`).
+    pub fn leave_history(&mut self) {
+        self.view = View::Repo;
+        self.clear_error();
+    }
+
+    /// Load the history list for the current repository and select the first
+    /// commit, preloading its detail.
+    ///
+    /// A failed load clears the list and reports the reason, so a broken
+    /// repository never looks like an empty one (checkpoint 2); an empty
+    /// result is a valid state and keeps the status line clean.
+    pub fn load_history(&mut self) {
+        let Some(path) = self.current_repo_path() else {
+            self.set_error("历史视图: 仓库索引失效");
+            self.history.clear();
+            return;
+        };
+        match git::history::list_commits(&path, HISTORY_LIMIT) {
+            Ok(commits) => {
+                let graph = git::history::layout_graph(&commits);
+                let empty = commits.is_empty();
+                self.history.set_commits(commits, graph);
+                self.clear_error();
+                if !empty {
+                    self.load_history_detail();
+                }
+            }
+            Err(e) => {
+                self.set_error(format!("加载提交历史失败: {e}"));
+                self.history.clear();
+            }
+        }
+    }
+
+    /// Load the detail payload of the highlighted commit.
+    ///
+    /// Failures (unresolvable object, repository gone) surface on the status
+    /// line instead of panicking; an empty history simply drops the detail.
+    pub fn load_history_detail(&mut self) {
+        let Some(id) = self.history.selected_commit().map(|c| c.id.clone()) else {
+            self.history.detail = None;
+            return;
+        };
+        let Some(path) = self.current_repo_path() else {
+            self.history.detail = None;
+            self.set_error("历史视图: 仓库索引失效");
+            return;
+        };
+        match git::history::commit_detail(&path, &id) {
+            Ok(detail) => {
+                self.history.detail = Some(detail);
+                self.clear_error();
+            }
+            Err(e) => {
+                self.history.detail = None;
+                self.set_error(format!("加载提交详情失败: {e}"));
+            }
+        }
+    }
+
     /// Enter the scan-dir configuration panel (dashboard `c`).
     ///
     /// The selection lands on the first configured directory — or is cleared
@@ -1123,6 +1287,7 @@ impl App {
             View::Commit => self.handle_commit_key(key),
             View::Branches => self.handle_branches_key(key),
             View::Config => self.handle_config_key(key),
+            View::History => self.handle_history_key(key),
         }
     }
 
@@ -1223,6 +1388,10 @@ impl App {
                     self.enter_branches();
                     true
                 }
+                KeyCode::Char('h') => {
+                    self.enter_history();
+                    true
+                }
                 _ => true,
             }
         }
@@ -1314,6 +1483,25 @@ impl App {
                 _ => true,
             }
         }
+    }
+
+    /// Key handler for the commit history view: `j/k` and the arrow keys
+    /// move the selection and reload the highlighted commit's detail, while
+    /// `q` / `Esc` return to the repo view (the view it is entered from).
+    fn handle_history_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.leave_history(),
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.history.move_selection(true);
+                self.load_history_detail();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.history.move_selection(false);
+                self.load_history_detail();
+            }
+            _ => {}
+        }
+        true
     }
 
     /// Key handler for the config panel: modal input / delete-confirm take
@@ -3516,5 +3704,205 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&keep);
         let _ = std::fs::remove_dir_all(&drop);
+    }
+
+    // ---------- history view ----------
+
+    /// Append a commit on top of HEAD at an explicit `seconds` timestamp, so
+    /// the newest-first history order never depends on wall-clock ties.
+    fn commit_at(dir: &std::path::Path, message: &str, seconds: i64) {
+        let repo = git2::Repository::open(dir).unwrap();
+        std::fs::write(dir.join("a.txt"), format!("{message}\n")).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("a.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let sig = git2::Signature::new(
+            "GitPulse Test",
+            "test@gitpulse.local",
+            &git2::Time::new(seconds, 0),
+        )
+        .unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+            .unwrap();
+    }
+
+    /// Repo fixture with two commits whose order is fixed by time.
+    fn app_with_two_commit_repo(tag: &str) -> (std::path::PathBuf, App) {
+        let dir = temp_dir(tag);
+        init_repo_with_commit(&dir);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        commit_at(&dir, "second commit", now + 600);
+        let app = app_with_repo_at(&dir);
+        (dir, app)
+    }
+
+    /// Render one frame through the view dispatcher and return the
+    /// whitespace-stripped buffer text (wide CJK glyphs leave padding cells).
+    fn history_render_text(app: &mut App) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::render(f, app)).unwrap();
+        let raw: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        raw.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn repo_h_enters_history_and_loads_commits() {
+        let dir = temp_dir("history-enter");
+        init_repo_with_commit(&dir);
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+
+        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        assert_eq!(app.view, View::History);
+        assert_eq!(app.history.commits.len(), 1);
+        assert_eq!(app.history.commits[0].summary, "v1");
+        assert_eq!(app.history.graph.len(), 1);
+        assert_eq!(app.history.graph[0][0].glyph, '●');
+        // First commit selected, cursor and detail preloaded, no error.
+        assert_eq!(app.history.selected, 0);
+        assert_eq!(app.history.list_state.selected(), Some(0));
+        assert_eq!(app.history.detail.as_ref().unwrap().message, "v1");
+        assert!(app.status.is_none());
+
+        // h without an open repository never leaves the repo view.
+        app.current_repo = None;
+        app.view = View::Repo;
+        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        assert_eq!(app.view, View::Repo);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn history_j_k_move_selection_reload_detail_and_stop_at_edges() {
+        let (dir, mut app) = app_with_two_commit_repo("history-move");
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        assert_eq!(app.history.commits.len(), 2);
+
+        let newest = app.history.commits[0].summary.clone();
+        let older = app.history.commits[1].summary.clone();
+        assert_eq!(newest, "second commit");
+        assert_eq!(older, "v1");
+        assert_eq!(app.history.detail.as_ref().unwrap().message, newest);
+
+        // j / Down move one row and reload the detail for that row.
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.history.selected, 1);
+        assert_eq!(app.history.list_state.selected(), Some(1));
+        assert_eq!(app.history.detail.as_ref().unwrap().message, older);
+        assert!(app.handle_key(key(KeyCode::Down)));
+        assert_eq!(app.history.selected, 1, "j stops at the last row");
+        assert_eq!(app.history.detail.as_ref().unwrap().message, older);
+
+        // k / Up move back and stop at the first row.
+        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(app.history.selected, 0);
+        assert_eq!(app.history.list_state.selected(), Some(0));
+        assert_eq!(app.history.detail.as_ref().unwrap().message, newest);
+        assert!(app.handle_key(key(KeyCode::Up)));
+        assert_eq!(app.history.selected, 0, "k stops at the first row");
+        assert_eq!(app.history.detail.as_ref().unwrap().message, newest);
+        assert!(app.status.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn history_q_and_esc_return_to_repo_view() {
+        let dir = temp_dir("history-exit");
+        init_repo_with_commit(&dir);
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        assert_eq!(app.view, View::History);
+
+        assert!(app.handle_key(key(KeyCode::Char('q'))));
+        assert_eq!(app.view, View::Repo);
+
+        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        assert_eq!(app.view, View::History);
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Repo);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn history_empty_repo_enters_without_panic_and_renders_empty_state() {
+        let dir = temp_dir("history-empty");
+        git2::Repository::init(&dir).unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        assert_eq!(app.view, View::History);
+        assert!(app.history.commits.is_empty());
+        assert!(app.history.graph.is_empty());
+        assert!(app.history.detail.is_none());
+        assert_eq!(app.history.selected, 0);
+        assert_eq!(app.history.list_state.selected(), None);
+
+        // Navigation on an empty list is a no-op and never errors.
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert!(app.status.is_none());
+
+        let text = history_render_text(&mut app);
+        assert!(text.contains("暂无提交记录"), "missing empty state: {text}");
+        assert!(
+            text.contains("选择一个提交查看详情"),
+            "missing placeholder: {text}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A detail reload against a repository that vanished reports the reason
+    /// on the status line instead of panicking, and the view stays put.
+    #[test]
+    fn history_detail_load_error_reports_on_status_line() {
+        let dir = temp_dir("history-detail-error");
+        init_repo_with_commit(&dir);
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        assert!(app.history.detail.is_some());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.view, View::History);
+        assert!(app.history.detail.is_none());
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(
+            st.message.contains("加载提交详情失败"),
+            "unexpected message: {}",
+            st.message
+        );
     }
 }

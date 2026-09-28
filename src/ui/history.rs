@@ -1,0 +1,298 @@
+//! Commit history view: DAG column, commit list and commit detail pane.
+
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    Frame,
+};
+
+use crate::app::{HistoryState, StatusLine};
+use crate::git::history::{CommitInfo, RefKind};
+
+use super::hint;
+
+/// Inner width of the DAG column: one cell per lane, capped at the six
+/// lanes `git::history::layout_graph` ever produces.
+const GRAPH_WIDTH: usize = 6;
+
+/// Render the history view: DAG column, commit list and detail pane above
+/// the shared status line and key hints.
+///
+/// The list is drawn first so the DAG column can scroll with the offset the
+/// list actually settled on, keeping graph rows and commit rows aligned.
+pub fn render_history(f: &mut Frame, state: &mut HistoryState, status: Option<&StatusLine>) {
+    let area = f.area();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),    // graph + commit list + detail
+            Constraint::Length(1), // status line
+            Constraint::Length(1), // key hints
+        ])
+        .split(area);
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(GRAPH_WIDTH as u16 + 2), // DAG column + borders
+            Constraint::Min(24),                        // commit list
+            Constraint::Percentage(40),                 // detail pane
+        ])
+        .split(chunks[0]);
+
+    render_commit_list(f, columns[1], state);
+    render_graph(f, columns[0], state);
+    render_detail(f, columns[2], state);
+
+    super::render_status_line(f, chunks[1], status);
+    f.render_widget(Paragraph::new(key_hints()), chunks[2]);
+}
+
+/// Bottom key-hint row: list navigation, then the two keys that return to
+/// the repo view.
+fn key_hints() -> Line<'static> {
+    [hint("j/k", "选择"), hint("q/Esc", "返回")]
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// Commit list, or the empty-state copy for a repository without history.
+///
+/// An unborn HEAD loads zero commits, which is a valid state rather than a
+/// failure: the error status (rendered by the caller) covers failed loads.
+fn render_commit_list(f: &mut Frame, area: Rect, state: &mut HistoryState) {
+    let block = Block::default()
+        .title(format!("提交历史 ({})", state.commits.len()))
+        .borders(Borders::ALL);
+
+    if state.commits.is_empty() {
+        let paragraph = Paragraph::new(Span::styled(
+            "暂无提交记录",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .block(block);
+        f.render_widget(paragraph, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = state.commits.iter().map(commit_item).collect();
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(super::list_highlight())
+        .highlight_symbol(super::HIGHLIGHT_SYMBOL);
+    f.render_stateful_widget(list, area, &mut state.list_state);
+}
+
+/// One commit row: short hash, summary, ref badges, then author and time.
+fn commit_item(commit: &CommitInfo) -> ListItem<'static> {
+    let mut spans = vec![
+        Span::styled(commit.id.clone(), Style::default().fg(Color::Yellow)),
+        Span::raw(" "),
+        Span::raw(commit.summary.clone()),
+    ];
+    for mark in &commit.refs {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("[{}]", mark.name),
+            ref_style(mark.kind),
+        ));
+    }
+    spans.push(Span::styled(
+        format!("  {} {}", commit.author, commit.time),
+        Style::default().fg(Color::DarkGray),
+    ));
+    ListItem::new(Line::from(spans))
+}
+
+/// Badge style per reference kind: HEAD is highlighted, branches read green
+/// and tags cyan, matching the colors the other panels use for refs.
+fn ref_style(kind: RefKind) -> Style {
+    match kind {
+        RefKind::Head => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        RefKind::Branch => Style::default().fg(Color::Green),
+        RefKind::Tag => Style::default().fg(Color::Cyan),
+    }
+}
+
+/// DAG column: one row per commit, each glyph placed in its lane cell, laid
+/// out in lockstep with the commit list.
+fn render_graph(f: &mut Frame, area: Rect, state: &HistoryState) {
+    let lines: Vec<Line> = state
+        .graph
+        .iter()
+        .map(|row| {
+            let mut cells = vec![' '; GRAPH_WIDTH];
+            for cell in row {
+                if let Some(slot) = cells.get_mut(cell.lane) {
+                    *slot = cell.glyph;
+                }
+            }
+            Line::from(cells.into_iter().collect::<String>())
+        })
+        .collect();
+
+    let paragraph = Paragraph::new(lines)
+        .block(Block::default().title("DAG").borders(Borders::ALL))
+        .scroll((state.list_state.offset() as u16, 0));
+    f.render_widget(paragraph, area);
+}
+
+/// Detail pane: the complete commit message soft-wrapped, followed by the
+/// list of paths the commit changed.
+fn render_detail(f: &mut Frame, area: Rect, state: &HistoryState) {
+    let title = match state.selected_commit() {
+        Some(commit) => format!("详情 [{}]", commit.id),
+        None => "详情".to_string(),
+    };
+    let block = Block::default().title(title).borders(Borders::ALL);
+
+    let paragraph = match &state.detail {
+        None => Paragraph::new(Span::styled(
+            "选择一个提交查看详情",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .block(block),
+        Some(detail) => {
+            let mut lines: Vec<Line> = detail
+                .message
+                .lines()
+                .map(|line| Line::from(line.to_string()))
+                .collect();
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                format!("变更文件 ({})", detail.files.len()),
+                Style::default().fg(Color::Cyan),
+            )));
+            for file in &detail.files {
+                lines.push(Line::from(format!("  {file}")));
+            }
+            Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false })
+        }
+    };
+    f.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::history::{CommitDetail, GraphCell, RefMark};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// Single-commit state carrying every element the layout renders: a
+    /// two-lane graph row, all three reference kinds and a detail payload
+    /// with a body plus changed files.
+    fn loaded_state() -> HistoryState {
+        let mut state = HistoryState::default();
+        state.set_commits(
+            vec![CommitInfo {
+                id: "abc1234".to_string(),
+                summary: "merge things".to_string(),
+                author: "GitPulse Test".to_string(),
+                time: "2023-11-14 22:18".to_string(),
+                refs: vec![
+                    RefMark {
+                        kind: RefKind::Head,
+                        name: "HEAD".to_string(),
+                    },
+                    RefMark {
+                        kind: RefKind::Branch,
+                        name: "main".to_string(),
+                    },
+                    RefMark {
+                        kind: RefKind::Tag,
+                        name: "v1.0.0".to_string(),
+                    },
+                ],
+                parents: vec![],
+            }],
+            vec![vec![
+                GraphCell {
+                    glyph: '●',
+                    lane: 0,
+                },
+                GraphCell {
+                    glyph: '│',
+                    lane: 1,
+                },
+            ]],
+        );
+        state.detail = Some(CommitDetail {
+            message: "merge things\n\nBody of the commit.".to_string(),
+            files: vec!["src/main.rs".to_string(), "src/lib.rs".to_string()],
+        });
+        state
+    }
+
+    /// Render one frame at 120 columns — wide enough for the badges and the
+    /// author/time tail to fit on the selected row — and return the
+    /// whitespace-stripped buffer text (wide CJK glyphs leave padding cells).
+    fn render_to_text(mut state: HistoryState) -> String {
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_history(f, &mut state, None))
+            .unwrap();
+        let raw: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        raw.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn render_shows_dag_glyph_ref_badges_and_detail() {
+        let text = render_to_text(loaded_state());
+        assert!(text.contains("abc1234"), "missing short hash: {text}");
+        assert!(text.contains('●'), "missing DAG glyph: {text}");
+        assert!(text.contains("[HEAD]"), "missing HEAD badge: {text}");
+        assert!(text.contains("[main]"), "missing branch badge: {text}");
+        assert!(text.contains("[v1.0.0]"), "missing tag badge: {text}");
+        assert!(
+            text.contains("Bodyofthecommit."),
+            "missing wrapped message body: {text}"
+        );
+        assert!(text.contains("变更文件(2)"), "missing file header: {text}");
+        assert!(text.contains("src/main.rs"), "missing changed path: {text}");
+        assert!(text.contains("j/k选择"), "missing nav hint: {text}");
+    }
+
+    #[test]
+    fn render_empty_history_shows_empty_state_in_every_pane() {
+        let text = render_to_text(HistoryState::default());
+        assert!(text.contains("提交历史(0)"), "missing title: {text}");
+        assert!(text.contains("暂无提交记录"), "missing empty state: {text}");
+        assert!(
+            text.contains("选择一个提交查看详情"),
+            "missing detail placeholder: {text}"
+        );
+        assert!(text.contains("q/Esc返回"), "missing back hint: {text}");
+    }
+
+    /// A loaded list whose detail could not be attached (failed reload)
+    /// keeps the rows and falls back to the placeholder pane.
+    #[test]
+    fn render_list_without_detail_shows_placeholder() {
+        let mut state = loaded_state();
+        state.detail = None;
+        let text = render_to_text(state);
+        assert!(text.contains("abc1234"), "missing commit row: {text}");
+        assert!(
+            text.contains("选择一个提交查看详情"),
+            "missing detail placeholder: {text}"
+        );
+        assert!(!text.contains("变更文件"), "stale detail: {text}");
+    }
+}

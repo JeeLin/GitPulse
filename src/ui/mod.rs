@@ -5,6 +5,7 @@ pub mod commit;
 pub mod config;
 pub mod dashboard;
 pub mod diff;
+pub mod history;
 pub mod remote;
 pub mod repo;
 
@@ -235,6 +236,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 picker_state: &mut app.picker_state,
             };
             config::render_config(f, state);
+        }
+        View::History => {
+            // Field-level borrows of `app.history` and `app.status`
+            // coexist (disjoint fields of `App`).
+            history::render_history(f, &mut app.history, app.status.as_ref());
         }
     }
 }
