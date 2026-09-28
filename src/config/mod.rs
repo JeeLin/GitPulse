@@ -2,6 +2,7 @@
 //!
 //! All filesystem paths come from [`path`]; only that module may call `dirs` (checkpoint 3).
 
+mod encoding;
 mod path;
 mod types;
 
@@ -59,11 +60,20 @@ pub enum ConfigError {
 
 impl Config {
     /// Load the config from [`config_path`]; a missing file yields [`Config::default`].
+    ///
+    /// Both scan-dir wire forms are accepted: the legacy plain strings and
+    /// the `{ path_hex = .. }` markers for non-UTF-8 paths (documented in
+    /// the `config::encoding` module).
     pub fn load() -> Result<Self> {
         load_from(&config_path())
     }
 
     /// Save the config to [`config_path`], creating the config dir when missing.
+    ///
+    /// The document is serialized before the filesystem is touched and then
+    /// replaced atomically, so a failed save leaves the previous file
+    /// byte-for-byte intact — the in-memory rollbacks around `Config::save`
+    /// rely on that.
     pub fn save(&self) -> Result<()> {
         save_to(self, &config_path())
     }
@@ -91,6 +101,9 @@ fn load_from(path: &Path) -> Result<Config> {
 }
 
 /// Save a config to the given file path, creating parent directories as needed.
+///
+/// Serialization happens first and writes go through [`write_atomically`], so
+/// no failure mode reaches the target file with partial contents.
 // Reached via `Config::save`; exercised directly by unit tests.
 fn save_to(config: &Config, path: &Path) -> Result<()> {
     let contents =
@@ -103,11 +116,44 @@ fn save_to(config: &Config, path: &Path) -> Result<()> {
             })?;
         }
     }
-    fs::write(path, contents).map_err(|source| ConfigError::Write {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    write_atomically(path, &contents)
+}
+
+/// Write `contents` to `path` through a sibling temp file renamed into place.
+///
+/// A plain `fs::write` truncates the target first, so a failing write would
+/// leave a half-written config behind while the caller only rolls back
+/// memory. Renaming over the target keeps the old bytes until the new ones
+/// are complete; the temp file is removed on any failure.
+fn write_atomically(path: &Path, contents: &str) -> Result<()> {
+    let temp = temp_path(path);
+    if let Err(source) = fs::write(&temp, contents) {
+        let _ = fs::remove_file(&temp);
+        return Err(ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        }
+        .into());
+    }
+    if let Err(source) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        }
+        .into());
+    }
     Ok(())
+}
+
+/// The sibling temp file used by [`write_atomically`]: `<name>.tmp-<pid>`.
+fn temp_path(path: &Path) -> PathBuf {
+    let mut name = match path.file_name() {
+        Some(name) => name.to_os_string(),
+        None => std::ffi::OsString::from("config.toml"),
+    };
+    name.push(format!(".tmp-{}", std::process::id()));
+    path.with_file_name(name)
 }
 
 /// Serialize tests that exercise the shared, redirected config file.
@@ -215,5 +261,137 @@ mod tests {
         config.save().expect("save");
         let loaded = Config::load().expect("load");
         assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn load_legacy_plain_string_config() {
+        // Files written before the marker encoding existed must keep loading
+        // unchanged (backward compatibility of the string form).
+        let dir = TempDir::new("legacy");
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "scan_dirs = [\"/home/user/repos\", \"/opt/projects\"]\n",
+        )
+        .expect("write legacy config");
+        let loaded = load_from(&path).expect("legacy config loads");
+        assert_eq!(
+            loaded.scan_dirs,
+            vec![
+                PathBuf::from("/home/user/repos"),
+                PathBuf::from("/opt/projects"),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_empty_config_file_returns_default() {
+        let dir = TempDir::new("empty");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "").expect("write empty config");
+        let loaded = load_from(&path).expect("empty config loads");
+        assert_eq!(loaded, Config::default());
+        assert!(loaded.scan_dirs.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_load_round_trips_non_utf8_scan_dirs() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = TempDir::new("non-utf8");
+        let path = dir.path().join("config.toml");
+        let non_utf8 = PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/\xff\xfe-not-utf8"));
+        let config = Config {
+            scan_dirs: vec![PathBuf::from("/home/user/repos"), non_utf8],
+        };
+        save_to(&config, &path).expect("save non-UTF-8 config");
+        let loaded = load_from(&path).expect("load non-UTF-8 config");
+        assert_eq!(loaded, config);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loads_legacy_and_marker_entries_side_by_side() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = TempDir::new("mixed");
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "scan_dirs = [\"/home/user/repos\", { path_hex = \"2fffe5\" }]\n",
+        )
+        .expect("write mixed config");
+        let loaded = load_from(&path).expect("mixed config loads");
+        assert_eq!(
+            loaded.scan_dirs,
+            vec![
+                PathBuf::from("/home/user/repos"),
+                PathBuf::from(std::ffi::OsStr::from_bytes(b"/\xff\xe5")),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_save_persists_non_utf8_scan_dir_via_public_api() {
+        // Holds the I/O guard: the save/load pair below uses the shared
+        // redirect installed on that config file.
+        use std::os::unix::ffi::OsStrExt as _;
+        let _io = super::config_io_guard();
+        let config = Config {
+            scan_dirs: vec![PathBuf::from(std::ffi::OsStr::from_bytes(
+                b"/tmp/\xff\xfe_picker",
+            ))],
+        };
+        config.save().expect("save non-UTF-8 config");
+        let loaded = Config::load().expect("load non-UTF-8 config");
+        assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn failed_save_preserves_the_previous_config_file() {
+        // The temp path is blocked, so the write fails before the rename and
+        // the seeded config must survive untouched (no partial contents).
+        let dir = TempDir::new("atomic");
+        let path = dir.path().join("config.toml");
+        let seeded = Config {
+            scan_dirs: vec![PathBuf::from("/home/user/repos")],
+        };
+        save_to(&seeded, &path).expect("seed config");
+        let before = fs::read(&path).expect("read seeded config");
+
+        let temp = temp_path(&path);
+        fs::create_dir_all(&temp).expect("block temp path");
+        let other = Config {
+            scan_dirs: vec![PathBuf::from("/opt/projects")],
+        };
+        save_to(&other, &path).expect_err("blocked save must fail");
+
+        let after = fs::read(&path).expect("config still readable");
+        assert_eq!(after, before, "failed save must not touch the config");
+        fs::remove_dir_all(&temp).expect("clean up blocked temp path");
+    }
+
+    #[test]
+    fn failed_save_removes_its_temp_file() {
+        // The target itself is blocked (a directory at `config.toml`), so the
+        // rename fails: the temp file written beforehand must be cleaned up.
+        let dir = TempDir::new("atomic-litter");
+        let path = dir.path().join("config.toml");
+        fs::create_dir_all(&path).expect("block target");
+        let config = Config {
+            scan_dirs: vec![PathBuf::from("/opt/projects")],
+        };
+        save_to(&config, &path).expect_err("blocked save must fail");
+
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .expect("list config dir")
+            .map(|entry| entry.expect("dir entry").file_name())
+            .collect();
+        assert_eq!(
+            leftovers.len(),
+            1,
+            "only the blocking target may remain: {leftovers:?}"
+        );
+        fs::remove_dir_all(&path).expect("clean up blocked target");
     }
 }

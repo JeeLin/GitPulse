@@ -848,7 +848,12 @@ impl App {
     /// entry selected; the success message is written after the refresh,
     /// which would otherwise clear it.
     fn add_scan_dir(&mut self, dir: std::path::PathBuf) {
-        let shown = dir.display().to_string();
+        // Non-UTF-8 paths render through `Debug` so invalid bytes escape as
+        // `\xe9` instead of the lossy U+FFFD replacement from `display()`.
+        let shown = dir
+            .to_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{dir:?}"));
         if !dir.exists() {
             self.set_error(format!("目录不存在: {shown}"));
             return;
