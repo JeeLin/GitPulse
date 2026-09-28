@@ -169,6 +169,64 @@ pub async fn pull(repo_path: &Path, on_progress: impl Fn(Progress) + Send + 'sta
     .await?
 }
 
+/// Push a single tag to the remote.
+///
+/// Uses `git push <remote> <tag>` so that only the named tag is transferred.
+/// The repository must have at least one remote configured; otherwise an error
+/// is returned with a readable reason (matching `push` behavior).
+#[allow(dead_code)]
+pub async fn push_tag(
+    repo_path: &Path,
+    tag: &str,
+    on_progress: impl Fn(Progress) + Send + 'static,
+) -> Result<()> {
+    let repo_path: PathBuf = repo_path.to_path_buf();
+    let tag = tag.to_string();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        on_progress(Progress {
+            percent: 0,
+            message: format!("正在 push 标签 {tag}…"),
+        });
+        let remote = resolve_remote(&repo_path)?;
+        let args = ["push", remote.as_str(), tag.as_str()];
+        git_output(&repo_path, &args)?;
+        on_progress(Progress {
+            percent: 100,
+            message: format!("标签 {tag} push 完成"),
+        });
+        Ok(())
+    })
+    .await?
+}
+
+/// Push all local tags to the remote.
+///
+/// Uses `git push <remote> --tags` so that every local tag is transferred.
+/// The repository must have at least one remote configured; otherwise an error
+/// is returned with a readable reason (matching `push` behavior).
+#[allow(dead_code)]
+pub async fn push_all_tags(
+    repo_path: &Path,
+    on_progress: impl Fn(Progress) + Send + 'static,
+) -> Result<()> {
+    let repo_path: PathBuf = repo_path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        on_progress(Progress {
+            percent: 0,
+            message: "正在 push 所有标签…".to_string(),
+        });
+        let remote = resolve_remote(&repo_path)?;
+        let args = ["push", remote.as_str(), "--tags"];
+        git_output(&repo_path, &args)?;
+        on_progress(Progress {
+            percent: 100,
+            message: "所有标签 push 完成".to_string(),
+        });
+        Ok(())
+    })
+    .await?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,5 +442,101 @@ mod tests {
         assert!(msg.contains("pull 失败"), "missing error reason: {msg}");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn push_tag_publishes_ref_to_remote() {
+        let root = base_dir("pushtag");
+        let origin_path = root.join("origin.git");
+        Repository::init_bare(&origin_path).unwrap();
+        let origin_str = origin_path.to_str().unwrap().to_string();
+
+        // Work repo: create a commit and a tag.
+        let work = root.join("work");
+        fs::create_dir_all(&work).unwrap();
+        init_repo(&work);
+        {
+            let repo = Repository::open(&work).unwrap();
+            repo.remote("origin", &origin_str).unwrap();
+        }
+        commit_file(&work, "a.txt", "v1\n", "v1");
+        // Create a tag named "v1.0".
+        crate::git::tag::create_tag(&work, "v1.0").unwrap();
+
+        let messages: Arc<Mutex<Vec<Progress>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = messages.clone();
+        push_tag(&work, "v1.0", move |p| sink.lock().unwrap().push(p))
+            .await
+            .expect("push tag must succeed");
+        {
+            let messages = messages.lock().unwrap();
+            assert!(messages.iter().any(|p| p.percent == 100), "{messages:?}");
+        }
+
+        // Verify the tag exists in the bare repo.
+        let origin = Repository::open(&origin_path).unwrap();
+        assert!(
+            origin.find_reference("refs/tags/v1.0").is_ok(),
+            "tag should exist in remote"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn push_all_tags_publishes_every_tag() {
+        let root = base_dir("pushall");
+        let origin_path = root.join("origin.git");
+        Repository::init_bare(&origin_path).unwrap();
+        let origin_str = origin_path.to_str().unwrap().to_string();
+
+        // Work repo: create a commit and two tags.
+        let work = root.join("work");
+        fs::create_dir_all(&work).unwrap();
+        init_repo(&work);
+        {
+            let repo = Repository::open(&work).unwrap();
+            repo.remote("origin", &origin_str).unwrap();
+        }
+        commit_file(&work, "a.txt", "v1\n", "v1");
+        crate::git::tag::create_tag(&work, "v1.0").unwrap();
+        crate::git::tag::create_tag(&work, "v2.0").unwrap();
+
+        let messages: Arc<Mutex<Vec<Progress>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = messages.clone();
+        push_all_tags(&work, move |p| sink.lock().unwrap().push(p))
+            .await
+            .expect("push all tags must succeed");
+        {
+            let messages = messages.lock().unwrap();
+            assert!(messages.iter().any(|p| p.percent == 100), "{messages:?}");
+        }
+
+        // Verify both tags exist in the bare repo.
+        let origin = Repository::open(&origin_path).unwrap();
+        assert!(
+            origin.find_reference("refs/tags/v1.0").is_ok(),
+            "tag v1.0 should exist in remote"
+        );
+        assert!(
+            origin.find_reference("refs/tags/v2.0").is_ok(),
+            "tag v2.0 should exist in remote"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn push_tag_without_remote_reports_reason() {
+        let dir = base_dir("noremote");
+        init_repo(&dir);
+        commit_file(&dir, "a.txt", "v1\n", "v1");
+        // Create a tag to push.
+        crate::git::tag::create_tag(&dir, "v1.0").unwrap();
+
+        let err = push_tag(&dir, "v1.0", |_| {}).await.unwrap_err();
+        assert!(
+            err.to_string().contains("未配置远端"),
+            "unexpected error: {err}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

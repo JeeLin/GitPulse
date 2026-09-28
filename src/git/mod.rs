@@ -8,6 +8,7 @@ mod file;
 pub mod history;
 mod remote;
 mod status;
+pub mod tag;
 
 pub use batch::{batch_fetch, batch_pull};
 pub use branch::{create_branch, delete_branch, list_branches, switch_branch, BranchInfo};
