@@ -5,6 +5,7 @@ mod branch;
 mod commit;
 mod discover;
 mod file;
+pub mod history;
 mod remote;
 mod status;
 
