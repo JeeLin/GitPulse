@@ -43,6 +43,8 @@
 - 单仓库视图：文件状态列表、diff 查看、stage/unstage、discard（带确认框）、commit、push/pull（fast-forward only）
 - 批量 pull/fetch
 - 分支面板：分支列表、创建、切换、删除
+- 提交历史视图：提交列表 + 分支/tag/HEAD 标记 + DAG 拓扑 + 提交详情
+- tag 管理：列表、创建、删除（确认框）、推送到远端
 
 **M2 单平台远端回执**
 
