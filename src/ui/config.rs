@@ -191,7 +191,7 @@ fn render_dir_picker(
     items.extend(entries.iter().map(|entry| {
         let name = entry
             .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
+            .map(|name| show_path(Path::new(name)))
             .unwrap_or_else(|| show_path(entry));
         ListItem::new(Line::from(format!("{name}/")))
     }));

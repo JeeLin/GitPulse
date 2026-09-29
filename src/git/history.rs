@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use git2::{BranchType, Commit, ErrorCode, Oid, Repository, Sort};
 
-use super::short_id;
+use super::{short_id, show_path};
 
 /// Upper bound of DAG lanes the graph column can draw.
 pub const MAX_LANES: usize = 6;
@@ -89,7 +89,7 @@ pub fn list_commits(repo_path: &Path, limit: usize) -> Result<Vec<CommitRow>> {
         Err(err) => return Err(err.into()),
     };
     // A HEAD that cannot be peeled to a commit (corrupt reference) is an
-    // error; its oid is already recorded in `marks` below.
+    // error; its oid is already recorded in `marks` above.
     head.peel_to_commit()?;
 
     let mut walk = repo.revwalk()?;
@@ -139,7 +139,7 @@ pub fn commit_detail(repo_path: &Path, oid: &str) -> Result<CommitDetail> {
     for delta in diff.deltas() {
         let path = delta.new_file().path().or_else(|| delta.old_file().path());
         if let Some(path) = path {
-            files.push(path.to_string_lossy().into_owned());
+            files.push(show_path(path));
         }
     }
     Ok(CommitDetail { message, files })

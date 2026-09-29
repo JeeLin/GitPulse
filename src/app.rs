@@ -1235,7 +1235,7 @@ impl App {
                 self.picker_state.select(Some(0));
                 self.clear_error();
             }
-            Err(err) => self.set_error(format!("无法读取目录 {}: {err}", dir.display())),
+            Err(err) => self.set_error(format!("无法读取目录 {}: {err}", show_path(&dir))),
         }
     }
 
