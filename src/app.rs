@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::git::history::{CommitDetail, CommitInfo, GraphCell};
+use crate::git::tag::TagInfo;
 use crate::git::{self, BranchInfo, FileEntry, Progress, RepoInfo};
 
 /// Terminal type used by the TUI.
@@ -39,6 +40,8 @@ pub enum View {
     Config,
     /// Commit history view (DAG, commit list and detail pane).
     History,
+    /// Tag management panel (create / delete / push).
+    Tags,
 }
 
 /// Number of commits loaded into the history view (`App::enter_history`).
@@ -112,6 +115,94 @@ impl HistoryState {
     /// The highlighted commit, or `None` for an empty history.
     pub fn selected_commit(&self) -> Option<&CommitInfo> {
         self.commits.get(self.selected)
+    }
+}
+
+/// Modal overlay shown on top of the tag panel (conventions 8 and 9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagsModal {
+    /// Single-line create-tag input; carries the buffer being typed.
+    Input {
+        /// Text typed so far, edited by `input_modal_key`.
+        buffer: String,
+    },
+    /// Delete confirmation naming the tag `y` will remove.
+    Confirm {
+        /// Name of the tag targeted by the confirmation.
+        tag_to_delete: String,
+    },
+}
+
+/// State of the tag panel ([`View::Tags`]).
+///
+/// Owned by [`App`] and rendered by `ui::tags` through a direct borrow.
+#[derive(Debug, Default)]
+pub struct TagsState {
+    /// Tags sorted alphabetically by name, as returned by
+    /// `git::tag::list_tags`.
+    pub tags: Vec<TagInfo>,
+    /// Index of the highlighted tag; always `0` when `tags` is empty.
+    pub selected: usize,
+    /// Open overlay: the create input or the delete confirmation.
+    pub modal: Option<TagsModal>,
+    /// Selection cursor shared across frames, kept in sync with `selected`.
+    pub list_state: ListState,
+}
+
+impl TagsState {
+    /// Drop the loaded panel (entry, failed load): empty list, no cursor,
+    /// no overlay.
+    pub fn reset(&mut self) {
+        self.tags.clear();
+        self.selected = 0;
+        self.modal = None;
+        self.list_state.select(None);
+    }
+
+    /// Install a freshly loaded list and re-clamp the cursor, so a shrinking
+    /// list never points past its end (and empties clear the cursor).
+    pub fn set_tags(&mut self, tags: Vec<TagInfo>) {
+        self.tags = tags;
+        self.select(self.selected);
+    }
+
+    /// Highlight `idx`, clamped to the last tag; an empty list clears the
+    /// cursor and keeps `selected` at `0`.
+    pub fn select(&mut self, idx: usize) {
+        if self.tags.is_empty() {
+            self.selected = 0;
+            self.list_state.select(None);
+            return;
+        }
+        self.selected = idx.min(self.tags.len() - 1);
+        self.list_state.select(Some(self.selected));
+    }
+
+    /// Move the cursor one row: `down` clamps at the last tag, `up` at the
+    /// first. An empty list never moves.
+    pub fn move_selection(&mut self, down: bool) {
+        if self.tags.is_empty() {
+            return;
+        }
+        let next = if down {
+            self.selected.saturating_add(1).min(self.tags.len() - 1)
+        } else {
+            self.selected.saturating_sub(1)
+        };
+        self.select(next);
+    }
+
+    /// The highlighted tag, or `None` for an empty list.
+    pub fn selected_tag(&self) -> Option<&TagInfo> {
+        self.tags.get(self.selected)
+    }
+
+    /// Highlight the tag named `name`, leaving the selection untouched when
+    /// the name is not in the list.
+    pub fn select_name(&mut self, name: &str) {
+        if let Some(idx) = self.tags.iter().position(|t| t.name == name) {
+            self.select(idx);
+        }
     }
 }
 
@@ -257,6 +348,8 @@ pub struct App {
     pub picker_state: ListState,
     /// Commit-history view state (`View::History`).
     pub history: HistoryState,
+    /// Tag-panel state (`View::Tags`).
+    pub tags_state: TagsState,
 }
 
 impl App {
@@ -297,6 +390,7 @@ impl App {
             picker_entries: Vec::new(),
             picker_state: ListState::default(),
             history: HistoryState::default(),
+            tags_state: TagsState::default(),
         }
     }
 
@@ -836,6 +930,220 @@ impl App {
         }
     }
 
+    /// Name of the currently opened repository (empty when the index is
+    /// stale or nothing is open).
+    pub fn current_repo_name(&self) -> &str {
+        self.current_repo
+            .filter(|i| *i < self.repos.len())
+            .map_or("", |i| &self.repos[i].name)
+    }
+
+    /// Enter the tag panel for the current repository (repo `t`).
+    ///
+    /// The list loads immediately with the first tag selected; a repository
+    /// without tags shows the empty state. No-op when no valid repository is
+    /// open, so a stale cursor can never open the panel against the wrong
+    /// path.
+    pub fn enter_tags(&mut self) {
+        if self.current_repo_path().is_none() {
+            return;
+        }
+        self.view = View::Tags;
+        self.tags_state.reset();
+        // Stale push feedback would outrank the load status below; a push
+        // still in flight keeps its receiver and re-reports on the next
+        // progress event.
+        if self.remote_rx.is_none() {
+            self.remote_status = None;
+        }
+        self.clear_error();
+        self.load_tags();
+    }
+
+    /// Leave the tag panel back to the repo view (`q` / `Esc`).
+    pub fn leave_tags(&mut self) {
+        self.view = View::Repo;
+        self.tags_state.modal = None;
+        self.clear_error();
+    }
+
+    /// Load (or reload) the tag list for the current repository, keeping the
+    /// cursor on a still-valid row.
+    ///
+    /// A failed load clears the list and reports the reason, so a broken
+    /// repository never looks like an empty one (checkpoint 2); an empty
+    /// result is a valid state and keeps the status line clean.
+    pub fn load_tags(&mut self) {
+        let Some(path) = self.current_repo_path() else {
+            self.set_error("标签面板: 仓库索引失效");
+            self.tags_state.set_tags(Vec::new());
+            return;
+        };
+        match git::tag::list_tags(&path) {
+            Ok(tags) => {
+                self.tags_state.set_tags(tags);
+                self.clear_error();
+            }
+            Err(e) => {
+                self.set_error(format!("加载标签列表失败: {e}"));
+                self.tags_state.set_tags(Vec::new());
+            }
+        }
+    }
+
+    /// Open the single-line tag-name input (convention 9).
+    pub fn start_tag_create(&mut self) {
+        if self.current_repo_path().is_none() {
+            return;
+        }
+        self.tags_state.modal = Some(TagsModal::Input {
+            buffer: String::new(),
+        });
+        self.status = None;
+        self.remote_status = None;
+    }
+
+    /// Cancel the tag-create input, keeping the list as it was.
+    pub fn cancel_tag_create(&mut self) {
+        self.tags_state.modal = None;
+    }
+
+    /// Create the lightweight tag named in the input and select it
+    /// (convention 5).
+    ///
+    /// An empty name keeps the input open with an error; a git-side failure
+    /// (duplicate name, unborn HEAD) also keeps the typed text so it can be
+    /// corrected (convention 9).
+    pub fn submit_tag_create(&mut self) {
+        let name = match &self.tags_state.modal {
+            Some(TagsModal::Input { buffer }) => buffer.trim().to_string(),
+            _ => return,
+        };
+        if name.is_empty() {
+            self.set_error("标签名不能为空");
+            return;
+        }
+        let Some(path) = self.current_repo_path() else {
+            self.set_error("创建标签失败: 仓库索引失效");
+            return;
+        };
+        // Refresh-first ordering: `remote_status` would otherwise outrank
+        // the create error on the panel's status line.
+        self.remote_status = None;
+        match git::tag::create_tag(&path, &name) {
+            Ok(()) => {
+                self.tags_state.modal = None;
+                self.load_tags();
+                self.tags_state.select_name(&name);
+                self.set_info_unless_error(format!("已创建标签 {name}"));
+            }
+            Err(e) => self.set_error(format!("创建标签失败: {e}")),
+        }
+    }
+
+    /// Open the delete confirmation for the selected tag (discard-style
+    /// confirmation, convention 8).
+    ///
+    /// An empty list reports an error instead of opening a dialog that could
+    /// not name a target.
+    pub fn start_tag_delete(&mut self) {
+        let Some(tag) = self.tags_state.selected_tag() else {
+            self.set_error("没有可删除的标签");
+            return;
+        };
+        let tag_to_delete = tag.name.clone();
+        self.tags_state.modal = Some(TagsModal::Confirm { tag_to_delete });
+        self.status = None;
+        self.remote_status = None;
+    }
+
+    /// Cancel the tag-delete confirmation.
+    pub fn cancel_tag_delete(&mut self) {
+        self.tags_state.modal = None;
+    }
+
+    /// Delete the confirmed tag, then refresh the list (convention 5).
+    ///
+    /// The overlay closes first — like the branch and config confirms — so a
+    /// failed deletion surfaces on the status line instead of reopening the
+    /// dialog it just dismissed.
+    pub fn confirm_tag_delete(&mut self) {
+        let Some(TagsModal::Confirm { tag_to_delete }) = self.tags_state.modal.take() else {
+            return;
+        };
+        let Some(path) = self.current_repo_path() else {
+            self.set_error("删除标签失败: 仓库索引失效");
+            return;
+        };
+        self.remote_status = None;
+        match git::tag::delete_tag(&path, &tag_to_delete) {
+            Ok(()) => {
+                self.load_tags();
+                self.set_info_unless_error(format!("已删除标签 {tag_to_delete}"));
+            }
+            Err(e) => self.set_error(format!("删除标签失败: {e}")),
+        }
+    }
+
+    /// Start a background push of the selected tag (`all == false`) or of
+    /// every local tag (`all == true`) from the tag panel.
+    ///
+    /// Reuses the push/pull progress channel (convention 1): progress
+    /// arrives on an mpsc receiver consumed each frame and renders through
+    /// [`RemoteStatus`] on the panel's status line. No-op while another
+    /// remote or batch op is in flight (they would contend on the same
+    /// repository locks), or outside the tag panel.
+    pub fn start_tag_push(&mut self, all: bool) {
+        if self.view != View::Tags || self.remote_rx.is_some() || self.batch_rx.is_some() {
+            return;
+        }
+        let Some(path) = self.current_repo_path() else {
+            self.set_error("标签推送失败: 仓库索引失效");
+            return;
+        };
+        let tag = if all {
+            None
+        } else {
+            match self.tags_state.selected_tag() {
+                Some(tag) => Some(tag.name.clone()),
+                None => {
+                    self.set_error("没有可推送的标签");
+                    return;
+                }
+            }
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.remote_rx = Some(rx);
+        self.remote_op = "push";
+        let message = match &tag {
+            Some(name) => format!("正在 push 标签 {name}…"),
+            None => "正在 push 所有标签…".to_string(),
+        };
+        self.remote_status = Some(RemoteStatus::Progress(Progress {
+            percent: 0,
+            message,
+        }));
+        self.status = None;
+        tokio::spawn(async move {
+            let sink = tx.clone();
+            let result = match tag {
+                Some(name) => {
+                    git::push_tag(&path, &name, move |p| {
+                        let _ = sink.send(RemoteEvent::Progress(p));
+                    })
+                    .await
+                }
+                None => {
+                    git::push_all_tags(&path, move |p| {
+                        let _ = sink.send(RemoteEvent::Progress(p));
+                    })
+                    .await
+                }
+            };
+            let _ = tx.send(RemoteEvent::Done(result.map_err(|e| e.to_string())));
+        });
+    }
+
     /// Enter the scan-dir configuration panel (dashboard `c`).
     ///
     /// The selection lands on the first configured directory — or is cleared
@@ -1288,6 +1596,7 @@ impl App {
             View::Branches => self.handle_branches_key(key),
             View::Config => self.handle_config_key(key),
             View::History => self.handle_history_key(key),
+            View::Tags => self.handle_tags_key(key),
         }
     }
 
@@ -1390,6 +1699,10 @@ impl App {
                 }
                 KeyCode::Char('h') => {
                     self.enter_history();
+                    true
+                }
+                KeyCode::Char('t') => {
+                    self.enter_tags();
                     true
                 }
                 _ => true,
@@ -1499,6 +1812,55 @@ impl App {
                 self.history.move_selection(false);
                 self.load_history_detail();
             }
+            _ => {}
+        }
+        true
+    }
+
+    /// Key handler for the tag panel: the create input and the delete
+    /// confirmation take precedence over list navigation, while `q` / `Esc`
+    /// on the list return to the repo view.
+    ///
+    /// A press never leaves the panel from under an open overlay: `Esc`
+    /// dismisses it first (and `q` dismisses the confirmation as well, so
+    /// the "close the modal first" rule holds for both keys). Only the
+    /// create input treats `q` as text, otherwise tag names could not
+    /// contain the letter.
+    fn handle_tags_key(&mut self, key: KeyEvent) -> bool {
+        if matches!(self.tags_state.modal, Some(TagsModal::Input { .. })) {
+            let outcome = match &mut self.tags_state.modal {
+                Some(TagsModal::Input { buffer }) => input_modal_key(key, buffer),
+                // Unreachable: the `matches!` guard pinned the variant.
+                _ => InputOutcome::Consumed,
+            };
+            match outcome {
+                InputOutcome::Cancel => self.cancel_tag_create(),
+                InputOutcome::Submit => self.submit_tag_create(),
+                InputOutcome::Consumed => {}
+            }
+            return true;
+        }
+        if matches!(self.tags_state.modal, Some(TagsModal::Confirm { .. })) {
+            let outcome = if key.code == KeyCode::Char('q') {
+                ConfirmOutcome::No
+            } else {
+                confirm_modal_key(key)
+            };
+            match outcome {
+                ConfirmOutcome::Yes => self.confirm_tag_delete(),
+                ConfirmOutcome::No => self.cancel_tag_delete(),
+                ConfirmOutcome::Ignored => {}
+            }
+            return true;
+        }
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.leave_tags(),
+            KeyCode::Char('j') | KeyCode::Down => self.tags_state.move_selection(true),
+            KeyCode::Char('k') | KeyCode::Up => self.tags_state.move_selection(false),
+            KeyCode::Char('c') => self.start_tag_create(),
+            KeyCode::Char('d') => self.start_tag_delete(),
+            KeyCode::Char('p') => self.start_tag_push(false),
+            KeyCode::Char('a') => self.start_tag_push(true),
             _ => {}
         }
         true
@@ -3904,5 +4266,426 @@ mod tests {
             "unexpected message: {}",
             st.message
         );
+    }
+
+    // ---------- tags panel ----------
+
+    /// Render one frame of the current view through the dispatcher and
+    /// return the whitespace-stripped buffer text (wide CJK glyphs leave
+    /// padding cells).
+    fn tags_render_text(app: &mut App) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::render(f, app)).unwrap();
+        let raw: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        raw.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// Repo fixture with the given tag names created at HEAD.
+    fn app_with_tagged_repo(tag: &str, names: &[&str]) -> (std::path::PathBuf, App) {
+        let dir = temp_dir(tag);
+        init_repo_with_commit(&dir);
+        for name in names {
+            git::tag::create_tag(&dir, name).unwrap();
+        }
+        let app = app_with_repo_at(&dir);
+        (dir, app)
+    }
+
+    /// Enter the repo view and then the tag panel.
+    fn enter_tags(app: &mut App) {
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert!(app.handle_key(key(KeyCode::Char('t'))));
+        assert_eq!(app.view, View::Tags);
+    }
+
+    #[test]
+    fn repo_t_enters_tags_and_loads_tag_list() {
+        let (dir, mut app) = app_with_tagged_repo("tags-enter", &["v1.0"]);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert_eq!(app.view, View::Repo);
+        app.set_error("stale".to_string());
+        // Stale push feedback from the repo view must not outrank the panel.
+        app.remote_status = Some(RemoteStatus::Success);
+
+        assert!(app.handle_key(key(KeyCode::Char('t'))));
+        assert_eq!(app.view, View::Tags);
+        assert_eq!(app.tags_state.tags.len(), 1);
+        assert_eq!(app.tags_state.tags[0].name, "v1.0");
+        assert_eq!(app.tags_state.selected, 0);
+        assert_eq!(app.tags_state.list_state.selected(), Some(0));
+        assert!(app.tags_state.modal.is_none());
+        assert!(app.status.is_none()); // entering clears the stale status
+        assert!(app.remote_status.is_none()); // …and the stale push result
+
+        // t without an open repository never leaves the repo view.
+        app.current_repo = None;
+        app.view = View::Repo;
+        assert!(app.handle_key(key(KeyCode::Char('t'))));
+        assert_eq!(app.view, View::Repo);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tags_j_k_move_selection_and_stop_at_edges() {
+        let (dir, mut app) = app_with_tagged_repo("tags-move", &["v1", "v2"]);
+        enter_tags(&mut app);
+        assert_eq!(app.tags_state.tags.len(), 2);
+
+        // j / Down move one row and clamp at the last tag.
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.tags_state.selected, 1);
+        assert_eq!(app.tags_state.list_state.selected(), Some(1));
+        assert!(app.handle_key(key(KeyCode::Down)));
+        assert_eq!(app.tags_state.selected, 1, "j stops at the last tag");
+
+        // k / Up move back and clamp at the first tag.
+        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(app.tags_state.selected, 0);
+        assert!(app.handle_key(key(KeyCode::Up)));
+        assert_eq!(app.tags_state.selected, 0, "k stops at the first tag");
+        assert!(app.status.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tags_create_flow_submits_refreshes_and_reports_errors() {
+        let (dir, mut app) = app_with_tagged_repo("tags-create", &[]);
+        enter_tags(&mut app);
+        assert!(app.tags_state.tags.is_empty());
+
+        // c opens a clean input overlay.
+        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        assert!(
+            matches!(app.tags_state.modal, Some(TagsModal::Input { .. })),
+            "create input must open"
+        );
+
+        // Empty name: red status, overlay kept open (convention 9).
+        assert!(app.handle_key(key(KeyCode::Enter)));
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("标签名不能为空"), "{}", st.message);
+        assert!(app.tags_state.modal.is_some());
+
+        // Type the name and submit: list refreshed, overlay closed, the new
+        // tag selected, success on the status line.
+        for c in "v1.0".chars() {
+            assert!(app.handle_key(key(KeyCode::Char(c))));
+        }
+        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.tags_state.modal.is_none());
+        assert!(app.tags_state.tags.iter().any(|t| t.name == "v1.0"));
+        let sel = app.tags_state.selected;
+        assert_eq!(app.tags_state.tags[sel].name, "v1.0");
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error, "{}", st.message);
+        assert!(st.message.contains("已创建标签 v1.0"), "{}", st.message);
+
+        // Duplicate name: red status with the git-side reason, the overlay
+        // stays open carrying the typed text for a correction.
+        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        for c in "v1.0".chars() {
+            assert!(app.handle_key(key(KeyCode::Char(c))));
+        }
+        assert!(app.handle_key(key(KeyCode::Enter)));
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("创建标签失败"), "{}", st.message);
+        assert!(st.message.contains("已存在"), "{}", st.message);
+        match &app.tags_state.modal {
+            Some(TagsModal::Input { buffer }) => assert_eq!(buffer, "v1.0"),
+            other => panic!("input overlay must stay open, got {other:?}"),
+        }
+        assert_eq!(app.tags_state.tags.len(), 1, "no tag was created twice");
+
+        // Esc cancels the overlay but stays in the panel.
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.tags_state.modal.is_none());
+        assert_eq!(app.view, View::Tags);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tags_delete_confirm_y_removes_and_n_cancels() {
+        let (dir, mut app) = app_with_tagged_repo("tags-delete", &["drop", "keep"]);
+        enter_tags(&mut app);
+        assert_eq!(app.tags_state.tags.len(), 2);
+
+        // `drop` sorts first, so it is the highlighted tag.
+        assert_eq!(app.tags_state.selected_tag().unwrap().name, "drop");
+
+        // d opens the confirmation naming the tag; n cancels it.
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert_eq!(
+            app.tags_state.modal,
+            Some(TagsModal::Confirm {
+                tag_to_delete: "drop".to_string()
+            })
+        );
+        assert!(app.handle_key(key(KeyCode::Char('n'))));
+        assert!(app.tags_state.modal.is_none());
+        assert_eq!(app.tags_state.tags.len(), 2, "n must not delete");
+
+        // d + Esc cancels the same way.
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.tags_state.modal.is_none());
+        assert_eq!(app.tags_state.tags.len(), 2);
+
+        // d + y deletes and refreshes the list, reporting success.
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.handle_key(key(KeyCode::Char('y'))));
+        assert!(app.tags_state.modal.is_none());
+        assert_eq!(app.tags_state.tags.len(), 1);
+        assert_eq!(app.tags_state.tags[0].name, "keep");
+        assert_eq!(app.tags_state.list_state.selected(), Some(0));
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error, "{}", st.message);
+        assert!(st.message.contains("已删除标签 drop"), "{}", st.message);
+
+        // Deleting the last tag empties the panel; `d` then reports why.
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.handle_key(key(KeyCode::Char('y'))));
+        assert!(app.tags_state.tags.is_empty());
+        assert_eq!(app.tags_state.list_state.selected(), None);
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.tags_state.modal.is_none());
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("没有可删除的标签"), "{}", st.message);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tags_q_and_esc_close_overlay_first_then_return_to_repo() {
+        let (dir, mut app) = app_with_tagged_repo("tags-exit", &["v1"]);
+        enter_tags(&mut app);
+
+        // The create input swallows Esc (cancel) and types `q` as text:
+        // neither leaves the panel from under the overlay.
+        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        assert!(app.handle_key(key(KeyCode::Char('q'))));
+        assert!(app.tags_state.modal.is_some(), "q must not leave the panel");
+        assert_eq!(app.view, View::Tags);
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.tags_state.modal.is_none());
+        assert_eq!(app.view, View::Tags);
+
+        // The delete confirmation is dismissed by `q` as well as by Esc.
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.tags_state.modal.is_some());
+        assert!(app.handle_key(key(KeyCode::Char('q'))));
+        assert!(app.tags_state.modal.is_none());
+        assert_eq!(app.view, View::Tags);
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.tags_state.modal.is_none());
+        assert_eq!(app.view, View::Tags);
+        assert_eq!(app.tags_state.tags.len(), 1, "no tag was deleted");
+
+        // Without an overlay, both keys return to the repo view.
+        assert!(app.handle_key(key(KeyCode::Char('q'))));
+        assert_eq!(app.view, View::Repo);
+        assert!(app.handle_key(key(KeyCode::Char('t'))));
+        assert_eq!(app.view, View::Tags);
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Repo);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tags_empty_repo_enters_without_panic_and_renders_empty_state() {
+        let dir = temp_dir("tags-empty");
+        git2::Repository::init(&dir).unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+        enter_tags(&mut app);
+        assert!(app.tags_state.tags.is_empty());
+        assert_eq!(app.tags_state.selected, 0);
+        assert_eq!(app.tags_state.list_state.selected(), None);
+        assert!(app.status.is_none());
+
+        // Navigation on an empty list is a no-op and never errors.
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Down,
+            KeyCode::Up,
+        ] {
+            assert!(app.handle_key(key(code)));
+        }
+        assert_eq!(app.tags_state.list_state.selected(), None);
+        assert!(app.status.is_none());
+
+        // p reports why there is nothing to push and never spawns a task
+        // (a `tokio::spawn` outside a runtime would panic).
+        assert!(app.handle_key(key(KeyCode::Char('p'))));
+        assert!(app.remote_rx.is_none());
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("没有可推送的标签"), "{}", st.message);
+
+        let text = tags_render_text(&mut app);
+        assert!(text.contains("暂无标签"), "missing empty state: {text}");
+        assert!(text.contains("(0)"), "missing zero count: {text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tags_render_shows_name_short_hash_kind_and_confirm_text() {
+        let dir = temp_dir("tags-render");
+        init_repo_with_commit(&dir);
+        git::tag::create_tag(&dir, "v-light").unwrap();
+        {
+            let repo = git2::Repository::open(&dir).unwrap();
+            let object = repo.head().unwrap().peel(git2::ObjectType::Commit).unwrap();
+            let sig = git2::Signature::now("GitPulse Test", "test@gitpulse.local").unwrap();
+            repo.tag("v-annotated", &object, &sig, "note", false)
+                .unwrap();
+        }
+
+        let mut app = app_with_repo_at(&dir);
+        enter_tags(&mut app);
+        let target = app.tags_state.selected_tag().unwrap().target.clone();
+
+        let text = tags_render_text(&mut app);
+        assert!(text.contains("v-light"), "missing tag name: {text}");
+        assert!(text.contains("v-annotated"), "missing tag name: {text}");
+        assert!(text.contains(&target), "missing short hash: {text}");
+        assert!(text.contains("轻量"), "missing lightweight marker: {text}");
+        assert!(text.contains("注释"), "missing annotated marker: {text}");
+        assert!(text.contains("c新建"), "missing create hint: {text}");
+        assert!(text.contains("a全部推送"), "missing push-all hint: {text}");
+
+        // Create input overlay: title plus the typed name after the prompt.
+        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        for c in "v3".chars() {
+            assert!(app.handle_key(key(KeyCode::Char(c))));
+        }
+        let text = tags_render_text(&mut app);
+        assert!(text.contains("新建标签"), "missing input title: {text}");
+        assert!(text.contains(">v3"), "missing typed name: {text}");
+        assert!(app.handle_key(key(KeyCode::Esc)));
+
+        // Delete confirmation copy.
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        let text = tags_render_text(&mut app);
+        assert!(
+            text.contains("确认删除标签"),
+            "missing dialog title: {text}"
+        );
+        assert!(text.contains("确定删除标签"), "missing dialog body: {text}");
+        assert!(text.contains("y确认"), "missing confirm key: {text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Wait for the background push spawned by the tag panel to settle.
+    async fn settle_remote(app: &mut App) {
+        for _ in 0..600 {
+            app.poll_remote();
+            if app.remote_rx.is_none() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("remote operation did not finish in time");
+    }
+
+    #[tokio::test]
+    async fn tags_push_without_remote_reports_reason() {
+        let (dir, mut app) = app_with_tagged_repo("tags-push-noremote", &["v1.0"]);
+        enter_tags(&mut app);
+
+        // p arms the task with an initial progress status line…
+        assert!(app.handle_key(key(KeyCode::Char('p'))));
+        assert!(app.remote_rx.is_some());
+        assert!(matches!(app.remote_status, Some(RemoteStatus::Progress(_))));
+
+        // …and finishes with the readable "no remote" reason in red.
+        settle_remote(&mut app).await;
+        match &app.remote_status {
+            Some(RemoteStatus::Error(reason)) => {
+                assert!(reason.contains("未配置远端"), "unexpected reason: {reason}");
+            }
+            other => panic!("expected an error status, got {other:?}"),
+        }
+        assert!(app.remote_rx.is_none());
+
+        // a (push all) takes the same path with the same reason.
+        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        settle_remote(&mut app).await;
+        assert!(matches!(app.remote_status, Some(RemoteStatus::Error(_))));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn tags_push_single_and_all_publish_to_bare_remote() {
+        let root = temp_dir("tags-push-origin");
+        let origin_path = root.join("origin.git");
+        git2::Repository::init_bare(&origin_path).unwrap();
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        init_repo_with_commit(&work);
+        {
+            let repo = git2::Repository::open(&work).unwrap();
+            repo.remote("origin", origin_path.to_str().unwrap())
+                .unwrap();
+        }
+        git::tag::create_tag(&work, "v1.0").unwrap();
+
+        let mut app = app_with_repo_at(&work);
+        enter_tags(&mut app);
+        assert_eq!(app.tags_state.tags.len(), 1);
+
+        // p pushes the selected tag and reports success.
+        assert!(app.handle_key(key(KeyCode::Char('p'))));
+        settle_remote(&mut app).await;
+        assert_eq!(app.remote_status, Some(RemoteStatus::Success));
+        let origin = git2::Repository::open(&origin_path).unwrap();
+        assert!(
+            origin.find_reference("refs/tags/v1.0").is_ok(),
+            "v1.0 must reach the remote"
+        );
+
+        // Create a second tag through the panel, then a pushes them all.
+        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        for c in "v2.0".chars() {
+            assert!(app.handle_key(key(KeyCode::Char(c))));
+        }
+        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.tags_state.tags.len(), 2);
+
+        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        settle_remote(&mut app).await;
+        assert_eq!(app.remote_status, Some(RemoteStatus::Success));
+        let origin = git2::Repository::open(&origin_path).unwrap();
+        for name in ["refs/tags/v1.0", "refs/tags/v2.0"] {
+            assert!(
+                origin.find_reference(name).is_ok(),
+                "{name} must reach the remote"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

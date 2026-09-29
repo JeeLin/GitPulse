@@ -24,7 +24,6 @@ pub struct TagInfo {
 ///
 /// Returns an empty vector for repositories with no tags.
 /// Returns an error if the path does not point to a valid Git repository.
-#[allow(dead_code)]
 pub fn list_tags(repo_path: &Path) -> Result<Vec<TagInfo>> {
     let repo = Repository::open(repo_path)?;
     let mut tags = Vec::new();
@@ -62,7 +61,6 @@ pub fn list_tags(repo_path: &Path) -> Result<Vec<TagInfo>> {
 /// - Returns an error if the repository has no commits (HEAD cannot be resolved).
 /// - Returns an error if the tag name is empty.
 /// - Returns an error if a tag with the given name already exists.
-#[allow(dead_code)]
 pub fn create_tag(repo_path: &Path, name: &str) -> Result<()> {
     if name.trim().is_empty() {
         anyhow::bail!("标签名称不能为空");
@@ -88,7 +86,6 @@ pub fn create_tag(repo_path: &Path, name: &str) -> Result<()> {
 /// - Returns an error if the tag name is empty.
 /// - Returns an error if no tag with the given name exists.
 /// - Returns an error if the tag deletion fails for any other reason.
-#[allow(dead_code)]
 pub fn delete_tag(repo_path: &Path, name: &str) -> Result<()> {
     if name.trim().is_empty() {
         anyhow::bail!("标签名称不能为空");

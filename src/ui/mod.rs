@@ -8,6 +8,7 @@ pub mod diff;
 pub mod history;
 pub mod remote;
 pub mod repo;
+pub mod tags;
 
 use ratatui::{
     layout::Rect,
@@ -241,6 +242,21 @@ pub fn render(f: &mut Frame, app: &mut App) {
             // Field-level borrows of `app.history` and `app.status`
             // coexist (disjoint fields of `App`).
             history::render_history(f, &mut app.history, app.status.as_ref());
+        }
+        View::Tags => {
+            // Field-level borrows of `app.tags_state` (cursor vs. list) and
+            // of the status fields coexist (disjoint fields of `App`).
+            let repo_name = app.current_repo_name().to_string();
+            let state = tags::TagsRender {
+                tags: &app.tags_state.tags,
+                list_state: &mut app.tags_state.list_state,
+                modal: app.tags_state.modal.as_ref(),
+                status: app.status.as_ref(),
+                remote_status: app.remote_status.as_ref(),
+                remote_op: app.remote_op,
+                repo_name: &repo_name,
+            };
+            tags::render_tags(f, state);
         }
     }
 }

@@ -174,7 +174,6 @@ pub async fn pull(repo_path: &Path, on_progress: impl Fn(Progress) + Send + 'sta
 /// Uses `git push <remote> <tag>` so that only the named tag is transferred.
 /// The repository must have at least one remote configured; otherwise an error
 /// is returned with a readable reason (matching `push` behavior).
-#[allow(dead_code)]
 pub async fn push_tag(
     repo_path: &Path,
     tag: &str,
@@ -204,7 +203,6 @@ pub async fn push_tag(
 /// Uses `git push <remote> --tags` so that every local tag is transferred.
 /// The repository must have at least one remote configured; otherwise an error
 /// is returned with a readable reason (matching `push` behavior).
-#[allow(dead_code)]
 pub async fn push_all_tags(
     repo_path: &Path,
     on_progress: impl Fn(Progress) + Send + 'static,
@@ -526,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn push_tag_without_remote_reports_reason() {
-        let dir = base_dir("noremote");
+        let dir = base_dir("noremote-tag");
         init_repo(&dir);
         commit_file(&dir, "a.txt", "v1\n", "v1");
         // Create a tag to push.
