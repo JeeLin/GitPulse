@@ -11,7 +11,7 @@ use git2::{ObjectType, Repository};
 use super::short_id;
 
 /// Snapshot of one repository tag for the tag panel.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct TagInfo {
     /// Tag name (without the `refs/tags/` prefix).
     pub name: String,

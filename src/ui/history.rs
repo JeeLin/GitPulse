@@ -4,25 +4,42 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
-use crate::app::{HistoryState, StatusLine};
-use crate::git::{CommitInfo, RefKind};
+use crate::app::StatusLine;
+use crate::git::{CommitDetail, CommitInfo, GraphCell, RefKind};
 
 use super::hint;
 
-/// Inner width of the DAG column: one cell per lane, capped at the six
-/// lanes `git::layout_graph` ever produces.
-const GRAPH_WIDTH: usize = 6;
+/// Inner width of the DAG column: one cell per lane, capped at the lanes
+/// `git::layout_graph` ever produces (`git::MAX_LANES`).
+const GRAPH_WIDTH: usize = crate::git::MAX_LANES;
+
+/// Borrowed render state for the history view, referencing `App.history`
+/// directly so no mock data source exists (checkpoint 2).
+pub struct HistoryRender<'a> {
+    /// Live commit snapshots from `App.history.commits`.
+    pub commits: &'a [CommitInfo],
+    /// Detail payload of the highlighted commit, from `App.history.detail`.
+    pub detail: Option<&'a CommitDetail>,
+    /// One DAG row per entry of `commits`, from `git::layout_graph`.
+    pub graph: &'a [Vec<GraphCell>],
+    /// Selection cursor shared across frames.
+    pub list_state: &'a mut ListState,
+    /// Name of the repository being read (shown in the title).
+    pub repo_name: &'a str,
+    /// Current status line, if any; errors render red and persist.
+    pub status: Option<&'a StatusLine>,
+}
 
 /// Render the history view: DAG column, commit list and detail pane above
 /// the shared status line and key hints.
 ///
 /// The list is drawn first so the DAG column can scroll with the offset the
 /// list actually settled on, keeping graph rows and commit rows aligned.
-pub fn render_history(f: &mut Frame, state: &mut HistoryState, status: Option<&StatusLine>) {
+pub fn render_history(f: &mut Frame, mut state: HistoryRender<'_>) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -42,11 +59,11 @@ pub fn render_history(f: &mut Frame, state: &mut HistoryState, status: Option<&S
         ])
         .split(chunks[0]);
 
-    render_commit_list(f, columns[1], state);
-    render_graph(f, columns[0], state);
-    render_detail(f, columns[2], state);
+    render_commit_list(f, columns[1], &mut state);
+    render_graph(f, columns[0], &state);
+    render_detail(f, columns[2], &state);
 
-    super::render_status_line(f, chunks[1], status);
+    super::render_status_line(f, chunks[1], state.status);
     f.render_widget(Paragraph::new(key_hints()), chunks[2]);
 }
 
@@ -63,9 +80,13 @@ fn key_hints() -> Line<'static> {
 ///
 /// An unborn HEAD loads zero commits, which is a valid state rather than a
 /// failure: the error status (rendered by the caller) covers failed loads.
-fn render_commit_list(f: &mut Frame, area: Rect, state: &mut HistoryState) {
+fn render_commit_list(f: &mut Frame, area: Rect, state: &mut HistoryRender<'_>) {
     let block = Block::default()
-        .title(format!("提交历史 ({})", state.commits.len()))
+        .title(format!(
+            "提交历史 [{}] ({})",
+            state.repo_name,
+            state.commits.len()
+        ))
         .borders(Borders::ALL);
 
     if state.commits.is_empty() {
@@ -83,7 +104,7 @@ fn render_commit_list(f: &mut Frame, area: Rect, state: &mut HistoryState) {
         .block(block)
         .highlight_style(super::list_highlight())
         .highlight_symbol(super::HIGHLIGHT_SYMBOL);
-    f.render_stateful_widget(list, area, &mut state.list_state);
+    f.render_stateful_widget(list, area, state.list_state);
 }
 
 /// One commit row: short hash, summary, ref badges, then author and time.
@@ -121,7 +142,7 @@ fn ref_style(kind: RefKind) -> Style {
 
 /// DAG column: one row per commit, each glyph placed in its lane cell, laid
 /// out in lockstep with the commit list.
-fn render_graph(f: &mut Frame, area: Rect, state: &HistoryState) {
+fn render_graph(f: &mut Frame, area: Rect, state: &HistoryRender<'_>) {
     let lines: Vec<Line> = state
         .graph
         .iter()
@@ -144,14 +165,14 @@ fn render_graph(f: &mut Frame, area: Rect, state: &HistoryState) {
 
 /// Detail pane: the complete commit message soft-wrapped, followed by the
 /// list of paths the commit changed.
-fn render_detail(f: &mut Frame, area: Rect, state: &HistoryState) {
-    let title = match state.selected_commit() {
+fn render_detail(f: &mut Frame, area: Rect, state: &HistoryRender<'_>) {
+    let title = match selected_commit(state) {
         Some(commit) => format!("详情 [{}]", commit.id),
         None => "详情".to_string(),
     };
     let block = Block::default().title(title).borders(Borders::ALL);
 
-    let paragraph = match &state.detail {
+    let paragraph = match state.detail {
         None => Paragraph::new(Span::styled(
             "选择一个提交查看详情",
             Style::default().fg(Color::DarkGray),
@@ -181,10 +202,21 @@ fn render_detail(f: &mut Frame, area: Rect, state: &HistoryState) {
     f.render_widget(paragraph, area);
 }
 
+/// The highlighted commit: the render cursor, when it still points inside
+/// the loaded list (a stale index yields the same `None` as an empty view).
+fn selected_commit<'a>(state: &HistoryRender<'a>) -> Option<&'a CommitInfo> {
+    let idx = state
+        .list_state
+        .selected()
+        .filter(|i| *i < state.commits.len())?;
+    state.commits.get(idx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::{CommitDetail, GraphCell, RefMark};
+    use crate::app::HistoryState;
+    use crate::git::{GraphCell, RefMark};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -240,7 +272,17 @@ mod tests {
         let backend = TestBackend::new(120, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render_history(f, &mut state, None))
+            .draw(|f| {
+                let render = HistoryRender {
+                    commits: &state.commits,
+                    detail: state.detail.as_ref(),
+                    graph: &state.graph,
+                    list_state: &mut state.list_state,
+                    repo_name: "demo",
+                    status: None,
+                };
+                render_history(f, render)
+            })
             .unwrap();
         let raw: String = terminal
             .backend()
@@ -272,7 +314,7 @@ mod tests {
     #[test]
     fn render_empty_history_shows_empty_state_in_every_pane() {
         let text = render_to_text(HistoryState::default());
-        assert!(text.contains("提交历史(0)"), "missing title: {text}");
+        assert!(text.contains("提交历史[demo](0)"), "missing title: {text}");
         assert!(text.contains("暂无提交记录"), "missing empty state: {text}");
         assert!(
             text.contains("选择一个提交查看详情"),

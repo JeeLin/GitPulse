@@ -15,12 +15,13 @@ pub use branch::{create_branch, delete_branch, list_branches, switch_branch, Bra
 pub use commit::commit;
 pub use discover::{canonical_or_self, discover_repos};
 pub use file::{diff_file, discard, list_file_status, stage, unstage, FileEntry, FileState};
-// `MAX_LANES` and `RefMark` are part of the exported API but have no
-// non-test consumer in the binary yet (the UI lane work wires them up).
+// `RefMark` is part of the exported API but has no non-test consumer in the
+// binary yet (tests build reference badges from it directly).
 #[allow(unused_imports)]
+pub use history::RefMark;
 pub use history::{
     commit_detail, layout_graph, list_commits, CommitDetail, CommitInfo, GraphCell, RefKind,
-    RefMark, MAX_LANES,
+    MAX_LANES,
 };
 pub use remote::{pull, push, push_all_tags, push_tag, Progress};
 // part of the public Git API contract (M1 subtask 3)

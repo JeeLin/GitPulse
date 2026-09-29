@@ -37,7 +37,7 @@ pub enum RefKind {
 }
 
 /// One commit row for the history list.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct CommitInfo {
     /// Abbreviated object id (7 hex characters).
     pub id: String,

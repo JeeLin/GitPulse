@@ -239,9 +239,18 @@ pub fn render(f: &mut Frame, app: &mut App) {
             config::render_config(f, state);
         }
         View::History => {
-            // Field-level borrows of `app.history` and `app.status`
-            // coexist (disjoint fields of `App`).
-            history::render_history(f, &mut app.history, app.status.as_ref());
+            // Field-level borrows of `app.history` (data vs. cursor) and of
+            // the status line coexist (disjoint fields of `App`).
+            let repo_name = app.current_repo_name().to_string();
+            let state = history::HistoryRender {
+                commits: &app.history.commits,
+                detail: app.history.detail.as_ref(),
+                graph: &app.history.graph,
+                list_state: &mut app.history.list_state,
+                repo_name: &repo_name,
+                status: app.status.as_ref(),
+            };
+            history::render_history(f, state);
         }
         View::Tags => {
             // Field-level borrows of `app.tags_state` (cursor vs. list) and

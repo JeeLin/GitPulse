@@ -12,7 +12,7 @@ use ratatui::{
 
 use super::hint;
 use super::repo::centered_rect;
-use crate::app::StatusLine;
+use crate::app::{show_path, StatusLine};
 
 /// Borrowed render state for the config panel, referencing `App.config.scan_dirs`
 /// directly so no mock data source exists (checkpoint 2).
@@ -174,7 +174,7 @@ fn render_dir_picker(
 
     // Path line, truncated by display width so long paths stay on one row
     // and the ellipsis fits within the frame.
-    let path = ellipsize(&dir.display().to_string(), inner.width as usize);
+    let path = ellipsize(&show_path(dir), inner.width as usize);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             path,
@@ -191,7 +191,7 @@ fn render_dir_picker(
         let name = entry
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| entry.display().to_string());
+            .unwrap_or_else(|| show_path(entry));
         ListItem::new(Line::from(format!("{name}/")))
     }));
 

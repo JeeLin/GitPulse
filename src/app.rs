@@ -81,34 +81,30 @@ impl HistoryState {
         self.commits.clear();
         self.graph.clear();
         self.detail = None;
-        self.selected = 0;
-        self.list_state.select(None);
+        // An empty list clears both the index and the cursor.
+        self.select(0);
     }
 
     /// Highlight `idx`, clamped to the last commit; an empty list clears the
     /// cursor and keeps `selected` at `0`.
     pub fn select(&mut self, idx: usize) {
-        if self.commits.is_empty() {
-            self.selected = 0;
-            self.list_state.select(None);
-            return;
-        }
-        self.selected = idx.min(self.commits.len() - 1);
-        self.list_state.select(Some(self.selected));
+        select_row(
+            &mut self.selected,
+            &mut self.list_state,
+            self.commits.len(),
+            idx,
+        );
     }
 
     /// Move the cursor one row: `down` clamps at the last commit, `up` at
     /// the first. An empty list never moves.
     pub fn move_selection(&mut self, down: bool) {
-        if self.commits.is_empty() {
-            return;
-        }
-        let next = if down {
-            self.selected.saturating_add(1).min(self.commits.len() - 1)
-        } else {
-            self.selected.saturating_sub(1)
-        };
-        self.select(next);
+        move_row(
+            &mut self.selected,
+            &mut self.list_state,
+            self.commits.len(),
+            down,
+        );
     }
 
     /// The highlighted commit, or `None` for an empty history.
@@ -118,7 +114,7 @@ impl HistoryState {
 }
 
 /// Modal overlay shown on top of the tag panel (conventions 8 and 9).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum TagsModal {
     /// Single-line create-tag input; carries the buffer being typed.
     Input {
@@ -151,11 +147,14 @@ pub struct TagsState {
 impl TagsState {
     /// Drop the loaded panel (entry, failed load): empty list, no cursor,
     /// no overlay.
-    pub fn reset(&mut self) {
+    ///
+    /// The open overlay is closed as well, so every error path starts from
+    /// the same blank slate as a fresh entry.
+    pub fn clear(&mut self) {
         self.tags.clear();
-        self.selected = 0;
         self.modal = None;
-        self.list_state.select(None);
+        // An empty list clears both the index and the cursor.
+        self.select(0);
     }
 
     /// Install a freshly loaded list and re-clamp the cursor, so a shrinking
@@ -168,27 +167,23 @@ impl TagsState {
     /// Highlight `idx`, clamped to the last tag; an empty list clears the
     /// cursor and keeps `selected` at `0`.
     pub fn select(&mut self, idx: usize) {
-        if self.tags.is_empty() {
-            self.selected = 0;
-            self.list_state.select(None);
-            return;
-        }
-        self.selected = idx.min(self.tags.len() - 1);
-        self.list_state.select(Some(self.selected));
+        select_row(
+            &mut self.selected,
+            &mut self.list_state,
+            self.tags.len(),
+            idx,
+        );
     }
 
     /// Move the cursor one row: `down` clamps at the last tag, `up` at the
     /// first. An empty list never moves.
     pub fn move_selection(&mut self, down: bool) {
-        if self.tags.is_empty() {
-            return;
-        }
-        let next = if down {
-            self.selected.saturating_add(1).min(self.tags.len() - 1)
-        } else {
-            self.selected.saturating_sub(1)
-        };
-        self.select(next);
+        move_row(
+            &mut self.selected,
+            &mut self.list_state,
+            self.tags.len(),
+            down,
+        );
     }
 
     /// The highlighted tag, or `None` for an empty list.
@@ -634,35 +629,56 @@ impl App {
             return;
         }
         let repo_path = self.repos[repo_idx].path.clone();
+        let message = if op == "push" {
+            "正在 push…".to_string()
+        } else {
+            "正在 pull…".to_string()
+        };
+        self.spawn_remote_task(op, message, move |tx| async move {
+            match op {
+                "push" => {
+                    git::push(&repo_path, move |p| {
+                        let _ = tx.send(RemoteEvent::Progress(p));
+                    })
+                    .await
+                }
+                _ => {
+                    git::pull(&repo_path, move |p| {
+                        let _ = tx.send(RemoteEvent::Progress(p));
+                    })
+                    .await
+                }
+            }
+        });
+    }
+
+    /// Wire up the shared remote progress channel and spawn `task` as the
+    /// background worker behind it (convention 1).
+    ///
+    /// The receiver is armed on `remote_rx`, `remote_op` labels the running
+    /// operation, `message` is published as the initial
+    /// [`RemoteStatus::Progress`] and the plain status line is cleared.
+    /// `task` receives the progress sink and resolves to the operation's
+    /// result, which is forwarded to [`App::poll_remote`] as
+    /// [`RemoteEvent::Done`] — the template every remote op shares.
+    fn spawn_remote_task<F>(
+        &mut self,
+        op: &'static str,
+        message: String,
+        task: impl FnOnce(mpsc::UnboundedSender<RemoteEvent>) -> F + Send + 'static,
+    ) where
+        F: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
         let (tx, rx) = mpsc::unbounded_channel();
         self.remote_rx = Some(rx);
         self.remote_op = op;
         self.remote_status = Some(RemoteStatus::Progress(Progress {
             percent: 0,
-            message: if op == "push" {
-                "正在 push…".to_string()
-            } else {
-                "正在 pull…".to_string()
-            },
+            message,
         }));
         self.status = None;
         tokio::spawn(async move {
-            let result = match op {
-                "push" => {
-                    let sink = tx.clone();
-                    git::push(&repo_path, move |p| {
-                        let _ = sink.send(RemoteEvent::Progress(p));
-                    })
-                    .await
-                }
-                _ => {
-                    let sink = tx.clone();
-                    git::pull(&repo_path, move |p| {
-                        let _ = sink.send(RemoteEvent::Progress(p));
-                    })
-                    .await
-                }
-            };
+            let result = task(tx.clone()).await;
             let _ = tx.send(RemoteEvent::Done(result.map_err(|e| e.to_string())));
         });
     }
@@ -889,12 +905,11 @@ impl App {
         match git::list_commits(&path, HISTORY_LIMIT) {
             Ok(commits) => {
                 let graph = git::layout_graph(&commits);
-                let empty = commits.is_empty();
                 self.history.set_commits(commits, graph);
                 self.clear_error();
-                if !empty {
-                    self.load_history_detail();
-                }
+                // An empty history resolves to `detail == None` below, so
+                // the detail reload is unconditional.
+                self.load_history_detail();
             }
             Err(e) => {
                 self.set_error(format!("加载提交历史失败: {e}"));
@@ -948,7 +963,7 @@ impl App {
             return;
         }
         self.view = View::Tags;
-        self.tags_state.reset();
+        self.tags_state.clear();
         // Stale push feedback would outrank the load status below; a push
         // still in flight keeps its receiver and re-reports on the next
         // progress event.
@@ -975,7 +990,7 @@ impl App {
     pub fn load_tags(&mut self) {
         let Some(path) = self.current_repo_path() else {
             self.set_error("标签面板: 仓库索引失效");
-            self.tags_state.set_tags(Vec::new());
+            self.tags_state.clear();
             return;
         };
         match git::list_tags(&path) {
@@ -985,7 +1000,7 @@ impl App {
             }
             Err(e) => {
                 self.set_error(format!("加载标签列表失败: {e}"));
-                self.tags_state.set_tags(Vec::new());
+                self.tags_state.clear();
             }
         }
     }
@@ -1111,35 +1126,25 @@ impl App {
                 }
             }
         };
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.remote_rx = Some(rx);
-        self.remote_op = "push";
         let message = match &tag {
             Some(name) => format!("正在 push 标签 {name}…"),
             None => "正在 push 所有标签…".to_string(),
         };
-        self.remote_status = Some(RemoteStatus::Progress(Progress {
-            percent: 0,
-            message,
-        }));
-        self.status = None;
-        tokio::spawn(async move {
-            let sink = tx.clone();
-            let result = match tag {
+        self.spawn_remote_task("push", message, move |tx| async move {
+            match tag {
                 Some(name) => {
                     git::push_tag(&path, &name, move |p| {
-                        let _ = sink.send(RemoteEvent::Progress(p));
+                        let _ = tx.send(RemoteEvent::Progress(p));
                     })
                     .await
                 }
                 None => {
                     git::push_all_tags(&path, move |p| {
-                        let _ = sink.send(RemoteEvent::Progress(p));
+                        let _ = tx.send(RemoteEvent::Progress(p));
                     })
                     .await
                 }
-            };
-            let _ = tx.send(RemoteEvent::Done(result.map_err(|e| e.to_string())));
+            }
         });
     }
 
@@ -1319,12 +1324,7 @@ impl App {
     /// entry selected; the success message is written after the refresh,
     /// which would otherwise clear it.
     fn add_scan_dir(&mut self, dir: std::path::PathBuf) {
-        // Non-UTF-8 paths render through `Debug` so invalid bytes escape as
-        // `\xe9` instead of the lossy U+FFFD replacement from `display()`.
-        let shown = dir
-            .to_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("{dir:?}"));
+        let shown = show_path(&dir);
         if !dir.exists() {
             self.set_error(format!("目录不存在: {shown}"));
             return;
@@ -1406,7 +1406,7 @@ impl App {
             self.config_state
                 .select(Some(i.min(self.config.scan_dirs.len() - 1)));
         }
-        self.set_info_unless_error(format!("已删除扫描目录: {}", removed.display()));
+        self.set_info_unless_error(format!("已删除扫描目录: {}", show_path(&removed)));
     }
 
     /// Whether a background batch operation is currently running.
@@ -1826,41 +1826,44 @@ impl App {
     /// create input treats `q` as text, otherwise tag names could not
     /// contain the letter.
     fn handle_tags_key(&mut self, key: KeyEvent) -> bool {
-        if matches!(self.tags_state.modal, Some(TagsModal::Input { .. })) {
-            let outcome = match &mut self.tags_state.modal {
-                Some(TagsModal::Input { buffer }) => input_modal_key(key, buffer),
-                // Unreachable: the `matches!` guard pinned the variant.
-                _ => InputOutcome::Consumed,
-            };
-            match outcome {
+        // Route the press through the open overlay first; the borrow of
+        // `tags_state.modal` ends with this match so the actions below can
+        // take `&mut self` again.
+        let outcome = match self.tags_state.modal.as_mut() {
+            Some(TagsModal::Input { buffer }) => {
+                TagsOverlayOutcome::Input(input_modal_key(key, buffer))
+            }
+            Some(TagsModal::Confirm { .. }) => {
+                let confirm = if key.code == KeyCode::Char('q') {
+                    ConfirmOutcome::No
+                } else {
+                    confirm_modal_key(key)
+                };
+                TagsOverlayOutcome::Confirm(confirm)
+            }
+            None => TagsOverlayOutcome::List,
+        };
+        match outcome {
+            TagsOverlayOutcome::Input(outcome) => match outcome {
                 InputOutcome::Cancel => self.cancel_tag_create(),
                 InputOutcome::Submit => self.submit_tag_create(),
                 InputOutcome::Consumed => {}
-            }
-            return true;
-        }
-        if matches!(self.tags_state.modal, Some(TagsModal::Confirm { .. })) {
-            let outcome = if key.code == KeyCode::Char('q') {
-                ConfirmOutcome::No
-            } else {
-                confirm_modal_key(key)
-            };
-            match outcome {
+            },
+            TagsOverlayOutcome::Confirm(outcome) => match outcome {
                 ConfirmOutcome::Yes => self.confirm_tag_delete(),
                 ConfirmOutcome::No => self.cancel_tag_delete(),
                 ConfirmOutcome::Ignored => {}
-            }
-            return true;
-        }
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.leave_tags(),
-            KeyCode::Char('j') | KeyCode::Down => self.tags_state.move_selection(true),
-            KeyCode::Char('k') | KeyCode::Up => self.tags_state.move_selection(false),
-            KeyCode::Char('c') => self.start_tag_create(),
-            KeyCode::Char('d') => self.start_tag_delete(),
-            KeyCode::Char('p') => self.start_tag_push(false),
-            KeyCode::Char('a') => self.start_tag_push(true),
-            _ => {}
+            },
+            TagsOverlayOutcome::List => match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => self.leave_tags(),
+                KeyCode::Char('j') | KeyCode::Down => self.tags_state.move_selection(true),
+                KeyCode::Char('k') | KeyCode::Up => self.tags_state.move_selection(false),
+                KeyCode::Char('c') => self.start_tag_create(),
+                KeyCode::Char('d') => self.start_tag_delete(),
+                KeyCode::Char('p') => self.start_tag_push(false),
+                KeyCode::Char('a') => self.start_tag_push(true),
+                _ => {}
+            },
         }
         true
     }
@@ -1976,6 +1979,26 @@ fn move_selection(state: &mut ListState, len: usize, down: bool) {
     state.select(Some(next));
 }
 
+/// Highlight `idx` clamped to `len` rows, writing the index and the
+/// [`ListState`] cursor together — the single place the panel's duplicated
+/// `selected` / `list_state` pair stays in sync. An empty list clears both.
+fn select_row(selected: &mut usize, list_state: &mut ListState, len: usize, idx: usize) {
+    if len == 0 {
+        *selected = 0;
+        list_state.select(None);
+        return;
+    }
+    *selected = idx.min(len - 1);
+    list_state.select(Some(*selected));
+}
+
+/// Move the shared panel cursor one row via [`move_selection`], then mirror
+/// the result into `selected` so the pair stays in sync.
+fn move_row(selected: &mut usize, list_state: &mut ListState, len: usize, down: bool) {
+    move_selection(list_state, len, down);
+    *selected = list_state.selected().unwrap_or(0);
+}
+
 /// The selection of `state` when it still indexes a list of `len` items;
 /// stale (out-of-range) and absent selections yield `None`.
 fn valid_selection(state: &ListState, len: usize) -> Option<usize> {
@@ -1991,6 +2014,19 @@ fn clamp_selection(state: &mut ListState, len: usize) {
     }
     let idx = valid_selection(state, len).unwrap_or(0);
     state.select(Some(idx));
+}
+
+/// What one key press did in the tag panel: routed through the open overlay
+/// (input or confirmation) or left for list navigation. Returned by the
+/// routing match in [`App::handle_tags_key`] so the borrow of the modal ends
+/// before the action runs on the app.
+enum TagsOverlayOutcome {
+    /// The create input processed the key.
+    Input(InputOutcome),
+    /// The delete confirmation processed the key.
+    Confirm(ConfirmOutcome),
+    /// No overlay is open: the key belongs to the list.
+    List,
 }
 
 /// Outcome of routing one key press through [`input_modal_key`].
@@ -2052,6 +2088,16 @@ fn confirm_modal_key(key: KeyEvent) -> ConfirmOutcome {
 /// Render the first 7 hex characters of a commit id for the status line.
 fn short_oid(oid: &git2::Oid) -> String {
     oid.to_string().chars().take(7).collect()
+}
+
+/// Display form of `path` for user-facing messages: the exact UTF-8
+/// spelling when the path is valid Unicode, otherwise the `Debug` rendering
+/// so invalid bytes escape as `\xe9` instead of the lossy U+FFFD
+/// replacement produced by [`std::path::Path::display`].
+pub fn show_path(path: &std::path::Path) -> String {
+    path.to_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{path:?}"))
 }
 
 /// Run the TUI until the user quits (`q` / `Esc` on the dashboard).
@@ -4105,7 +4151,7 @@ mod tests {
 
     /// Render one frame through the view dispatcher and return the
     /// whitespace-stripped buffer text (wide CJK glyphs leave padding cells).
-    fn history_render_text(app: &mut App) -> String {
+    fn render_text(app: &mut App) -> String {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
@@ -4231,7 +4277,7 @@ mod tests {
         assert!(app.handle_key(key(KeyCode::Char('k'))));
         assert!(app.status.is_none());
 
-        let text = history_render_text(&mut app);
+        let text = render_text(&mut app);
         assert!(text.contains("暂无提交记录"), "missing empty state: {text}");
         assert!(
             text.contains("选择一个提交查看详情"),
@@ -4268,26 +4314,6 @@ mod tests {
     }
 
     // ---------- tags panel ----------
-
-    /// Render one frame of the current view through the dispatcher and
-    /// return the whitespace-stripped buffer text (wide CJK glyphs leave
-    /// padding cells).
-    fn tags_render_text(app: &mut App) -> String {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
-
-        let backend = TestBackend::new(120, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| crate::ui::render(f, app)).unwrap();
-        let raw: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        raw.chars().filter(|c| !c.is_whitespace()).collect()
-    }
 
     /// Repo fixture with the given tag names created at HEAD.
     fn app_with_tagged_repo(tag: &str, names: &[&str]) -> (std::path::PathBuf, App) {
@@ -4541,7 +4567,7 @@ mod tests {
         assert!(st.is_error);
         assert!(st.message.contains("没有可推送的标签"), "{}", st.message);
 
-        let text = tags_render_text(&mut app);
+        let text = render_text(&mut app);
         assert!(text.contains("暂无标签"), "missing empty state: {text}");
         assert!(text.contains("(0)"), "missing zero count: {text}");
 
@@ -4565,7 +4591,7 @@ mod tests {
         enter_tags(&mut app);
         let target = app.tags_state.selected_tag().unwrap().target.clone();
 
-        let text = tags_render_text(&mut app);
+        let text = render_text(&mut app);
         assert!(text.contains("v-light"), "missing tag name: {text}");
         assert!(text.contains("v-annotated"), "missing tag name: {text}");
         assert!(text.contains(&target), "missing short hash: {text}");
@@ -4579,14 +4605,14 @@ mod tests {
         for c in "v3".chars() {
             assert!(app.handle_key(key(KeyCode::Char(c))));
         }
-        let text = tags_render_text(&mut app);
+        let text = render_text(&mut app);
         assert!(text.contains("新建标签"), "missing input title: {text}");
         assert!(text.contains(">v3"), "missing typed name: {text}");
         assert!(app.handle_key(key(KeyCode::Esc)));
 
         // Delete confirmation copy.
         assert!(app.handle_key(key(KeyCode::Char('d'))));
-        let text = tags_render_text(&mut app);
+        let text = render_text(&mut app);
         assert!(
             text.contains("确认删除标签"),
             "missing dialog title: {text}"
