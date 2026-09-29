@@ -185,6 +185,13 @@ mod tests {
         let repo_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let info = query_status(&repo_path).unwrap();
         assert!(!info.branch.is_empty());
-        assert!(info.name == "GitPulse");
+        // The name is the checkout directory name; derive the expectation from
+        // the repository path so the test holds for clones under any directory
+        // name (not just "GitPulse").
+        let expected = repo_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| repo_path.to_string_lossy().into_owned());
+        assert_eq!(info.name, expected);
     }
 }

@@ -116,20 +116,19 @@ fn git_output(repo_path: &Path, args: &[&str]) -> Result<std::process::Output> {
     Ok(output)
 }
 
-/// Shared body of `push`, `push_tag` and `push_all_tags`: emit `start_msg`,
-/// resolve the remote, run `git push` with the arguments `args` builds for
-/// that remote, then emit `done_msg`.
+/// Shared body of `push`, `push_tag` and `push_all_tags`: resolve the remote,
+/// run `git push` with the arguments `args` builds for that remote, then emit
+/// `done_msg`.
+///
+/// The 0% start message is emitted by the App layer only (it pre-sets
+/// `RemoteStatus::Progress(0)` before spawning), so the git layer sends the
+/// completion event alone.
 fn push_refs(
     repo_path: &Path,
     args: impl FnOnce(&str) -> Result<Vec<String>>,
-    start_msg: &str,
     done_msg: &str,
     on_progress: impl Fn(Progress),
 ) -> Result<()> {
-    on_progress(Progress {
-        percent: 0,
-        message: start_msg.to_string(),
-    });
     let remote = resolve_remote(repo_path)?;
     let mut argv = vec!["push".to_string()];
     argv.extend(args(&remote)?);
@@ -159,7 +158,6 @@ pub async fn push(repo_path: &Path, on_progress: impl Fn(Progress) + Send + 'sta
                     branch.to_string(),
                 ])
             },
-            "正在 push…",
             "push 完成",
             &on_progress,
         )
@@ -175,10 +173,6 @@ pub async fn push(repo_path: &Path, on_progress: impl Fn(Progress) + Send + 'sta
 pub async fn pull(repo_path: &Path, on_progress: impl Fn(Progress) + Send + 'static) -> Result<()> {
     let repo_path: PathBuf = repo_path.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        on_progress(Progress {
-            percent: 0,
-            message: "正在 pull…".to_string(),
-        });
         let remote = resolve_remote(&repo_path)?;
         let branch = current_branch(&repo_path)?;
         let args: Vec<&str> = if has_upstream(&repo_path) {
@@ -212,7 +206,6 @@ pub async fn push_tag(
         push_refs(
             &repo_path,
             |remote| Ok(vec![remote.to_string(), tag.clone()]),
-            &format!("正在 push 标签 {tag}…"),
             &format!("标签 {tag} push 完成"),
             &on_progress,
         )
@@ -234,7 +227,6 @@ pub async fn push_all_tags(
         push_refs(
             &repo_path,
             |remote| Ok(vec![remote.to_string(), "--tags".to_string()]),
-            "正在 push 所有标签…",
             "所有标签 push 完成",
             &on_progress,
         )

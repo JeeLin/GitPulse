@@ -37,7 +37,7 @@ pub enum RefKind {
 }
 
 /// One commit row for the history list.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct CommitInfo {
     /// Abbreviated object id (7 hex characters).
     pub id: String,
@@ -55,7 +55,7 @@ pub struct CommitInfo {
 }
 
 /// Full payload of one commit for the detail pane.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct CommitDetail {
     /// Complete commit message, subject and body.
     pub message: String,
@@ -65,7 +65,7 @@ pub struct CommitDetail {
 }
 
 /// One rendered graph cell: a glyph inside a DAG lane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct GraphCell {
     /// Character drawn in this cell.
     pub glyph: char,
@@ -88,12 +88,13 @@ pub fn list_commits(repo_path: &Path, limit: usize) -> Result<Vec<CommitInfo>> {
         Err(err) if err.code() == ErrorCode::UnbornBranch => return Ok(Vec::new()),
         Err(err) => return Err(err.into()),
     };
-    let head_commit = head.peel_to_commit()?;
+    // A HEAD that cannot be peeled to a commit (corrupt reference) is an
+    // error; its oid is already recorded in `marks` below.
+    head.peel_to_commit()?;
 
     let mut walk = repo.revwalk()?;
     walk.set_sorting(Sort::TIME)?;
-    walk.push(head_commit.id())?;
-    // The marks already cover every local branch and tag tip.
+    // The marks already cover HEAD plus every local branch and tag tip.
     for oid in marks.keys() {
         walk.push(*oid)?;
     }

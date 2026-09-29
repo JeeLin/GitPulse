@@ -861,12 +861,17 @@ impl App {
         self.clear_error();
     }
 
+    /// The repository an index into `repos` points at, when that index is
+    /// still valid.
+    fn repo_of(&self, idx: Option<usize>) -> Option<&RepoInfo> {
+        idx.filter(|i| *i < self.repos.len())
+            .map(|i| &self.repos[i])
+    }
+
     /// Path of the currently opened repository, when its index into
     /// `repos` is still valid.
     fn current_repo_path(&self) -> Option<std::path::PathBuf> {
-        self.current_repo
-            .filter(|i| *i < self.repos.len())
-            .map(|i| self.repos[i].path.clone())
+        self.repo_of(self.current_repo).map(|r| r.path.clone())
     }
 
     /// Enter the commit-history view for the current repository (repo `h`).
@@ -947,9 +952,7 @@ impl App {
     /// Name of the currently opened repository (empty when the index is
     /// stale or nothing is open).
     pub fn current_repo_name(&self) -> &str {
-        self.current_repo
-            .filter(|i| *i < self.repos.len())
-            .map_or("", |i| &self.repos[i].name)
+        self.repo_of(self.current_repo).map_or("", |r| &r.name)
     }
 
     /// Enter the tag panel for the current repository (repo `t`).
@@ -1416,16 +1419,12 @@ impl App {
 
     /// Name of the repository the branch panel edits (empty when invalid).
     pub fn branch_repo_name(&self) -> &str {
-        self.branch_repo
-            .filter(|i| *i < self.repos.len())
-            .map_or("", |i| &self.repos[i].name)
+        self.repo_of(self.branch_repo).map_or("", |r| &r.name)
     }
 
     /// Path of the repository the branch panel edits, when still valid.
     fn branch_repo_path(&self) -> Option<std::path::PathBuf> {
-        self.branch_repo
-            .filter(|i| *i < self.repos.len())
-            .map(|i| self.repos[i].path.clone())
+        self.repo_of(self.branch_repo).map(|r| r.path.clone())
     }
 
     /// Name of the currently selected branch, if any.
@@ -4168,16 +4167,21 @@ mod tests {
         raw.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
+    /// Enter the repo view and then the commit-history view.
+    fn enter_history(app: &mut App) {
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert!(app.handle_key(key(KeyCode::Char('h'))));
+    }
+
     #[test]
     fn repo_h_enters_history_and_loads_commits() {
         let dir = temp_dir("history-enter");
         init_repo_with_commit(&dir);
 
         let mut app = app_with_repo_at(&dir);
-        app.dashboard_state.select(Some(0));
-        app.enter_repo();
+        enter_history(&mut app);
 
-        assert!(app.handle_key(key(KeyCode::Char('h'))));
         assert_eq!(app.view, View::History);
         assert_eq!(app.history.commits.len(), 1);
         assert_eq!(app.history.commits[0].summary, "v1");
@@ -4201,9 +4205,7 @@ mod tests {
     #[test]
     fn history_j_k_move_selection_reload_detail_and_stop_at_edges() {
         let (dir, mut app) = app_with_two_commit_repo("history-move");
-        app.dashboard_state.select(Some(0));
-        app.enter_repo();
-        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        enter_history(&mut app);
         assert_eq!(app.history.commits.len(), 2);
 
         let newest = app.history.commits[0].summary.clone();
@@ -4240,9 +4242,7 @@ mod tests {
         init_repo_with_commit(&dir);
 
         let mut app = app_with_repo_at(&dir);
-        app.dashboard_state.select(Some(0));
-        app.enter_repo();
-        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        enter_history(&mut app);
         assert_eq!(app.view, View::History);
 
         assert!(app.handle_key(key(KeyCode::Char('q'))));
@@ -4262,9 +4262,7 @@ mod tests {
         git2::Repository::init(&dir).unwrap();
 
         let mut app = app_with_repo_at(&dir);
-        app.dashboard_state.select(Some(0));
-        app.enter_repo();
-        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        enter_history(&mut app);
         assert_eq!(app.view, View::History);
         assert!(app.history.commits.is_empty());
         assert!(app.history.graph.is_empty());
@@ -4295,9 +4293,7 @@ mod tests {
         init_repo_with_commit(&dir);
 
         let mut app = app_with_repo_at(&dir);
-        app.dashboard_state.select(Some(0));
-        app.enter_repo();
-        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        enter_history(&mut app);
         assert!(app.history.detail.is_some());
 
         std::fs::remove_dir_all(&dir).unwrap();

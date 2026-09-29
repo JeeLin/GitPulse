@@ -274,7 +274,7 @@ fn render_delete_confirm(f: &mut Frame, area: Rect, dir: Option<&Path>) {
     let mut body = vec![];
     if let Some(dir) = dir {
         body.push(Line::from(Span::styled(
-            dir.display().to_string(),
+            show_path(dir),
             Style::default().fg(Color::Yellow),
         )));
     }
@@ -294,7 +294,7 @@ fn render_dir_list(f: &mut Frame, area: Rect, state: &mut ConfigState<'_>) {
     let items: Vec<ListItem> = state
         .scan_dirs
         .iter()
-        .map(|dir| ListItem::new(Line::raw(dir.display().to_string())))
+        .map(|dir| ListItem::new(Line::raw(show_path(dir))))
         .collect();
 
     let block = Block::default()
