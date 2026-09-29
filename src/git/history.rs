@@ -3,10 +3,6 @@
 //! Like the other single-repository helpers in this module every entry point
 //! opens the repository on the calling thread; only batch operations need
 //! `spawn_blocking`.
-//!
-//! The data layer ships ahead of its UI consumers, so every item below is
-//! only exercised by the tests in this file until the history view lands.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::HashMap;
 use std::path::Path;
