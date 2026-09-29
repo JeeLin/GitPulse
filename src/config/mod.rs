@@ -127,22 +127,15 @@ fn save_to(config: &Config, path: &Path) -> Result<()> {
 /// are complete; the temp file is removed on any failure.
 fn write_atomically(path: &Path, contents: &str) -> Result<()> {
     let temp = temp_path(path);
-    if let Err(source) = fs::write(&temp, contents) {
-        let _ = fs::remove_file(&temp);
-        return Err(ConfigError::Write {
-            path: path.to_path_buf(),
-            source,
-        }
-        .into());
-    }
-    if let Err(source) = fs::rename(&temp, path) {
-        let _ = fs::remove_file(&temp);
-        return Err(ConfigError::Write {
-            path: path.to_path_buf(),
-            source,
-        }
-        .into());
-    }
+    fs::write(&temp, contents)
+        .and_then(|_| fs::rename(&temp, path))
+        .map_err(|source| {
+            let _ = fs::remove_file(&temp);
+            ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
     Ok(())
 }
 
