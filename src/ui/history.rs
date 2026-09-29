@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use crate::app::StatusLine;
-use crate::git::{CommitDetail, CommitInfo, GraphCell, RefKind};
+use crate::git::{CommitDetail, CommitRow, GraphCell, RefKind};
 
 use super::hint;
 
@@ -21,7 +21,7 @@ const GRAPH_WIDTH: usize = crate::git::MAX_LANES;
 /// directly so no mock data source exists (checkpoint 2).
 pub struct HistoryRender<'a> {
     /// Live commit snapshots from `App.history.commits`.
-    pub commits: &'a [CommitInfo],
+    pub commits: &'a [CommitRow],
     /// Detail payload of the highlighted commit, from `App.history.detail`.
     pub detail: Option<&'a CommitDetail>,
     /// One DAG row per entry of `commits`, from `git::layout_graph`.
@@ -108,7 +108,7 @@ fn render_commit_list(f: &mut Frame, area: Rect, state: &mut HistoryRender<'_>) 
 }
 
 /// One commit row: short hash, summary, ref badges, then author and time.
-fn commit_item(commit: &CommitInfo) -> ListItem<'static> {
+fn commit_item(commit: &CommitRow) -> ListItem<'static> {
     let mut spans = vec![
         Span::styled(commit.id.clone(), Style::default().fg(Color::Yellow)),
         Span::raw(" "),
@@ -204,7 +204,7 @@ fn render_detail(f: &mut Frame, area: Rect, state: &HistoryRender<'_>) {
 
 /// The highlighted commit: the render cursor, when it still points inside
 /// the loaded list (a stale index yields the same `None` as an empty view).
-fn selected_commit<'a>(state: &HistoryRender<'a>) -> Option<&'a CommitInfo> {
+fn selected_commit<'a>(state: &HistoryRender<'a>) -> Option<&'a CommitRow> {
     let idx = state
         .list_state
         .selected()
@@ -226,7 +226,7 @@ mod tests {
     fn loaded_state() -> HistoryState {
         let mut state = HistoryState::default();
         state.set_commits(
-            vec![CommitInfo {
+            vec![CommitRow {
                 id: "abc1234".to_string(),
                 summary: "merge things".to_string(),
                 author: "GitPulse Test".to_string(),

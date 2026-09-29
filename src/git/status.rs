@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use git2::Repository;
 
+use super::show_path;
+
 /// Statistics about uncommitted changes in a repository.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DirtyStats {
@@ -61,8 +63,8 @@ pub fn query_status(repo_path: &Path) -> Result<RepoInfo> {
 
     let name = repo_path
         .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| repo_path.to_string_lossy().to_string());
+        .map(|n| show_path(Path::new(n)))
+        .unwrap_or_else(|| show_path(repo_path));
 
     Ok(RepoInfo {
         name,
@@ -190,8 +192,8 @@ mod tests {
         // name (not just "GitPulse").
         let expected = repo_path
             .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| repo_path.to_string_lossy().into_owned());
+            .map(|n| show_path(Path::new(n)))
+            .unwrap_or_else(|| show_path(&repo_path));
         assert_eq!(info.name, expected);
     }
 }

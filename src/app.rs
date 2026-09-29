@@ -15,8 +15,8 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::git::{self, BranchInfo, FileEntry, Progress, RepoInfo};
-use crate::git::{CommitDetail, CommitInfo, GraphCell, TagInfo};
+use crate::git::{self, show_path, BranchInfo, FileEntry, Progress, RepoInfo};
+use crate::git::{CommitDetail, CommitRow, GraphCell, TagInfo};
 
 /// Terminal type used by the TUI.
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -53,7 +53,7 @@ const HISTORY_LIMIT: usize = 200;
 #[derive(Debug, Default)]
 pub struct HistoryState {
     /// Commits newest-first, as returned by `git::list_commits`.
-    pub commits: Vec<CommitInfo>,
+    pub commits: Vec<CommitRow>,
     /// Index of the highlighted commit; always `0` when `commits` is empty.
     pub selected: usize,
     /// Detail payload of the highlighted commit, reloaded on every move.
@@ -69,7 +69,7 @@ impl HistoryState {
     ///
     /// The cursor is reset together with the data so a selection left over
     /// from a previous repository never points past the new list.
-    pub fn set_commits(&mut self, commits: Vec<CommitInfo>, graph: Vec<Vec<GraphCell>>) {
+    pub fn set_commits(&mut self, commits: Vec<CommitRow>, graph: Vec<Vec<GraphCell>>) {
         self.commits = commits;
         self.graph = graph;
         self.detail = None;
@@ -108,7 +108,7 @@ impl HistoryState {
     }
 
     /// The highlighted commit, or `None` for an empty history.
-    pub fn selected_commit(&self) -> Option<&CommitInfo> {
+    pub fn selected_commit(&self) -> Option<&CommitRow> {
         self.commits.get(self.selected)
     }
 }
@@ -2087,16 +2087,6 @@ fn confirm_modal_key(key: KeyEvent) -> ConfirmOutcome {
 /// Render the first 7 hex characters of a commit id for the status line.
 fn short_oid(oid: &git2::Oid) -> String {
     oid.to_string().chars().take(7).collect()
-}
-
-/// Display form of `path` for user-facing messages: the exact UTF-8
-/// spelling when the path is valid Unicode, otherwise the `Debug` rendering
-/// so invalid bytes escape as `\xe9` instead of the lossy U+FFFD
-/// replacement produced by [`std::path::Path::display`].
-pub fn show_path(path: &std::path::Path) -> String {
-    path.to_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{path:?}"))
 }
 
 /// Run the TUI until the user quits (`q` / `Esc` on the dashboard).

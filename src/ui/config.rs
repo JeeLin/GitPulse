@@ -12,7 +12,8 @@ use ratatui::{
 
 use super::hint;
 use super::repo::centered_rect;
-use crate::app::{show_path, StatusLine};
+use crate::app::StatusLine;
+use crate::git::show_path;
 
 /// Borrowed render state for the config panel, referencing `App.config.scan_dirs`
 /// directly so no mock data source exists (checkpoint 2).

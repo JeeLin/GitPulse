@@ -20,7 +20,7 @@ pub use file::{diff_file, discard, list_file_status, stage, unstage, FileEntry, 
 #[allow(unused_imports)]
 pub use history::RefMark;
 pub use history::{
-    commit_detail, layout_graph, list_commits, CommitDetail, CommitInfo, GraphCell, RefKind,
+    commit_detail, layout_graph, list_commits, CommitDetail, CommitRow, GraphCell, RefKind,
     MAX_LANES,
 };
 pub use remote::{pull, push, push_all_tags, push_tag, Progress};
@@ -35,4 +35,14 @@ pub use tag::{create_tag, delete_tag, list_tags, TagInfo};
 /// line.
 pub fn short_id(oid: &git2::Oid) -> String {
     format!("{oid:.7}")
+}
+
+/// Display form of `path` for user-facing messages: the exact UTF-8
+/// spelling when the path is valid Unicode, otherwise the `Debug` rendering
+/// so invalid bytes escape as `\xe9` instead of the lossy U+FFFD
+/// replacement produced by [`std::path::Path::display`].
+pub fn show_path(path: &std::path::Path) -> String {
+    path.to_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{path:?}"))
 }

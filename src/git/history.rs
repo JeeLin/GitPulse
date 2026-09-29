@@ -38,7 +38,7 @@ pub enum RefKind {
 
 /// One commit row for the history list.
 #[derive(Debug)]
-pub struct CommitInfo {
+pub struct CommitRow {
     /// Abbreviated object id (7 hex characters).
     pub id: String,
     /// First line of the commit message.
@@ -78,7 +78,7 @@ pub struct GraphCell {
 /// The walk starts at HEAD plus every local branch and tag, so commits on
 /// unmerged branches show up as well. A repository without a single commit
 /// yields an empty vector, a path that is not a repository is an error.
-pub fn list_commits(repo_path: &Path, limit: usize) -> Result<Vec<CommitInfo>> {
+pub fn list_commits(repo_path: &Path, limit: usize) -> Result<Vec<CommitRow>> {
     let repo = Repository::open(repo_path)?;
     let marks = collect_ref_marks(&repo);
 
@@ -152,7 +152,7 @@ pub fn commit_detail(repo_path: &Path, oid: &str) -> Result<CommitDetail> {
 /// onto a new lane, and a commit awaited by several lanes joins those lanes
 /// back together (`┤`) and frees them. Pure function; the lane count never
 /// exceeds [`MAX_LANES`].
-pub fn layout_graph(commits: &[CommitInfo]) -> Vec<Vec<GraphCell>> {
+pub fn layout_graph(commits: &[CommitRow]) -> Vec<Vec<GraphCell>> {
     // `Some(id)` marks a lane that is waiting for that commit to arrive.
     let mut lanes: Vec<Option<String>> = Vec::new();
     let mut rows = Vec::with_capacity(commits.len());
@@ -281,9 +281,9 @@ fn collect_ref_marks(repo: &Repository) -> HashMap<Oid, Vec<RefMark>> {
 }
 
 /// Assemble one history row from a commit and the pre-collected ref marks.
-fn build_info(commit: &Commit<'_>, marks: &HashMap<Oid, Vec<RefMark>>) -> CommitInfo {
+fn build_info(commit: &Commit<'_>, marks: &HashMap<Oid, Vec<RefMark>>) -> CommitRow {
     let time = commit.time();
-    CommitInfo {
+    CommitRow {
         id: short_id(&commit.id()),
         summary: first_line(commit.message().unwrap_or_default()),
         author: commit.author().name().unwrap_or("unknown").to_string(),
@@ -532,8 +532,7 @@ mod tests {
     fn list_commits_marks_head_branch_and_tag_refs() {
         let fixture = build_fixture("refs");
         let commits = list_commits(&fixture.dir, 200).unwrap();
-        let by_id: HashMap<&str, &CommitInfo> =
-            commits.iter().map(|c| (c.id.as_str(), c)).collect();
+        let by_id: HashMap<&str, &CommitRow> = commits.iter().map(|c| (c.id.as_str(), c)).collect();
         let at = |full: &str| by_id.get(&full[..7]).copied().unwrap();
 
         assert_eq!(
