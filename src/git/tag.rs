@@ -8,6 +8,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use git2::{ObjectType, Repository};
 
+use super::short_id;
+
 /// Snapshot of one repository tag for the tag panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagInfo {
@@ -41,7 +43,7 @@ pub fn list_tags(repo_path: &Path) -> Result<Vec<TagInfo>> {
         let Ok(commit) = reference.peel_to_commit() else {
             continue;
         };
-        let target = format!("{:.7}", commit.id());
+        let target = short_id(&commit.id());
         tags.push(TagInfo {
             name: name.to_string(),
             target,
@@ -62,6 +64,8 @@ pub fn list_tags(repo_path: &Path) -> Result<Vec<TagInfo>> {
 /// - Returns an error if the tag name is empty.
 /// - Returns an error if a tag with the given name already exists.
 pub fn create_tag(repo_path: &Path, name: &str) -> Result<()> {
+    // Git-layer defence for direct API callers; the UI keeps its own empty
+    // check only to give a friendly message before opening the repository.
     if name.trim().is_empty() {
         anyhow::bail!("标签名称不能为空");
     }
@@ -83,13 +87,9 @@ pub fn create_tag(repo_path: &Path, name: &str) -> Result<()> {
 /// # Errors
 ///
 /// - Returns an error if the repository path is invalid.
-/// - Returns an error if the tag name is empty.
 /// - Returns an error if no tag with the given name exists.
 /// - Returns an error if the tag deletion fails for any other reason.
 pub fn delete_tag(repo_path: &Path, name: &str) -> Result<()> {
-    if name.trim().is_empty() {
-        anyhow::bail!("标签名称不能为空");
-    }
     let repo = Repository::open(repo_path)?;
     let refname = format!("refs/tags/{name}");
     // Check existence first to provide a clear error message.

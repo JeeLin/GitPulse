@@ -15,9 +15,8 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::git::history::{CommitDetail, CommitInfo, GraphCell};
-use crate::git::tag::TagInfo;
 use crate::git::{self, BranchInfo, FileEntry, Progress, RepoInfo};
+use crate::git::{CommitDetail, CommitInfo, GraphCell, TagInfo};
 
 /// Terminal type used by the TUI.
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -53,13 +52,13 @@ const HISTORY_LIMIT: usize = 200;
 /// (checkpoint 2: no separate mock data source).
 #[derive(Debug, Default)]
 pub struct HistoryState {
-    /// Commits newest-first, as returned by `git::history::list_commits`.
+    /// Commits newest-first, as returned by `git::list_commits`.
     pub commits: Vec<CommitInfo>,
     /// Index of the highlighted commit; always `0` when `commits` is empty.
     pub selected: usize,
     /// Detail payload of the highlighted commit, reloaded on every move.
     pub detail: Option<CommitDetail>,
-    /// One DAG row per entry of `commits`, from `git::history::layout_graph`.
+    /// One DAG row per entry of `commits`, from `git::layout_graph`.
     pub graph: Vec<Vec<GraphCell>>,
     /// Selection cursor shared across frames, kept in sync with `selected`.
     pub list_state: ListState,
@@ -139,7 +138,7 @@ pub enum TagsModal {
 #[derive(Debug, Default)]
 pub struct TagsState {
     /// Tags sorted alphabetically by name, as returned by
-    /// `git::tag::list_tags`.
+    /// `git::list_tags`.
     pub tags: Vec<TagInfo>,
     /// Index of the highlighted tag; always `0` when `tags` is empty.
     pub selected: usize,
@@ -887,9 +886,9 @@ impl App {
             self.history.clear();
             return;
         };
-        match git::history::list_commits(&path, HISTORY_LIMIT) {
+        match git::list_commits(&path, HISTORY_LIMIT) {
             Ok(commits) => {
-                let graph = git::history::layout_graph(&commits);
+                let graph = git::layout_graph(&commits);
                 let empty = commits.is_empty();
                 self.history.set_commits(commits, graph);
                 self.clear_error();
@@ -918,7 +917,7 @@ impl App {
             self.set_error("历史视图: 仓库索引失效");
             return;
         };
-        match git::history::commit_detail(&path, &id) {
+        match git::commit_detail(&path, &id) {
             Ok(detail) => {
                 self.history.detail = Some(detail);
                 self.clear_error();
@@ -979,7 +978,7 @@ impl App {
             self.tags_state.set_tags(Vec::new());
             return;
         };
-        match git::tag::list_tags(&path) {
+        match git::list_tags(&path) {
             Ok(tags) => {
                 self.tags_state.set_tags(tags);
                 self.clear_error();
@@ -1030,7 +1029,7 @@ impl App {
         // Refresh-first ordering: `remote_status` would otherwise outrank
         // the create error on the panel's status line.
         self.remote_status = None;
-        match git::tag::create_tag(&path, &name) {
+        match git::create_tag(&path, &name) {
             Ok(()) => {
                 self.tags_state.modal = None;
                 self.load_tags();
@@ -1076,7 +1075,7 @@ impl App {
             return;
         };
         self.remote_status = None;
-        match git::tag::delete_tag(&path, &tag_to_delete) {
+        match git::delete_tag(&path, &tag_to_delete) {
             Ok(()) => {
                 self.load_tags();
                 self.set_info_unless_error(format!("已删除标签 {tag_to_delete}"));
@@ -4295,7 +4294,7 @@ mod tests {
         let dir = temp_dir(tag);
         init_repo_with_commit(&dir);
         for name in names {
-            git::tag::create_tag(&dir, name).unwrap();
+            git::create_tag(&dir, name).unwrap();
         }
         let app = app_with_repo_at(&dir);
         (dir, app)
@@ -4553,7 +4552,7 @@ mod tests {
     fn tags_render_shows_name_short_hash_kind_and_confirm_text() {
         let dir = temp_dir("tags-render");
         init_repo_with_commit(&dir);
-        git::tag::create_tag(&dir, "v-light").unwrap();
+        git::create_tag(&dir, "v-light").unwrap();
         {
             let repo = git2::Repository::open(&dir).unwrap();
             let object = repo.head().unwrap().peel(git2::ObjectType::Commit).unwrap();
@@ -4651,7 +4650,7 @@ mod tests {
             repo.remote("origin", origin_path.to_str().unwrap())
                 .unwrap();
         }
-        git::tag::create_tag(&work, "v1.0").unwrap();
+        git::create_tag(&work, "v1.0").unwrap();
 
         let mut app = app_with_repo_at(&work);
         enter_tags(&mut app);

@@ -9,12 +9,12 @@ use ratatui::{
 };
 
 use crate::app::{HistoryState, StatusLine};
-use crate::git::history::{CommitInfo, RefKind};
+use crate::git::{CommitInfo, RefKind};
 
 use super::hint;
 
 /// Inner width of the DAG column: one cell per lane, capped at the six
-/// lanes `git::history::layout_graph` ever produces.
+/// lanes `git::layout_graph` ever produces.
 const GRAPH_WIDTH: usize = 6;
 
 /// Render the history view: DAG column, commit list and detail pane above
@@ -184,7 +184,7 @@ fn render_detail(f: &mut Frame, area: Rect, state: &HistoryState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::history::{CommitDetail, GraphCell, RefMark};
+    use crate::git::{CommitDetail, GraphCell, RefMark};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 

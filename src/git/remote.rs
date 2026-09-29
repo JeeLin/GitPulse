@@ -116,26 +116,53 @@ fn git_output(repo_path: &Path, args: &[&str]) -> Result<std::process::Output> {
     Ok(output)
 }
 
+/// Shared body of `push`, `push_tag` and `push_all_tags`: emit `start_msg`,
+/// resolve the remote, run `git push` with the arguments `args` builds for
+/// that remote, then emit `done_msg`.
+fn push_refs(
+    repo_path: &Path,
+    args: impl FnOnce(&str) -> Result<Vec<String>>,
+    start_msg: &str,
+    done_msg: &str,
+    on_progress: impl Fn(Progress),
+) -> Result<()> {
+    on_progress(Progress {
+        percent: 0,
+        message: start_msg.to_string(),
+    });
+    let remote = resolve_remote(repo_path)?;
+    let mut argv = vec!["push".to_string()];
+    argv.extend(args(&remote)?);
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    git_output(repo_path, &refs)?;
+    on_progress(Progress {
+        percent: 100,
+        message: done_msg.to_string(),
+    });
+    Ok(())
+}
+
 /// Push the current branch to its remote with progress feedback.
 ///
 /// Uses `git push -u <remote> <branch>` so the first push to a freshly
 /// configured remote also establishes the upstream tracking branch.
 pub async fn push(repo_path: &Path, on_progress: impl Fn(Progress) + Send + 'static) -> Result<()> {
     let repo_path: PathBuf = repo_path.to_path_buf();
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        on_progress(Progress {
-            percent: 0,
-            message: "正在 push…".to_string(),
-        });
-        let remote = resolve_remote(&repo_path)?;
-        let branch = current_branch(&repo_path)?;
-        let args = ["push", "-u", remote.as_str(), branch.as_str()];
-        git_output(&repo_path, &args)?;
-        on_progress(Progress {
-            percent: 100,
-            message: "push 完成".to_string(),
-        });
-        Ok(())
+    tokio::task::spawn_blocking(move || {
+        push_refs(
+            &repo_path,
+            |remote| {
+                let branch = current_branch(&repo_path)?;
+                Ok(vec![
+                    "-u".to_string(),
+                    remote.to_string(),
+                    branch.to_string(),
+                ])
+            },
+            "正在 push…",
+            "push 完成",
+            &on_progress,
+        )
     })
     .await?
 }
@@ -181,19 +208,14 @@ pub async fn push_tag(
 ) -> Result<()> {
     let repo_path: PathBuf = repo_path.to_path_buf();
     let tag = tag.to_string();
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        on_progress(Progress {
-            percent: 0,
-            message: format!("正在 push 标签 {tag}…"),
-        });
-        let remote = resolve_remote(&repo_path)?;
-        let args = ["push", remote.as_str(), tag.as_str()];
-        git_output(&repo_path, &args)?;
-        on_progress(Progress {
-            percent: 100,
-            message: format!("标签 {tag} push 完成"),
-        });
-        Ok(())
+    tokio::task::spawn_blocking(move || {
+        push_refs(
+            &repo_path,
+            |remote| Ok(vec![remote.to_string(), tag.clone()]),
+            &format!("正在 push 标签 {tag}…"),
+            &format!("标签 {tag} push 完成"),
+            &on_progress,
+        )
     })
     .await?
 }
@@ -208,19 +230,14 @@ pub async fn push_all_tags(
     on_progress: impl Fn(Progress) + Send + 'static,
 ) -> Result<()> {
     let repo_path: PathBuf = repo_path.to_path_buf();
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        on_progress(Progress {
-            percent: 0,
-            message: "正在 push 所有标签…".to_string(),
-        });
-        let remote = resolve_remote(&repo_path)?;
-        let args = ["push", remote.as_str(), "--tags"];
-        git_output(&repo_path, &args)?;
-        on_progress(Progress {
-            percent: 100,
-            message: "所有标签 push 完成".to_string(),
-        });
-        Ok(())
+    tokio::task::spawn_blocking(move || {
+        push_refs(
+            &repo_path,
+            |remote| Ok(vec![remote.to_string(), "--tags".to_string()]),
+            "正在 push 所有标签…",
+            "所有标签 push 完成",
+            &on_progress,
+        )
     })
     .await?
 }
@@ -459,7 +476,7 @@ mod tests {
         }
         commit_file(&work, "a.txt", "v1\n", "v1");
         // Create a tag named "v1.0".
-        crate::git::tag::create_tag(&work, "v1.0").unwrap();
+        crate::git::create_tag(&work, "v1.0").unwrap();
 
         let messages: Arc<Mutex<Vec<Progress>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = messages.clone();
@@ -496,8 +513,8 @@ mod tests {
             repo.remote("origin", &origin_str).unwrap();
         }
         commit_file(&work, "a.txt", "v1\n", "v1");
-        crate::git::tag::create_tag(&work, "v1.0").unwrap();
-        crate::git::tag::create_tag(&work, "v2.0").unwrap();
+        crate::git::create_tag(&work, "v1.0").unwrap();
+        crate::git::create_tag(&work, "v2.0").unwrap();
 
         let messages: Arc<Mutex<Vec<Progress>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = messages.clone();
@@ -528,7 +545,7 @@ mod tests {
         init_repo(&dir);
         commit_file(&dir, "a.txt", "v1\n", "v1");
         // Create a tag to push.
-        crate::git::tag::create_tag(&dir, "v1.0").unwrap();
+        crate::git::create_tag(&dir, "v1.0").unwrap();
 
         let err = push_tag(&dir, "v1.0", |_| {}).await.unwrap_err();
         assert!(

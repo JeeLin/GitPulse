@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use crate::app::{RemoteStatus, StatusLine, TagsModal};
-use crate::git::tag::TagInfo;
+use crate::git::TagInfo;
 
 use super::hint;
 

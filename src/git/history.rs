@@ -10,8 +10,10 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use git2::{BranchType, Commit, ErrorCode, Oid, Repository, Sort};
 
+use super::short_id;
+
 /// Upper bound of DAG lanes the graph column can draw.
-const MAX_LANES: usize = 6;
+pub const MAX_LANES: usize = 6;
 
 /// Reference pointing at a commit: HEAD, a local branch or a tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,9 +79,6 @@ pub struct GraphCell {
 /// unmerged branches show up as well. A repository without a single commit
 /// yields an empty vector, a path that is not a repository is an error.
 pub fn list_commits(repo_path: &Path, limit: usize) -> Result<Vec<CommitInfo>> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
     let repo = Repository::open(repo_path)?;
     let marks = collect_ref_marks(&repo);
 
@@ -94,32 +93,20 @@ pub fn list_commits(repo_path: &Path, limit: usize) -> Result<Vec<CommitInfo>> {
     let mut walk = repo.revwalk()?;
     walk.set_sorting(Sort::TIME)?;
     walk.push(head_commit.id())?;
-    for entry in repo.branches(Some(BranchType::Local))?.flatten() {
-        if let Ok(commit) = entry.0.get().peel_to_commit() {
-            let _ = walk.push(commit.id());
-        }
-    }
-    if let Ok(references) = repo.references_glob("refs/tags/*") {
-        for reference in references.flatten() {
-            if let Ok(commit) = reference.peel_to_commit() {
-                let _ = walk.push(commit.id());
-            }
-        }
+    // The marks already cover every local branch and tag tip.
+    for oid in marks.keys() {
+        walk.push(*oid)?;
     }
 
-    let mut rows: Vec<(i64, CommitInfo)> = Vec::new();
+    let mut rows = Vec::new();
     for oid in walk {
         if rows.len() >= limit {
             break;
         }
         let commit = repo.find_commit(oid?)?;
-        let time = commit.time().seconds();
-        rows.push((time, build_info(&commit, &marks)));
+        rows.push(build_info(&commit, &marks));
     }
-    // The revwalk already yields newest-first; the explicit sort keeps that
-    // promise deterministic when several commits share a timestamp.
-    rows.sort_by_key(|(time, _)| std::cmp::Reverse(*time));
-    Ok(rows.into_iter().map(|(_, info)| info).collect())
+    Ok(rows)
 }
 
 /// Resolve `oid` (abbreviated, full or a ref name) and return the full commit
@@ -296,19 +283,13 @@ fn collect_ref_marks(repo: &Repository) -> HashMap<Oid, Vec<RefMark>> {
 fn build_info(commit: &Commit<'_>, marks: &HashMap<Oid, Vec<RefMark>>) -> CommitInfo {
     let time = commit.time();
     CommitInfo {
-        id: short_id(commit.id()),
+        id: short_id(&commit.id()),
         summary: first_line(commit.message().unwrap_or_default()),
         author: commit.author().name().unwrap_or("unknown").to_string(),
         time: format_time(time.seconds(), time.offset_minutes()),
         refs: marks.get(&commit.id()).cloned().unwrap_or_default(),
-        parents: commit.parent_ids().map(short_id).collect(),
+        parents: commit.parent_ids().map(|id| short_id(&id)).collect(),
     }
-}
-
-/// Abbreviate an object id to the 7 hex characters `git log --oneline` shows.
-fn short_id(oid: Oid) -> String {
-    let text = oid.to_string();
-    text[..7].to_string()
 }
 
 /// First (trimmed) line of a commit message.
