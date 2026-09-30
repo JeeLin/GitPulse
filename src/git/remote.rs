@@ -472,6 +472,56 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// R2: a tag whose name starts with `-` must still reach the remote.
+    /// The full `refs/tags/<name>` refspec is what keeps git from reading
+    /// the name as a command-line option (`-leading-dash`) or as a path.
+    #[tokio::test]
+    async fn push_tag_with_leading_dash_publishes_full_refspec() {
+        let root = base_dir("pushtag-dash");
+        let origin_path = root.join("origin.git");
+        Repository::init_bare(&origin_path).unwrap();
+        let origin_str = origin_path.to_str().unwrap().to_string();
+
+        // Work repo: first push establishes nothing here, the tag is what
+        // travels — the tag name itself must never be passed bare.
+        let work = root.join("work");
+        fs::create_dir_all(&work).unwrap();
+        init_repo(&work);
+        {
+            let repo = Repository::open(&work).unwrap();
+            repo.remote("origin", &origin_str).unwrap();
+        }
+        commit_file(&work, "a.txt", "v1\n", "v1");
+        // `git tag` itself rejects a leading `-` as a name (git2 wraps that
+        // check), so the loose ref is written directly — the tag is still a
+        // real one for the push, which is what R2 is about.
+        {
+            let repo = Repository::open(&work).unwrap();
+            let oid = repo
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id()
+                .to_string();
+            let ref_dir = repo.path().join("refs/tags");
+            fs::create_dir_all(&ref_dir).unwrap();
+            fs::write(ref_dir.join("-leading-dash"), format!("{oid}\n")).unwrap();
+        }
+
+        push_tag(&work, "-leading-dash")
+            .await
+            .expect("pushing a `-`-leading tag must succeed");
+
+        // Verify the tag exists in the bare repo under its full name.
+        let origin = Repository::open(&origin_path).unwrap();
+        assert!(
+            origin.find_reference("refs/tags/-leading-dash").is_ok(),
+            "`-leading-dash` must exist in remote as refs/tags/-leading-dash"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn push_tag_without_remote_reports_reason() {
         let dir = base_dir("noremote-tag");

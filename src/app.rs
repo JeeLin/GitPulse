@@ -4788,4 +4788,132 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Arm the receiver and gauge of a push that is still in flight — the
+    /// state `spawn_remote_task` publishes — and hand back the sender so the
+    /// channel stays connected for the duration of the test.
+    fn arm_remote_progress(
+        app: &mut App,
+        percent: u8,
+    ) -> mpsc::UnboundedSender<Result<(), String>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        app.remote_rx = Some(rx);
+        app.remote_op = "push";
+        app.remote_status = Some(RemoteStatus::Progress(Progress {
+            percent,
+            message: "正在 push 标签 v1.0…".to_string(),
+        }));
+        tx
+    }
+
+    /// R6: while a push is running, opening the tag-create input must not
+    /// wipe its live gauge — the receiver keeps re-reporting on the next
+    /// progress event, so clearing `remote_status` here would hide it.
+    #[test]
+    fn tags_create_input_keeps_live_progress_while_remote_running() {
+        let (dir, mut app) = app_with_tagged_repo("tags-busy-create", &["v1.0"]);
+        enter_tags(&mut app);
+        let _tx = arm_remote_progress(&mut app, 42);
+        let gauge = app.remote_status.clone();
+
+        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        assert!(
+            matches!(app.tags_state.modal, Some(TagsModal::Input { .. })),
+            "the input overlay must still open"
+        );
+        assert!(
+            app.remote_rx.is_some(),
+            "the running push keeps its receiver"
+        );
+        assert_eq!(
+            app.remote_status, gauge,
+            "live progress must not be cleared by `start_tag_create`"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R6: submitting the tag create while a push is running still creates
+    /// the tag, but the running gauge survives the entry point.
+    #[test]
+    fn tags_create_submit_keeps_live_progress_while_remote_running() {
+        let (dir, mut app) = app_with_tagged_repo("tags-busy-create-submit", &["v1.0"]);
+        enter_tags(&mut app);
+        let _tx = arm_remote_progress(&mut app, 42);
+        let gauge = app.remote_status.clone();
+
+        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        for c in "v2.0".chars() {
+            assert!(app.handle_key(key(KeyCode::Char(c))));
+        }
+        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(
+            app.tags_state.tags.iter().any(|t| t.name == "v2.0"),
+            "the create itself must still run"
+        );
+        assert!(
+            app.remote_rx.is_some(),
+            "the running push keeps its receiver"
+        );
+        assert_eq!(
+            app.remote_status, gauge,
+            "live progress must not be cleared by `submit_tag_create`"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R6: opening the delete confirmation while a push is running must not
+    /// wipe its live gauge either.
+    #[test]
+    fn tags_delete_start_keeps_live_progress_while_remote_running() {
+        let (dir, mut app) = app_with_tagged_repo("tags-busy-delete", &["v1.0"]);
+        enter_tags(&mut app);
+        let _tx = arm_remote_progress(&mut app, 42);
+        let gauge = app.remote_status.clone();
+
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert_eq!(
+            app.tags_state.modal,
+            Some(TagsModal::Confirm {
+                tag_to_delete: "v1.0".to_string()
+            }),
+            "the confirmation must still open"
+        );
+        assert!(
+            app.remote_rx.is_some(),
+            "the running push keeps its receiver"
+        );
+        assert_eq!(
+            app.remote_status, gauge,
+            "live progress must not be cleared by `start_tag_delete`"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R6: confirming the tag deletion while a push is running still deletes
+    /// the tag, but the running gauge survives the entry point.
+    #[test]
+    fn tags_delete_confirm_keeps_live_progress_while_remote_running() {
+        let (dir, mut app) = app_with_tagged_repo("tags-busy-delete-confirm", &["drop", "keep"]);
+        enter_tags(&mut app);
+        let _tx = arm_remote_progress(&mut app, 42);
+        let gauge = app.remote_status.clone();
+
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.handle_key(key(KeyCode::Char('y'))));
+        assert_eq!(app.tags_state.tags.len(), 1, "the delete itself must run");
+        assert_eq!(app.tags_state.tags[0].name, "keep");
+        assert!(
+            app.remote_rx.is_some(),
+            "the running push keeps its receiver"
+        );
+        assert_eq!(
+            app.remote_status, gauge,
+            "live progress must not be cleared by `confirm_tag_delete`"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

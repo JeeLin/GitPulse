@@ -877,4 +877,118 @@ mod tests {
         assert_eq!(layout[4], vec![(0, '│'), (1, '●'), (2, '│')]);
         assert_eq!(layout[5], vec![(0, '●'), (1, '│'), (2, '│')]);
     }
+
+    /// R9: a commit whose message and author (name and email) carry invalid
+    /// UTF-8 bytes, pointed at by a branch and a tag whose names do too,
+    /// must still reach the history list and the detail pane — escaped
+    /// exactly like [`super::show_bytes`] escapes a non-UTF-8 path
+    /// (`"\xFF"` inside quotes) instead of being dropped or panicking. An
+    /// ordinary UTF-8 commit beside it stays byte-identical, the same rule
+    /// the tag panel asserts for non-UTF-8 tag names.
+    #[cfg(unix)]
+    #[test]
+    fn list_commits_and_detail_escape_non_utf8_fields() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = base_dir("nonutf8");
+        let repo = Repository::init(&dir).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "GitPulse Test").unwrap();
+        config.set_str("user.email", "test@gitpulse.local").unwrap();
+        drop(config);
+
+        // A plain UTF-8 commit first, so HEAD is born and a tree exists.
+        let base = commit_files(
+            &repo,
+            &dir,
+            &[("a.txt", "v1\n")],
+            "utf8 commit",
+            BASE_TIME,
+            &[],
+        );
+        let head_ref = repo.head().unwrap().name().unwrap().to_string();
+        let tree = repo.find_commit(base).unwrap().tree().unwrap();
+
+        // Raw commit object: invalid UTF-8 in the message and in the author
+        // name and email (`git2` only builds signatures from `&str`). The
+        // email is never validated by the read layer, it must not panic.
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(format!("tree {}\nparent {base}\n", tree.id()).as_bytes());
+        raw.extend_from_slice(
+            b"author Bad \xFF Author <bad\xff@example.invalid> 1700000000 +0000\n",
+        );
+        raw.extend_from_slice(
+            b"committer Bad \xFF Author <bad\xff@example.invalid> 1700000000 +0000\n",
+        );
+        raw.extend_from_slice(b"\nbad \xFF subject");
+        let oid = repo
+            .odb()
+            .unwrap()
+            .write(git2::ObjectType::Commit, &raw)
+            .unwrap();
+        // Move HEAD onto the raw commit so the walk has to read it.
+        repo.reference(&head_ref, oid, true, "non-utf8 commit")
+            .unwrap();
+
+        // Loose refs only: `git2` takes `&str` reference names, so a name
+        // that is not valid UTF-8 is written straight to the ref file.
+        let raw_branch = b"bad-\xFF-branch";
+        let raw_tag = b"bad-\xFF-tag";
+        fs::create_dir_all(repo.path().join("refs/heads")).unwrap();
+        fs::write(
+            repo.path()
+                .join("refs/heads")
+                .join(OsStr::from_bytes(raw_branch)),
+            format!("{oid}\n"),
+        )
+        .unwrap();
+        fs::create_dir_all(repo.path().join("refs/tags")).unwrap();
+        fs::write(
+            repo.path()
+                .join("refs/tags")
+                .join(OsStr::from_bytes(raw_tag)),
+            format!("{oid}\n"),
+        )
+        .unwrap();
+
+        let commits = list_commits(&dir, 200).unwrap();
+        let row = commits
+            .iter()
+            .find(|c| c.full_id == oid.to_string())
+            .expect("the non-UTF-8 commit must be listed");
+        assert_eq!(row.summary, "\"bad \\xFF subject\"", "{}", row.summary);
+        assert_eq!(row.author, "\"Bad \\xFF Author\"", "{}", row.author);
+        assert!(
+            row.refs
+                .iter()
+                .any(|m| m.kind == RefKind::Branch && m.name == "\"bad-\\xFF-branch\""),
+            "escaped branch mark missing: {:?}",
+            row.refs
+        );
+        assert!(
+            row.refs
+                .iter()
+                .any(|m| m.kind == RefKind::Tag && m.name == "\"bad-\\xFF-tag\""),
+            "escaped tag mark missing: {:?}",
+            row.refs
+        );
+
+        // The ordinary UTF-8 commit beside it stays byte-identical.
+        let base_row = commits
+            .iter()
+            .find(|c| c.full_id == base.to_string())
+            .expect("the UTF-8 commit must be listed");
+        assert_eq!(base_row.summary, "utf8 commit");
+        assert_eq!(base_row.author, "GitPulse Test");
+
+        let detail = commit_detail(&dir, &oid.to_string()).unwrap();
+        assert_eq!(
+            detail.message, "\"bad \\xFF subject\"",
+            "{}",
+            detail.message
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
