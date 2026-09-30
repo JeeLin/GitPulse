@@ -1,5 +1,7 @@
 //! Git operations layer: repository discovery and status queries.
 
+use std::fmt::Write as _;
+
 mod batch;
 mod branch;
 mod commit;
@@ -45,4 +47,31 @@ pub fn show_path(path: &std::path::Path) -> String {
     path.to_str()
         .map(str::to_string)
         .unwrap_or_else(|| format!("{path:?}"))
+}
+
+/// Display form of a raw git byte string (reference name, commit message,
+/// author name) for user-facing messages: valid UTF-8 comes back verbatim,
+/// non-UTF-8 bytes are escaped exactly the way [`show_path`] escapes a
+/// non-UTF-8 path (`\xE9` style) instead of collapsing into the lossy
+/// U+FFFD replacement.
+pub fn show_bytes(bytes: &[u8]) -> String {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        let mut out = String::with_capacity(bytes.len() + 2);
+        out.push('"');
+        for chunk in bytes.utf8_chunks() {
+            let valid = chunk.valid();
+            if !valid.is_empty() {
+                // `{:?}` on a `&str` wraps it in quotes; only the escaped
+                // interior belongs here, the outer quotes are added once.
+                let escaped = format!("{valid:?}");
+                out.push_str(&escaped[1..escaped.len() - 1]);
+            }
+            for byte in chunk.invalid() {
+                let _ = write!(out, "\\x{byte:02X}");
+            }
+        }
+        out.push('"');
+        return out;
+    };
+    text.to_string()
 }

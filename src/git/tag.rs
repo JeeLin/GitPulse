@@ -3,13 +3,12 @@
 //! All functions take a repository path and open the repository on the
 //! calling thread, matching the other single-repo helpers in this module.
 
-use std::fmt::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use git2::{ObjectType, Repository};
 
-use super::short_id;
+use super::{short_id, show_bytes};
 
 /// Snapshot of one repository tag for the tag panel.
 #[derive(Debug)]
@@ -58,35 +57,6 @@ pub fn list_tags(repo_path: &Path) -> Result<Vec<TagInfo>> {
     // Sort alphabetically by tag name.
     tags.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(tags)
-}
-
-/// Display form of a raw git reference name for user-facing text: the exact
-/// UTF-8 spelling when `bytes` are valid Unicode, otherwise the `Debug`
-/// escaping [`super::show_path`] applies to a non-UTF-8 path, so invalid
-/// bytes surface as `\xFF` instead of being dropped.
-///
-/// Kept in step with the identical `show_bytes` helper private to the
-/// `history` module of this crate — change both together.
-fn show_bytes(bytes: &[u8]) -> String {
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        let mut out = String::with_capacity(bytes.len() + 2);
-        out.push('"');
-        for chunk in bytes.utf8_chunks() {
-            let valid = chunk.valid();
-            if !valid.is_empty() {
-                // `{:?}` on a `&str` wraps it in quotes; only the escaped
-                // interior belongs here, the outer quotes are added once.
-                let escaped = format!("{valid:?}");
-                out.push_str(&escaped[1..escaped.len() - 1]);
-            }
-            for byte in chunk.invalid() {
-                let _ = write!(out, "\\x{byte:02X}");
-            }
-        }
-        out.push('"');
-        return out;
-    };
-    text.to_string()
 }
 
 /// Create a lightweight tag at the current HEAD.

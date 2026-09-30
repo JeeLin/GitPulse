@@ -5,13 +5,12 @@
 //! `spawn_blocking`.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use git2::{BranchType, Commit, ErrorCode, Oid, Repository, Sort};
 
-use super::{short_id, show_path};
+use super::{short_id, show_bytes, show_path};
 
 /// Upper bound of DAG lanes the graph column can draw.
 pub const MAX_LANES: usize = 6;
@@ -155,8 +154,13 @@ pub fn commit_detail(repo_path: &Path, oid: &str) -> Result<CommitDetail> {
 ///
 /// The first parent of a commit keeps the commit's lane, extra parents fork
 /// onto a new lane, and a commit awaited by several lanes joins those lanes
-/// back together (`┤`) and frees them. Pure function; the lane count never
-/// exceeds [`MAX_LANES`].
+/// back together and frees them. Each of those connections also draws the
+/// horizontal segment that ties its two ends together: the left end of the
+/// span gets `├` (stem plus right arm), the right end gets `┤` (stem plus
+/// left arm), lanes in between become `┼` while still carrying traffic and
+/// `─` once they are idle, and a lane holding both arms becomes `┼`. Lanes
+/// without any connection stay `│` (or `●` on the commit itself). Pure
+/// function; the lane count never exceeds [`MAX_LANES`].
 pub fn layout_graph(commits: &[CommitRow]) -> Vec<Vec<GraphCell>> {
     // `Some(id)` marks a lane that is waiting for that commit to arrive.
     let mut lanes: Vec<Option<String>> = Vec::new();
@@ -176,42 +180,90 @@ pub fn layout_graph(commits: &[CommitRow]) -> Vec<Vec<GraphCell>> {
         };
         let joined: Vec<usize> = waiting.into_iter().skip(1).collect();
 
+        // Horizontal spans drawn on this row, each stored left-to-right:
+        // joins fold into `primary`, extra parents fork away from it.
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+
         // Route the parents: first parent stays on the commit's lane, each
         // additional parent forks onto a lane of its own.
         lanes[primary] = commit.parents.first().cloned();
         for parent in commit.parents.iter().skip(1) {
             let lane = allocate_lane(&mut lanes);
             lanes[lane] = Some(parent.clone());
+            push_span(&mut spans, primary, lane);
         }
         // Lanes that joined into this commit are now free again.
-        for index in joined.iter() {
-            lanes[*index] = None;
+        for &index in &joined {
+            push_span(&mut spans, primary, index);
+            lanes[index] = None;
         }
 
-        let mut cells = Vec::with_capacity(lanes.len());
-        for (index, lane) in lanes.iter().enumerate() {
-            if joined.contains(&index) {
-                cells.push(GraphCell {
-                    glyph: '┤',
-                    lane: index,
-                });
-            } else if index == primary {
-                let glyph = if commit.parents.len() > 1 {
+        rows.push(graph_row(&lanes, &spans, primary, commit.parents.len()));
+    }
+    rows
+}
+
+/// Record one horizontal span between lanes `a` and `b`, ordered left to
+/// right. A span whose ends fold onto the same lane has nothing to draw.
+fn push_span(spans: &mut Vec<(usize, usize)>, a: usize, b: usize) {
+    if a != b {
+        spans.push((a.min(b), a.max(b)));
+    }
+}
+
+/// Glyphs of one commit row: arms and crossings where a span starts, ends or
+/// passes through, `●` on a commit with no connection (or `┼` when several
+/// parents fold into one cell), `│` on lanes that merely run past, and no
+/// cell at all on idle lanes outside every span.
+fn graph_row(
+    lanes: &[Option<String>],
+    spans: &[(usize, usize)],
+    primary: usize,
+    parent_count: usize,
+) -> Vec<GraphCell> {
+    let mut cells = Vec::with_capacity(lanes.len());
+    for (index, lane) in lanes.iter().enumerate() {
+        // Does a span reach into this cell from the left / from the right?
+        // Both answers include the lanes a span passes straight through.
+        let from_left = spans
+            .iter()
+            .any(|&(start, end)| index == end || (start < index && index < end));
+        let from_right = spans
+            .iter()
+            .any(|&(start, end)| index == start || (start < index && index < end));
+        let on_span = spans
+            .iter()
+            .any(|&(start, end)| index == start || index == end);
+
+        let glyph = if !from_left && !from_right {
+            // No span reaches this cell: the commit, or a lane running past.
+            if index == primary {
+                if parent_count > 1 {
                     '┼'
                 } else {
                     '●'
-                };
-                cells.push(GraphCell { glyph, lane: index });
+                }
             } else if lane.is_some() {
-                cells.push(GraphCell {
-                    glyph: '│',
-                    lane: index,
-                });
+                '│'
+            } else {
+                continue;
             }
-        }
-        rows.push(cells);
+        } else if on_span || lane.is_some() {
+            // A span end, or a live lane the span crosses, draws a stem.
+            if from_left && from_right {
+                '┼'
+            } else if from_left {
+                '┤'
+            } else {
+                '├'
+            }
+        } else {
+            // Idle lane inside a span: the horizontal segment alone.
+            '─'
+        };
+        cells.push(GraphCell { glyph, lane: index });
     }
-    rows
+    cells
 }
 
 /// Pick a lane for a new edge: reuse a free lane, grow the layout up to
@@ -309,33 +361,6 @@ fn first_line(message: &str) -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
-}
-
-/// Display form of a raw git string (reference name, commit message,
-/// author name) for user-facing messages: the exact UTF-8 spelling when
-/// `bytes` are valid Unicode, otherwise the same `Debug` escaping
-/// [`show_path`] applies to a non-UTF-8 path, so invalid bytes surface as
-/// `\xE9` instead of being dropped.
-fn show_bytes(bytes: &[u8]) -> String {
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        let mut out = String::with_capacity(bytes.len() + 2);
-        out.push('"');
-        for chunk in bytes.utf8_chunks() {
-            let valid = chunk.valid();
-            if !valid.is_empty() {
-                // `{:?}` on a `&str` wraps it in quotes; only the escaped
-                // interior belongs here, the outer quotes are added once.
-                let escaped = format!("{valid:?}");
-                out.push_str(&escaped[1..escaped.len() - 1]);
-            }
-            for byte in chunk.invalid() {
-                let _ = write!(out, "\\x{byte:02X}");
-            }
-        }
-        out.push('"');
-        return out;
-    };
-    text.to_string()
 }
 
 /// Render a timestamp as `YYYY-MM-DD HH:MM` in the offset recorded with the
@@ -700,6 +725,11 @@ mod tests {
             assert_eq!(row[0].lane, 0);
             assert_eq!(row[0].glyph, '●');
         }
+        // A single chain has no connection to draw: never a horizontal arm.
+        assert!(rows
+            .iter()
+            .flatten()
+            .all(|cell| !matches!(cell.glyph, '─' | '├' | '┤' | '┼')));
         assert!(layout_graph(&[]).is_empty());
 
         let _ = fs::remove_dir_all(&dir);
@@ -714,9 +744,11 @@ mod tests {
         assert_eq!(rows.len(), commits.len());
         assert!(rows.iter().flatten().all(|cell| cell.lane < MAX_LANES));
 
-        // The merge commit forks onto a second lane and crosses lanes.
+        // The merge commit forks onto a second lane: the row carries both
+        // connection ends, `├` next to `┤`, so the arms touch.
         assert!(rows[0].len() >= 2);
-        assert!(rows[0].iter().any(|cell| cell.glyph == '┼'));
+        assert_eq!((rows[0][0].lane, rows[0][0].glyph), (0, '├'));
+        assert_eq!((rows[0][1].lane, rows[0][1].glyph), (1, '┤'));
 
         // The side branch runs on its own lane…
         let feature_row = &rows[2];
@@ -731,6 +763,118 @@ mod tests {
         let max_lane = rows.iter().flatten().map(|cell| cell.lane).max().unwrap();
         assert_eq!(max_lane, 1);
 
+        // The whole fixture, lane by lane: only the merge row and the join
+        // row draw arms, every other row stays dots and verticals.
+        let layout = graph_layout(&rows);
+        for row in &layout {
+            assert_span_connected(row);
+        }
+        assert_eq!(
+            layout,
+            vec![
+                vec![(0, '├'), (1, '┤')], // merge: the second parent forks right
+                vec![(0, '●'), (1, '│')], // main lane continues, feature waits
+                vec![(0, '│'), (1, '●')], // feature commit
+                vec![(0, '│'), (1, '●')], // feature commit
+                vec![(0, '├'), (1, '┤')], // both lanes join at the fork point
+                vec![(0, '●')],           // root commit
+            ]
+        );
+
         let _ = fs::remove_dir_all(&fixture.dir);
+    }
+
+    /// Commit row for the pure-function layout tests: only `id` and `parents`
+    /// are read, the display fields stay empty.
+    fn graph_commit(id: &str, parents: &[&str]) -> CommitRow {
+        CommitRow {
+            full_id: id.to_string(),
+            id: id.to_string(),
+            summary: String::new(),
+            author: String::new(),
+            time: String::new(),
+            refs: Vec::new(),
+            parents: parents.iter().map(|parent| (*parent).to_string()).collect(),
+        }
+    }
+
+    /// Lane-indexed view of a graph row list, for exact comparisons.
+    fn graph_layout(rows: &[Vec<GraphCell>]) -> Vec<Vec<(usize, char)>> {
+        rows.iter()
+            .map(|row| row.iter().map(|cell| (cell.lane, cell.glyph)).collect())
+            .collect()
+    }
+
+    /// A row that draws a connection must emit a cell for every lane between
+    /// its two ends, otherwise the horizontal segment breaks where the
+    /// renderer leaves the untouched lanes blank.
+    fn assert_span_connected(row: &[(usize, char)]) {
+        let Some(left) = row.iter().position(|(_, glyph)| *glyph == '├') else {
+            return;
+        };
+        let right = row[left..]
+            .iter()
+            .position(|(_, glyph)| *glyph == '┤')
+            .map(|offset| left + offset)
+            .expect("connection with a `├` needs a `┤` on its right");
+        let expected: Vec<usize> = (row[left].0..=row[right].0).collect();
+        let drawn: Vec<usize> = row[left..=right].iter().map(|(lane, _)| *lane).collect();
+        assert_eq!(drawn, expected, "gap in the horizontal segment: {row:?}");
+    }
+
+    /// Newest-first prefix shared by both span fixtures: three lanes grow out
+    /// of two forks, ending with lane 0 waiting for `p`, lane 1 free to be
+    /// filled in by the caller and lane 2 waiting for `c`.
+    fn span_prefix() -> Vec<CommitRow> {
+        vec![
+            graph_commit("a", &["p", "q"]), // lane 0 forks lane 1
+            graph_commit("q", &["r", "s"]), // lane 1 forks lane 2
+            graph_commit("r", &["t"]),      // lane 1 keeps going
+            graph_commit("s", &["c"]),      // lane 2 starts waiting for c
+        ]
+    }
+
+    /// A join whose two ends are two lanes apart crosses an idle lane: that
+    /// lane has no stem of its own, so it contributes the `─` alone and the
+    /// connection still reads as one unbroken line.
+    #[test]
+    fn layout_graph_join_draws_horizontal_across_idle_lane() {
+        let mut commits = span_prefix();
+        commits.push(graph_commit("t", &[])); // lane 1 retires: now idle
+        commits.push(graph_commit("p", &["c"])); // lane 0 starts waiting for c
+        commits.push(graph_commit("c", &[])); // lanes 0 and 2 join
+
+        let layout = graph_layout(&layout_graph(&commits));
+
+        assert_eq!(layout.last().unwrap(), &[(0, '├'), (1, '─'), (2, '┤')]);
+        for row in &layout {
+            assert_span_connected(row);
+            assert!(row.iter().all(|(lane, _)| *lane < MAX_LANES));
+        }
+        // The rows before the join stay untouched: arms only on the fork rows.
+        assert_eq!(layout[0], vec![(0, '├'), (1, '┤')]);
+        assert_eq!(layout[1], vec![(0, '│'), (1, '├'), (2, '┤')]);
+    }
+
+    /// The same join with the middle lane still carrying traffic: a crossed
+    /// live lane turns into `┼` instead of the bare horizontal segment.
+    #[test]
+    fn layout_graph_join_draws_cross_over_active_lane() {
+        let mut commits = span_prefix();
+        commits.push(graph_commit("t", &["c"])); // lane 1 keeps waiting for c
+        commits.push(graph_commit("p", &["c"])); // lane 0 starts waiting for c
+        commits.push(graph_commit("c", &[])); // lanes 0, 1 and 2 join
+
+        let layout = graph_layout(&layout_graph(&commits));
+
+        assert_eq!(layout.last().unwrap(), &[(0, '├'), (1, '┼'), (2, '┤')]);
+        for row in &layout {
+            assert_span_connected(row);
+            assert!(row.iter().all(|(lane, _)| *lane < MAX_LANES));
+        }
+        // Three lanes wait for `c`, so the middle one is both a join end and
+        // a crossing: two arms in one cell, which is what `┼` stands for.
+        assert_eq!(layout[4], vec![(0, '│'), (1, '●'), (2, '│')]);
+        assert_eq!(layout[5], vec![(0, '●'), (1, '│'), (2, '│')]);
     }
 }
