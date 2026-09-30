@@ -227,6 +227,7 @@ mod tests {
         let mut state = HistoryState::default();
         state.set_commits(
             vec![CommitRow {
+                full_id: "0123456789abcdef0123456789abcdef01234567".to_string(),
                 id: "abc1234".to_string(),
                 summary: "merge things".to_string(),
                 author: "GitPulse Test".to_string(),

@@ -928,7 +928,11 @@ impl App {
     /// Failures (unresolvable object, repository gone) surface on the status
     /// line instead of panicking; an empty history simply drops the detail.
     pub fn load_history_detail(&mut self) {
-        let Some(id) = self.history.selected_commit().map(|c| c.id.clone()) else {
+        // `full_id`, not the 7-character `id` the list renders: an
+        // abbreviated prefix can be ambiguous (`GIT_EAMBIGUOUS`) in a large
+        // repository, while the full oid always resolves to exactly one
+        // object.
+        let Some(id) = self.history.selected_commit().map(|c| c.full_id.clone()) else {
             self.history.detail = None;
             return;
         };
@@ -1017,7 +1021,11 @@ impl App {
             buffer: String::new(),
         });
         self.status = None;
-        self.remote_status = None;
+        // A push still in flight keeps its receiver and re-reports on the
+        // next progress event; clearing it here would hide live progress.
+        if self.remote_rx.is_none() {
+            self.remote_status = None;
+        }
     }
 
     /// Cancel the tag-create input, keeping the list as it was.
@@ -1045,8 +1053,12 @@ impl App {
             return;
         };
         // Refresh-first ordering: `remote_status` would otherwise outrank
-        // the create error on the panel's status line.
-        self.remote_status = None;
+        // the create error on the panel's status line. A push still in
+        // flight keeps its receiver and re-reports on the next progress
+        // event, so it is only cleared when nothing is running.
+        if self.remote_rx.is_none() {
+            self.remote_status = None;
+        }
         match git::create_tag(&path, &name) {
             Ok(()) => {
                 self.tags_state.modal = None;
@@ -1071,7 +1083,11 @@ impl App {
         let tag_to_delete = tag.name.clone();
         self.tags_state.modal = Some(TagsModal::Confirm { tag_to_delete });
         self.status = None;
-        self.remote_status = None;
+        // A push still in flight keeps its receiver and re-reports on the
+        // next progress event; clearing it here would hide live progress.
+        if self.remote_rx.is_none() {
+            self.remote_status = None;
+        }
     }
 
     /// Cancel the tag-delete confirmation.
@@ -1092,7 +1108,12 @@ impl App {
             self.set_error("删除标签失败: 仓库索引失效");
             return;
         };
-        self.remote_status = None;
+        // Refresh-first ordering, as in `submit_tag_create`: a push still
+        // in flight keeps its receiver and re-reports on the next progress
+        // event, so it is only cleared when nothing is running.
+        if self.remote_rx.is_none() {
+            self.remote_status = None;
+        }
         match git::delete_tag(&path, &tag_to_delete) {
             Ok(()) => {
                 self.load_tags();
@@ -1107,11 +1128,16 @@ impl App {
     ///
     /// Reuses the push/pull progress channel (convention 1): progress
     /// arrives on an mpsc receiver consumed each frame and renders through
-    /// [`RemoteStatus`] on the panel's status line. No-op while another
-    /// remote or batch op is in flight (they would contend on the same
-    /// repository locks), or outside the tag panel.
+    /// [`RemoteStatus`] on the panel's status line. Pressing `p` / `a`
+    /// while another remote or batch op is in flight (they would contend on
+    /// the same repository locks) reports `已有远端操作进行中` instead of
+    /// dropping the key silently; outside the tag panel it stays a no-op.
     pub fn start_tag_push(&mut self, all: bool) {
-        if self.view != View::Tags || self.remote_rx.is_some() || self.batch_rx.is_some() {
+        if self.view != View::Tags {
+            return;
+        }
+        if self.remote_rx.is_some() || self.batch_rx.is_some() {
+            self.set_info("已有远端操作进行中");
             return;
         }
         let Some(path) = self.current_repo_path() else {
@@ -1119,6 +1145,12 @@ impl App {
             return;
         };
         let tag = if all {
+            // Pushing every tag on a repository without any would spawn a
+            // task that reports success while doing nothing.
+            if self.tags_state.tags.is_empty() {
+                self.set_error("没有可推送的标签");
+                return;
+            }
             None
         } else {
             match self.tags_state.selected_tag() {
@@ -1803,12 +1835,21 @@ impl App {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.leave_history(),
             KeyCode::Char('j') | KeyCode::Down => {
+                // The detail reload opens the repository and re-diffs the
+                // whole tree, so a press that cannot move the cursor (empty
+                // list, already at the last row) must not pay for it.
+                let before = self.history.selected;
                 self.history.move_selection(true);
-                self.load_history_detail();
+                if self.history.selected != before {
+                    self.load_history_detail();
+                }
             }
             KeyCode::Char('k') | KeyCode::Up => {
+                let before = self.history.selected;
                 self.history.move_selection(false);
-                self.load_history_detail();
+                if self.history.selected != before {
+                    self.load_history_detail();
+                }
             }
             _ => {}
         }
@@ -4226,6 +4267,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A press that cannot move the cursor must not pay for the detail
+    /// reload: it re-opens the repository and re-diffs the whole tree, and
+    /// a clamped `j` / `k` would otherwise clear the status line on every
+    /// repeat.
+    #[test]
+    fn history_clamped_move_skips_detail_reload() {
+        let (dir, mut app) = app_with_two_commit_repo("history-clamp");
+        enter_history(&mut app);
+        assert_eq!(app.history.commits.len(), 2);
+
+        // Move to the last row, then plant a stale error on the status line.
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.history.selected, 1);
+        app.set_error("stale".to_string());
+
+        // `j` clamps there: no reload runs, so the error survives.
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.history.selected, 1, "j stops at the last row");
+        assert_eq!(
+            app.status.as_ref().map(|s| s.message.as_str()),
+            Some("stale"),
+            "a clamped press must not reload the detail"
+        );
+
+        // `k` really moves, so the reload runs and clears the status line.
+        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(app.history.selected, 0);
+        assert!(app.status.is_none());
+
+        // Same at the top edge: `k` clamps and keeps the planted error.
+        app.set_error("stale".to_string());
+        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert_eq!(app.history.selected, 0, "k stops at the first row");
+        assert_eq!(
+            app.status.as_ref().map(|s| s.message.as_str()),
+            Some("stale"),
+            "a clamped press must not reload the detail"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn history_q_and_esc_return_to_repo_view() {
         let dir = temp_dir("history-exit");
@@ -4279,10 +4362,10 @@ mod tests {
     /// on the status line instead of panicking, and the view stays put.
     #[test]
     fn history_detail_load_error_reports_on_status_line() {
-        let dir = temp_dir("history-detail-error");
-        init_repo_with_commit(&dir);
-
-        let mut app = app_with_repo_at(&dir);
+        // Two commits so `j` really moves the selection: a clamped press
+        // (single-row history) deliberately skips the reload and would never
+        // reach the failing lookup this test exercises.
+        let (dir, mut app) = app_with_two_commit_repo("history-detail-error");
         enter_history(&mut app);
         assert!(app.history.detail.is_some());
 
@@ -4548,6 +4631,14 @@ mod tests {
         // p reports why there is nothing to push and never spawns a task
         // (a `tokio::spawn` outside a runtime would panic).
         assert!(app.handle_key(key(KeyCode::Char('p'))));
+        assert!(app.remote_rx.is_none());
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("没有可推送的标签"), "{}", st.message);
+
+        // a (push all) is guarded the same way: no tag list means no task
+        // and no fake success report.
+        assert!(app.handle_key(key(KeyCode::Char('a'))));
         assert!(app.remote_rx.is_none());
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);

@@ -5,6 +5,7 @@
 //! `spawn_blocking`.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -39,7 +40,11 @@ pub enum RefKind {
 /// One commit row for the history list.
 #[derive(Debug)]
 pub struct CommitRow {
-    /// Abbreviated object id (7 hex characters).
+    /// Full object id (40 hex characters): what the detail lookup resolves,
+    /// so a 7-character abbreviation can never turn into `GIT_EAMBIGUOUS` in
+    /// a repository big enough to have colliding prefixes.
+    pub full_id: String,
+    /// Abbreviated object id (7 hex characters), the form the list renders.
     pub id: String,
     /// First line of the commit message.
     pub summary: String,
@@ -122,7 +127,7 @@ pub fn commit_detail(repo_path: &Path, oid: &str) -> Result<CommitDetail> {
     let commit = object
         .peel_to_commit()
         .with_context(|| format!("{oid} 不是提交对象"))?;
-    let message = commit.message().unwrap_or_default().to_string();
+    let message = show_bytes(commit.message_bytes());
 
     let tree = commit.tree().context("读取提交树失败")?;
     // Diffs are taken against the first parent; a root commit has none and is
@@ -243,11 +248,13 @@ fn collect_ref_marks(repo: &Repository) -> HashMap<Oid, Vec<RefMark>> {
     if let Ok(iter) = repo.branches(Some(BranchType::Local)) {
         for entry in iter.flatten() {
             let (branch, _) = entry;
-            let Ok(Some(name)) = branch.name() else {
+            // A non-UTF-8 branch name is rendered escaped instead of being
+            // dropped, so the mark still shows up in the history list.
+            let Ok(name) = branch.name_bytes() else {
                 continue;
             };
             if let Ok(commit) = branch.get().peel_to_commit() {
-                branches.push((name.to_string(), commit.id()));
+                branches.push((show_bytes(name), commit.id()));
             }
         }
     }
@@ -262,9 +269,9 @@ fn collect_ref_marks(repo: &Repository) -> HashMap<Oid, Vec<RefMark>> {
     let mut tags: Vec<(String, Oid)> = Vec::new();
     if let Ok(references) = repo.references_glob("refs/tags/*") {
         for reference in references.flatten() {
-            let Some(name) = reference.shorthand().map(str::to_string) else {
-                continue;
-            };
+            // Shorthand is byte-identical to `shorthand()`; a non-UTF-8 tag
+            // name is rendered escaped instead of being dropped.
+            let name = show_bytes(reference.shorthand_bytes());
             if let Ok(commit) = reference.peel_to_commit() {
                 tags.push((name, commit.id()));
             }
@@ -284,9 +291,10 @@ fn collect_ref_marks(repo: &Repository) -> HashMap<Oid, Vec<RefMark>> {
 fn build_info(commit: &Commit<'_>, marks: &HashMap<Oid, Vec<RefMark>>) -> CommitRow {
     let time = commit.time();
     CommitRow {
+        full_id: commit.id().to_string(),
         id: short_id(&commit.id()),
-        summary: first_line(commit.message().unwrap_or_default()),
-        author: commit.author().name().unwrap_or("unknown").to_string(),
+        summary: first_line(&show_bytes(commit.message_bytes())),
+        author: show_bytes(commit.author().name_bytes()),
         time: format_time(time.seconds(), time.offset_minutes()),
         refs: marks.get(&commit.id()).cloned().unwrap_or_default(),
         parents: commit.parent_ids().map(|id| short_id(&id)).collect(),
@@ -301,6 +309,33 @@ fn first_line(message: &str) -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+/// Display form of a raw git string (reference name, commit message,
+/// author name) for user-facing messages: the exact UTF-8 spelling when
+/// `bytes` are valid Unicode, otherwise the same `Debug` escaping
+/// [`show_path`] applies to a non-UTF-8 path, so invalid bytes surface as
+/// `\xE9` instead of being dropped.
+fn show_bytes(bytes: &[u8]) -> String {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        let mut out = String::with_capacity(bytes.len() + 2);
+        out.push('"');
+        for chunk in bytes.utf8_chunks() {
+            let valid = chunk.valid();
+            if !valid.is_empty() {
+                // `{:?}` on a `&str` wraps it in quotes; only the escaped
+                // interior belongs here, the outer quotes are added once.
+                let escaped = format!("{valid:?}");
+                out.push_str(&escaped[1..escaped.len() - 1]);
+            }
+            for byte in chunk.invalid() {
+                let _ = write!(out, "\\x{byte:02X}");
+            }
+        }
+        out.push('"');
+        return out;
+    };
+    text.to_string()
 }
 
 /// Render a timestamp as `YYYY-MM-DD HH:MM` in the offset recorded with the
