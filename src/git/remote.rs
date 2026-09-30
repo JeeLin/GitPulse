@@ -192,9 +192,13 @@ pub async fn pull(repo_path: &Path, on_progress: impl Fn(Progress) + Send + 'sta
 
 /// Push a single tag to the remote.
 ///
-/// Uses `git push <remote> <tag>` so that only the named tag is transferred.
-/// The repository must have at least one remote configured; otherwise an error
-/// is returned with a readable reason (matching `push` behavior).
+/// Uses `git push <remote> refs/tags/<tag>` so that only the named tag is
+/// transferred.  The full refspec (`refs/tags/…`) prevents git from
+/// misinterpreting tag names that start with `-` (e.g. `--force`,
+/// `--delete`) as command-line options — see R2.
+///
+/// The repository must have at least one remote configured; otherwise an
+/// error is returned with a readable reason (matching `push` behavior).
 pub async fn push_tag(
     repo_path: &Path,
     tag: &str,
@@ -205,7 +209,7 @@ pub async fn push_tag(
     tokio::task::spawn_blocking(move || {
         push_refs(
             &repo_path,
-            |remote| Ok(vec![remote.to_string(), tag.clone()]),
+            |remote| Ok(vec![remote.to_string(), format!("refs/tags/{tag}")]),
             &format!("标签 {tag} push 完成"),
             &on_progress,
         )
