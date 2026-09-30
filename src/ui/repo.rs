@@ -72,7 +72,8 @@ pub fn render_repo(f: &mut Frame, mut state: RepoState<'_>) {
 /// Bottom key-hint row: y/n/Esc while the discard confirmation is open (every
 /// other list key is swallowed then), Enter/Esc while the commit message input
 /// is open (`input_modal_key` eats the buffer keys), the file-list actions
-/// otherwise.
+/// otherwise. Related keys share one hint (`s/u`, `p/l`, `b/h/t`) so the row
+/// — including the panel entry — stays within the 80-column bottom line.
 fn key_hints(discard_confirm_open: bool, commit_input_open: bool) -> Line<'static> {
     if discard_confirm_open {
         // Same y/n wording as the overlay itself.
@@ -94,12 +95,11 @@ fn key_hints(discard_confirm_open: bool, commit_input_open: bool) -> Line<'stati
         [
             hint("j/k", "选择"),
             hint("d", "diff"),
-            hint("s", "stage"),
-            hint("u", "unstage"),
-            hint("x", "discard"),
+            hint("s/u", "暂存切换"),
+            hint("x", "丢弃"),
             hint("c", "commit"),
-            hint("p", "push"),
-            hint("l", "pull"),
+            hint("p/l", "push/pull"),
+            hint("b/h/t", "面板"),
             hint("Esc", "返回"),
         ]
         .into_iter()
@@ -332,7 +332,14 @@ mod tests {
         let hints = row_compact(&terminal, 23);
         // The dialog swallows every list key: none of them may be advertised.
         for swallowed in [
-            "j/k", "diff", "stage", "unstage", "discard", "commit", "push", "pull",
+            "j/k",
+            "diff",
+            "暂存切换",
+            "丢弃",
+            "commit",
+            "push",
+            "pull",
+            "面板",
         ] {
             assert!(
                 !hints.contains(swallowed),
@@ -357,7 +364,14 @@ mod tests {
         let terminal = render_to_terminal(state);
         let hints = row_compact(&terminal, 23);
         for swallowed in [
-            "j/k", "diff", "stage", "unstage", "discard", "commit", "push", "pull",
+            "j/k",
+            "diff",
+            "暂存切换",
+            "丢弃",
+            "commit",
+            "push",
+            "pull",
+            "面板",
         ] {
             assert!(
                 !hints.contains(swallowed),
@@ -424,13 +438,22 @@ mod tests {
         let terminal = render_to_terminal(base_state(&entries, &mut list_state, None));
         let text = compact(&terminal);
         assert!(text.contains("j/k选择"), "missing select hint: {text}");
-        assert!(text.contains("stage"), "missing stage hint: {text}");
-        assert!(text.contains("unstage"), "missing unstage hint: {text}");
-        assert!(text.contains("discard"), "missing discard hint: {text}");
+        assert!(text.contains("暂存切换"), "missing stage hint: {text}");
+        assert!(text.contains("丢弃"), "missing discard hint: {text}");
         assert!(text.contains("commit"), "missing commit hint: {text}");
         assert!(text.contains("push"), "missing push hint: {text}");
         assert!(text.contains("pull"), "missing pull hint: {text}");
+        assert!(text.contains("b/h/t面板"), "missing panel hint: {text}");
         assert!(text.contains("Esc返回"), "missing back hint: {text}");
+    }
+
+    /// The bottom hint row must never overflow the 80-column terminal: the
+    /// panel entry (`b/h/t`) is budgeted together with the action hints, so a
+    /// regression here would silently clip the trailing `Esc 返回`.
+    #[test]
+    fn key_hints_fit_within_80_columns() {
+        let width = key_hints(false, false).width();
+        assert!(width <= 80, "hints row is {width} columns wide");
     }
 
     #[test]

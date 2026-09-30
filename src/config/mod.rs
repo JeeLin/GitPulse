@@ -125,9 +125,16 @@ fn save_to(config: &Config, path: &Path) -> Result<()> {
 /// leave a half-written config behind while the caller only rolls back
 /// memory. Renaming over the target keeps the old bytes until the new ones
 /// are complete; the temp file is removed on any failure.
+///
+/// The temp file is created with mode `0600` instead of the usual
+/// `0666 & !umask`, so the rename can never widen a `chmod 600` config —
+/// this file is where credentials such as the GitHub token will live — and
+/// it is `sync_all`ed before the rename so a crash cannot leave an empty or
+/// half-written config in place. The rename stays within the directory — no
+/// cross-device window.
 fn write_atomically(path: &Path, contents: &str) -> Result<()> {
     let temp = temp_path(path);
-    fs::write(&temp, contents)
+    write_temp(&temp, contents)
         .and_then(|_| fs::rename(&temp, path))
         .map_err(|source| {
             let _ = fs::remove_file(&temp);
@@ -137,6 +144,41 @@ fn write_atomically(path: &Path, contents: &str) -> Result<()> {
             }
         })?;
     Ok(())
+}
+
+/// Create `temp` with owner-only permissions, write `contents` into it, and
+/// flush it to disk so the following rename publishes complete bytes.
+fn write_temp(temp: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(temp)?
+    };
+    #[cfg(not(unix))]
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(temp)?;
+
+    // `mode` only applies when the file is created; a leftover temp file
+    // from an earlier run keeps its old mode, so re-assert `0600` before
+    // the rename carries it onto the config.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()
 }
 
 /// The sibling temp file used by [`write_atomically`]: `<name>.tmp-<pid>`.
@@ -386,5 +428,28 @@ mod tests {
             "only the blocking target may remain: {leftovers:?}"
         );
         fs::remove_dir_all(&path).expect("clean up blocked target");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_keeps_owner_only_permissions_on_the_config() {
+        // The config file is meant to hold credentials (the GitHub token):
+        // the atomic temp file must be created 0600, otherwise the rename
+        // would publish it as 0644 (`0666 & !umask`) and widen a
+        // `chmod 600` config.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = TempDir::new("perms");
+        let path = dir.path().join("config.toml");
+        let config = Config {
+            scan_dirs: vec![PathBuf::from("/home/user/repos")],
+        };
+        save_to(&config, &path).expect("save");
+        let mode = fs::metadata(&path)
+            .expect("config metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "config must stay owner-only");
     }
 }
