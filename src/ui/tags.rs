@@ -22,7 +22,8 @@ pub struct TagsRender<'a> {
     pub list_state: &'a mut ListState,
     /// Open overlay, when any: the create input or the delete confirmation.
     pub modal: Option<&'a TagsModal>,
-    /// Current status line, if any; errors render red and persist.
+    /// Current status line, if any; errors render red and persist. While a
+    /// gauge is running it renders beside it instead of being hidden.
     pub status: Option<&'a StatusLine>,
     /// Push feedback; takes over the status line while present.
     pub remote_status: Option<&'a RemoteStatus>,
@@ -35,9 +36,12 @@ pub struct TagsRender<'a> {
 /// Render the tag list with the bottom status line, key hints, and the
 /// create/confirm overlays when active.
 ///
-/// Push feedback ([`RemoteStatus`]) outranks the plain status line, exactly
-/// like the single-repo view, so a running push shows its gauge and a failed
-/// one keeps its red reason until the next operation.
+/// Push feedback ([`RemoteStatus`]) takes over the status row, exactly like
+/// the single-repo view, so a running push shows its gauge and a failed one
+/// keeps its red reason until the next operation. A notice recorded while
+/// that gauge runs — `已有远端操作进行中` on a rejected second push — is not
+/// dropped: it shares the row on the gauge's right, see
+/// [`super::remote::render_remote_status`].
 pub fn render_tags(f: &mut Frame, mut state: TagsRender<'_>) {
     let area = f.area();
     let chunks = Layout::default()
@@ -52,7 +56,9 @@ pub fn render_tags(f: &mut Frame, mut state: TagsRender<'_>) {
     render_tag_list(f, chunks[0], &mut state);
 
     match state.remote_status {
-        Some(status) => super::remote::render_remote_status(f, chunks[1], status, state.remote_op),
+        Some(status) => {
+            super::remote::render_remote_status(f, chunks[1], status, state.remote_op, state.status)
+        }
         None => super::render_status_line(f, chunks[1], state.status),
     }
 

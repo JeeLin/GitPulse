@@ -45,9 +45,12 @@ pub fn render_repo(f: &mut Frame, mut state: RepoState<'_>) {
     // Render file list
     render_file_list(f, file_list_area, &mut state);
 
-    // Render status line: remote push/pull feedback takes precedence.
+    // Render status line: remote push/pull feedback takes precedence, and a
+    // notice written while the gauge runs shares the row with it (F1).
     match state.remote_status {
-        Some(status) => remote::render_remote_status(f, status_area, status, state.remote_op),
+        Some(status) => {
+            remote::render_remote_status(f, status_area, status, state.remote_op, state.status)
+        }
         None => render_status_line(f, status_area, state.status),
     }
 
@@ -382,8 +385,12 @@ mod tests {
         assert!(hints.contains("Esc取消"), "missing cancel hint: {hints}");
     }
 
+    /// The status row used to drop a pending status whenever the gauge was
+    /// on screen, which hid the `已有远端操作进行中` notice of a rejected
+    /// second push (F1). Both now share the row: the gauge keeps its own
+    /// label and the status renders beside it.
     #[test]
-    fn render_remote_progress_shows_gauge_instead_of_status_line() {
+    fn render_remote_progress_shows_gauge_and_pending_status_line() {
         let status = StatusLine {
             message: "底层状态行".to_string(),
             is_error: false,
@@ -401,8 +408,8 @@ mod tests {
         assert!(text.contains("正在push"), "missing gauge message: {text}");
         assert!(text.contains("42%"), "missing gauge percent: {text}");
         assert!(
-            !text.contains("底层状态行"),
-            "status line leaked over gauge: {text}"
+            text.contains("底层状态行"),
+            "pending status hidden by gauge: {text}"
         );
     }
 

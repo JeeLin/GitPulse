@@ -1116,6 +1116,9 @@ impl App {
     /// while another remote or batch op is in flight (they would contend on
     /// the same repository locks) reports `已有远端操作进行中` instead of
     /// dropping the key silently; outside the tag panel it stays a no-op.
+    /// That notice shares the status row with the running gauge (see
+    /// [`crate::ui::remote::render_remote_status`]), so it is never hidden
+    /// by the very progress display that triggered it.
     pub fn start_tag_push(&mut self, all: bool) {
         if self.view != View::Tags {
             return;
@@ -4749,5 +4752,40 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// F1: pressing `p` while a push is already in flight records
+    /// `已有远端操作进行中` — and that notice must be on screen beside the gauge
+    /// that used to swallow it, in the very same frame.
+    #[test]
+    fn tags_push_rejected_while_running_shows_notice_beside_gauge() {
+        let (dir, mut app) = app_with_tagged_repo("tags-push-busy", &["v1.0"]);
+        enter_tags(&mut app);
+
+        // A push already in flight, with its gauge on the status row.
+        let (_tx, rx) = mpsc::unbounded_channel::<Result<(), String>>();
+        app.remote_rx = Some(rx);
+        app.remote_op = "push";
+        app.remote_status = Some(RemoteStatus::Progress(Progress {
+            percent: 42,
+            message: "正在 push 标签 v1.0…".to_string(),
+        }));
+
+        assert!(app.handle_key(key(KeyCode::Char('p'))));
+        // The running operation is untouched: no second task, same gauge.
+        assert!(app.remote_rx.is_some());
+        assert!(matches!(app.remote_status, Some(RemoteStatus::Progress(_))));
+        let st = app.status.as_ref().expect("notice must be recorded");
+        assert!(!st.is_error, "{}", st.message);
+        assert_eq!(st.message, "已有远端操作进行中");
+
+        let text = render_text(&mut app);
+        assert!(
+            text.contains("已有远端操作进行中"),
+            "notice hidden by gauge: {text}"
+        );
+        assert!(text.contains("42%"), "gauge must stay on screen: {text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
