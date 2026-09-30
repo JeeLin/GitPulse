@@ -177,7 +177,7 @@ pub fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::Progress;
+    use crate::app::Progress;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 

@@ -1,25 +1,20 @@
-//! Remote operations: push / pull via the git CLI with progress feedback.
+//! Remote operations: push / pull via the git CLI.
 //!
 //! The git2 push/pull APIs require non-trivial credential callbacks, so these
 //! operations shell out to the `git` CLI inside `spawn_blocking` (design
 //! checkpoint 4: keep the runtime thread free while the child process runs).
 //! `pull` is strict fast-forward only (convention 7): diverged histories fail
 //! with an explicit error instead of merging or rebasing.
+//!
+//! The start message (0%) is pre-set by the App layer, and the completion is
+//! shown by the App layer from the task's return value, so these functions
+//! only run the git command and report its result.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use git2::Repository;
-
-/// Progress update emitted while a remote operation runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Progress {
-    /// Completion percentage (0-100).
-    pub percent: u8,
-    /// Human-readable status message.
-    pub message: String,
-}
 
 /// Resolve the remote to operate on: `origin` when present, else the first
 /// configured remote; errors when the repository has no remote at all.
@@ -117,60 +112,46 @@ fn git_output(repo_path: &Path, args: &[&str]) -> Result<std::process::Output> {
 }
 
 /// Shared body of `push`, `push_tag` and `push_all_tags`: resolve the remote,
-/// run `git push` with the arguments `args` builds for that remote, then emit
-/// `done_msg`.
+/// run `git push` with the arguments `args` builds for that remote, then
+/// return its result.
 ///
 /// The 0% start message is emitted by the App layer only (it pre-sets
-/// `RemoteStatus::Progress(0)` before spawning), so the git layer sends the
-/// completion event alone.
-fn push_refs(
-    repo_path: &Path,
-    args: impl FnOnce(&str) -> Result<Vec<String>>,
-    done_msg: &str,
-    on_progress: impl Fn(Progress),
-) -> Result<()> {
+/// `RemoteStatus::Progress(0)` before spawning), and the completion is
+/// displayed by the App layer from the returned result.
+fn push_refs(repo_path: &Path, args: impl FnOnce(&str) -> Result<Vec<String>>) -> Result<()> {
     let remote = resolve_remote(repo_path)?;
     let mut argv = vec!["push".to_string()];
     argv.extend(args(&remote)?);
     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
     git_output(repo_path, &refs)?;
-    on_progress(Progress {
-        percent: 100,
-        message: done_msg.to_string(),
-    });
     Ok(())
 }
 
-/// Push the current branch to its remote with progress feedback.
+/// Push the current branch to its remote.
 ///
 /// Uses `git push -u <remote> <branch>` so the first push to a freshly
 /// configured remote also establishes the upstream tracking branch.
-pub async fn push(repo_path: &Path, on_progress: impl Fn(Progress) + Send + 'static) -> Result<()> {
+pub async fn push(repo_path: &Path) -> Result<()> {
     let repo_path: PathBuf = repo_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        push_refs(
-            &repo_path,
-            |remote| {
-                let branch = current_branch(&repo_path)?;
-                Ok(vec![
-                    "-u".to_string(),
-                    remote.to_string(),
-                    branch.to_string(),
-                ])
-            },
-            "push 完成",
-            &on_progress,
-        )
+        push_refs(&repo_path, |remote| {
+            let branch = current_branch(&repo_path)?;
+            Ok(vec![
+                "-u".to_string(),
+                remote.to_string(),
+                branch.to_string(),
+            ])
+        })
     })
     .await?
 }
 
-/// Pull the current branch with progress feedback, fast-forward only.
+/// Pull the current branch, fast-forward only.
 ///
 /// Falls back to explicit `<remote> <branch>` arguments when the branch has
 /// no upstream yet; diverged histories fail with an explicit error
 /// (convention 7) instead of merging or rebasing.
-pub async fn pull(repo_path: &Path, on_progress: impl Fn(Progress) + Send + 'static) -> Result<()> {
+pub async fn pull(repo_path: &Path) -> Result<()> {
     let repo_path: PathBuf = repo_path.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<()> {
         let remote = resolve_remote(&repo_path)?;
@@ -181,10 +162,6 @@ pub async fn pull(repo_path: &Path, on_progress: impl Fn(Progress) + Send + 'sta
             vec!["pull", "--ff-only", remote.as_str(), branch.as_str()]
         };
         git_output(&repo_path, &args)?;
-        on_progress(Progress {
-            percent: 100,
-            message: "pull 完成".to_string(),
-        });
         Ok(())
     })
     .await?
@@ -199,20 +176,13 @@ pub async fn pull(repo_path: &Path, on_progress: impl Fn(Progress) + Send + 'sta
 ///
 /// The repository must have at least one remote configured; otherwise an
 /// error is returned with a readable reason (matching `push` behavior).
-pub async fn push_tag(
-    repo_path: &Path,
-    tag: &str,
-    on_progress: impl Fn(Progress) + Send + 'static,
-) -> Result<()> {
+pub async fn push_tag(repo_path: &Path, tag: &str) -> Result<()> {
     let repo_path: PathBuf = repo_path.to_path_buf();
     let tag = tag.to_string();
     tokio::task::spawn_blocking(move || {
-        push_refs(
-            &repo_path,
-            |remote| Ok(vec![remote.to_string(), format!("refs/tags/{tag}")]),
-            &format!("标签 {tag} push 完成"),
-            &on_progress,
-        )
+        push_refs(&repo_path, |remote| {
+            Ok(vec![remote.to_string(), format!("refs/tags/{tag}")])
+        })
     })
     .await?
 }
@@ -222,18 +192,12 @@ pub async fn push_tag(
 /// Uses `git push <remote> --tags` so that every local tag is transferred.
 /// The repository must have at least one remote configured; otherwise an error
 /// is returned with a readable reason (matching `push` behavior).
-pub async fn push_all_tags(
-    repo_path: &Path,
-    on_progress: impl Fn(Progress) + Send + 'static,
-) -> Result<()> {
+pub async fn push_all_tags(repo_path: &Path) -> Result<()> {
     let repo_path: PathBuf = repo_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        push_refs(
-            &repo_path,
-            |remote| Ok(vec![remote.to_string(), "--tags".to_string()]),
-            "所有标签 push 完成",
-            &on_progress,
-        )
+        push_refs(&repo_path, |remote| {
+            Ok(vec![remote.to_string(), "--tags".to_string()])
+        })
     })
     .await?
 }
@@ -242,7 +206,6 @@ pub async fn push_all_tags(
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::{Arc, Mutex};
 
     fn base_dir(tag: &str) -> PathBuf {
         let dir =
@@ -369,7 +332,7 @@ mod tests {
         init_repo(&dir);
         commit_file(&dir, "a.txt", "v1\n", "v1");
 
-        let err = push(&dir, |_| {}).await.unwrap_err();
+        let err = push(&dir).await.unwrap_err();
         assert!(
             err.to_string().contains("未配置远端"),
             "unexpected error: {err}"
@@ -394,15 +357,7 @@ mod tests {
         }
         commit_file(&work, "a.txt", "v1\n", "v1");
 
-        let messages: Arc<Mutex<Vec<Progress>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink = messages.clone();
-        push(&work, move |p| sink.lock().unwrap().push(p))
-            .await
-            .expect("first push must succeed");
-        {
-            let messages = messages.lock().unwrap();
-            assert!(messages.iter().any(|p| p.percent == 100), "{messages:?}");
-        }
+        push(&work).await.expect("first push must succeed");
 
         // Second clone advances the remote.
         let other = root.join("other");
@@ -414,7 +369,7 @@ mod tests {
             .unwrap();
         drop(config2);
         commit_file(&other, "b.txt", "v2\n", "v2");
-        push(&other, |_| {}).await.expect("clone push must succeed");
+        push(&other).await.expect("clone push must succeed");
 
         // Drop the upstream so the pull exercises the explicit-args fallback.
         let mut untrack = Command::new("git");
@@ -428,27 +383,21 @@ mod tests {
             .unwrap();
         assert!(untrack.status.success(), "unset-upstream failed");
 
-        pull(&work, |_| {})
-            .await
-            .expect("ff-only pull must succeed");
+        pull(&work).await.expect("ff-only pull must succeed");
         assert!(
             work.join("b.txt").exists(),
             "pull did not bring the remote commit"
         );
 
         // An up-to-date push still succeeds (and re-sets the upstream).
-        push(&work, |_| {})
-            .await
-            .expect("up-to-date push must succeed");
+        push(&work).await.expect("up-to-date push must succeed");
 
         // Diverged histories: local commit + advanced remote -> ff-only error.
         commit_file(&work, "c.txt", "local\n", "local-only");
         commit_file(&other, "d.txt", "remote\n", "remote-only");
-        push(&other, |_| {})
-            .await
-            .expect("second clone push must succeed");
+        push(&other).await.expect("second clone push must succeed");
 
-        let err = pull(&work, |_| {}).await.unwrap_err();
+        let err = pull(&work).await.unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("pull 失败"), "missing error reason: {msg}");
 
@@ -474,15 +423,9 @@ mod tests {
         // Create a tag named "v1.0".
         crate::git::create_tag(&work, "v1.0").unwrap();
 
-        let messages: Arc<Mutex<Vec<Progress>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink = messages.clone();
-        push_tag(&work, "v1.0", move |p| sink.lock().unwrap().push(p))
+        push_tag(&work, "v1.0")
             .await
             .expect("push tag must succeed");
-        {
-            let messages = messages.lock().unwrap();
-            assert!(messages.iter().any(|p| p.percent == 100), "{messages:?}");
-        }
 
         // Verify the tag exists in the bare repo.
         let origin = Repository::open(&origin_path).unwrap();
@@ -512,15 +455,9 @@ mod tests {
         crate::git::create_tag(&work, "v1.0").unwrap();
         crate::git::create_tag(&work, "v2.0").unwrap();
 
-        let messages: Arc<Mutex<Vec<Progress>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink = messages.clone();
-        push_all_tags(&work, move |p| sink.lock().unwrap().push(p))
+        push_all_tags(&work)
             .await
             .expect("push all tags must succeed");
-        {
-            let messages = messages.lock().unwrap();
-            assert!(messages.iter().any(|p| p.percent == 100), "{messages:?}");
-        }
 
         // Verify both tags exist in the bare repo.
         let origin = Repository::open(&origin_path).unwrap();
@@ -543,7 +480,7 @@ mod tests {
         // Create a tag to push.
         crate::git::create_tag(&dir, "v1.0").unwrap();
 
-        let err = push_tag(&dir, "v1.0", |_| {}).await.unwrap_err();
+        let err = push_tag(&dir, "v1.0").await.unwrap_err();
         assert!(
             err.to_string().contains("未配置远端"),
             "unexpected error: {err}"

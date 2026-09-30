@@ -44,7 +44,7 @@ pub fn render_remote_status(f: &mut Frame, area: Rect, status: &RemoteStatus, op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::Progress;
+    use crate::app::Progress;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 

@@ -23,7 +23,7 @@ pub use history::{
     commit_detail, layout_graph, list_commits, CommitDetail, CommitRow, GraphCell, RefKind,
     MAX_LANES,
 };
-pub use remote::{pull, push, push_all_tags, push_tag, Progress};
+pub use remote::{pull, push, push_all_tags, push_tag};
 // part of the public Git API contract (M1 subtask 3)
 pub use status::{query_status, RepoInfo};
 pub use tag::{create_tag, delete_tag, list_tags, TagInfo};

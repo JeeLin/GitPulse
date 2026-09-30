@@ -15,7 +15,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::git::{self, show_path, BranchInfo, FileEntry, Progress, RepoInfo};
+use crate::git::{self, show_path, BranchInfo, FileEntry, RepoInfo};
 use crate::git::{CommitDetail, CommitRow, GraphCell, TagInfo};
 
 /// Terminal type used by the TUI.
@@ -220,12 +220,13 @@ pub enum RemoteStatus {
     Error(String),
 }
 
-/// Message sent from a background push/pull task over the progress channel.
-enum RemoteEvent {
-    /// Intermediate progress update.
-    Progress(Progress),
-    /// Terminal result of the operation.
-    Done(Result<(), String>),
+/// Progress update shown on the status line while a remote operation runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Progress {
+    /// Completion percentage (0-100).
+    pub percent: u8,
+    /// Human-readable status message.
+    pub message: String,
 }
 
 /// One line of the dashboard batch progress log: one repository (convention 6).
@@ -301,8 +302,8 @@ pub struct App {
     pub remote_status: Option<RemoteStatus>,
     /// Label of the running/last remote operation (`push` / `pull`).
     pub remote_op: &'static str,
-    /// Receiver for background push/pull progress and completion events.
-    remote_rx: Option<mpsc::UnboundedReceiver<RemoteEvent>>,
+    /// Receiver for background push/pull completion events.
+    remote_rx: Option<mpsc::UnboundedReceiver<Result<(), String>>>,
     /// Rolling per-repository batch progress log (convention 6).
     pub batch_log: Vec<BatchLogLine>,
     /// Label of the running/last batch operation (`pull` / `fetch`).
@@ -613,7 +614,7 @@ impl App {
 
     /// Start a background push (`op == "push"`) or pull (`op == "pull"`).
     ///
-    /// The task runs off the UI thread; progress arrives on an mpsc channel
+    /// The task runs off the UI thread; its result arrives on an mpsc channel
     /// consumed each frame (convention 1), so the UI stays interactive while
     /// the operation runs. No-op while another remote or batch op is in
     /// flight (they would contend on the same repository locks), or outside
@@ -634,38 +635,28 @@ impl App {
         } else {
             "正在 pull…".to_string()
         };
-        self.spawn_remote_task(op, message, move |tx| async move {
+        self.spawn_remote_task(op, message, move || async move {
             match op {
-                "push" => {
-                    git::push(&repo_path, move |p| {
-                        let _ = tx.send(RemoteEvent::Progress(p));
-                    })
-                    .await
-                }
-                _ => {
-                    git::pull(&repo_path, move |p| {
-                        let _ = tx.send(RemoteEvent::Progress(p));
-                    })
-                    .await
-                }
+                "push" => git::push(&repo_path).await,
+                _ => git::pull(&repo_path).await,
             }
         });
     }
 
-    /// Wire up the shared remote progress channel and spawn `task` as the
+    /// Wire up the shared remote completion channel and spawn `task` as the
     /// background worker behind it (convention 1).
     ///
     /// The receiver is armed on `remote_rx`, `remote_op` labels the running
     /// operation, `message` is published as the initial
     /// [`RemoteStatus::Progress`] and the plain status line is cleared.
-    /// `task` receives the progress sink and resolves to the operation's
-    /// result, which is forwarded to [`App::poll_remote`] as
-    /// [`RemoteEvent::Done`] — the template every remote op shares.
+    /// `task` resolves to the operation's result, which is forwarded to
+    /// [`App::poll_remote`] as the terminal event — the template every
+    /// remote op shares.
     fn spawn_remote_task<F>(
         &mut self,
         op: &'static str,
         message: String,
-        task: impl FnOnce(mpsc::UnboundedSender<RemoteEvent>) -> F + Send + 'static,
+        task: impl FnOnce() -> F + Send + 'static,
     ) where
         F: std::future::Future<Output = Result<()>> + Send + 'static,
     {
@@ -678,42 +669,35 @@ impl App {
         }));
         self.status = None;
         tokio::spawn(async move {
-            let result = task(tx.clone()).await;
-            let _ = tx.send(RemoteEvent::Done(result.map_err(|e| e.to_string())));
+            let _ = tx.send(task().await.map_err(|e| e.to_string()));
         });
     }
 
-    /// Drain pending progress events; called once per frame (convention 1).
+    /// Receive the pending completion event; called once per frame
+    /// (convention 1). The spawned task sends exactly one terminal result,
+    /// so a single receive per frame is enough.
     pub fn poll_remote(&mut self) {
         let Some(rx) = self.remote_rx.as_mut() else {
             return;
         };
-        loop {
-            match rx.try_recv() {
-                Ok(RemoteEvent::Progress(p)) => {
-                    self.remote_status = Some(RemoteStatus::Progress(p));
-                }
-                Ok(RemoteEvent::Done(Ok(()))) => {
-                    self.remote_status = Some(RemoteStatus::Success);
-                    self.remote_rx = None;
-                    if let Some(idx) = self.current_repo {
-                        if idx < self.repos.len() {
-                            self.refresh_repo_status(idx);
-                        }
+        match rx.try_recv() {
+            Ok(Ok(())) => {
+                self.remote_status = Some(RemoteStatus::Success);
+                self.remote_rx = None;
+                if let Some(idx) = self.current_repo {
+                    if idx < self.repos.len() {
+                        self.refresh_repo_status(idx);
                     }
-                    return;
                 }
-                Ok(RemoteEvent::Done(Err(err))) => {
-                    self.remote_status = Some(RemoteStatus::Error(err));
-                    self.remote_rx = None;
-                    return;
-                }
-                Err(mpsc::error::TryRecvError::Empty) => return,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.remote_status = Some(RemoteStatus::Error("远端任务意外退出".to_string()));
-                    self.remote_rx = None;
-                    return;
-                }
+            }
+            Ok(Err(err)) => {
+                self.remote_status = Some(RemoteStatus::Error(err));
+                self.remote_rx = None;
+            }
+            Err(mpsc::error::TryRecvError::Empty) => {}
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.remote_status = Some(RemoteStatus::Error("远端任务意外退出".to_string()));
+                self.remote_rx = None;
             }
         }
     }
@@ -1126,7 +1110,7 @@ impl App {
     /// Start a background push of the selected tag (`all == false`) or of
     /// every local tag (`all == true`) from the tag panel.
     ///
-    /// Reuses the push/pull progress channel (convention 1): progress
+    /// Reuses the push/pull completion channel (convention 1): the result
     /// arrives on an mpsc receiver consumed each frame and renders through
     /// [`RemoteStatus`] on the panel's status line. Pressing `p` / `a`
     /// while another remote or batch op is in flight (they would contend on
@@ -1165,20 +1149,10 @@ impl App {
             Some(name) => format!("正在 push 标签 {name}…"),
             None => "正在 push 所有标签…".to_string(),
         };
-        self.spawn_remote_task("push", message, move |tx| async move {
+        self.spawn_remote_task("push", message, move || async move {
             match tag {
-                Some(name) => {
-                    git::push_tag(&path, &name, move |p| {
-                        let _ = tx.send(RemoteEvent::Progress(p));
-                    })
-                    .await
-                }
-                None => {
-                    git::push_all_tags(&path, move |p| {
-                        let _ = tx.send(RemoteEvent::Progress(p));
-                    })
-                    .await
-                }
+                Some(name) => git::push_tag(&path, &name).await,
+                None => git::push_all_tags(&path).await,
             }
         });
     }
@@ -3773,7 +3747,7 @@ mod tests {
         drop(btx);
 
         // Remote already running: label untouched.
-        let (rtx, rrx) = mpsc::unbounded_channel::<RemoteEvent>();
+        let (rtx, rrx) = mpsc::unbounded_channel::<Result<(), String>>();
         app.remote_rx = Some(rrx);
         app.remote_op = "push";
         app.start_remote("pull");
@@ -3794,30 +3768,16 @@ mod tests {
     }
 
     #[test]
-    fn poll_remote_drains_progress_done_and_disconnect() {
+    fn poll_remote_drains_done_and_disconnect() {
         let mut app = App::new(Config::default());
 
         // No receiver: no-op.
         app.poll_remote();
 
+        // Done(Err) surfaces the reason and closes the receiver.
         let (tx, rx) = mpsc::unbounded_channel();
         app.remote_rx = Some(rx);
-        tx.send(RemoteEvent::Progress(Progress {
-            percent: 40,
-            message: "40%".to_string(),
-        }))
-        .unwrap();
-        app.poll_remote();
-        match &app.remote_status {
-            Some(RemoteStatus::Progress(p)) => {
-                assert_eq!(p.percent, 40);
-                assert_eq!(p.message, "40%");
-            }
-            other => panic!("expected progress, got {other:?}"),
-        }
-        assert!(app.remote_rx.is_some()); // still in flight
-
-        tx.send(RemoteEvent::Done(Err("boom".to_string()))).unwrap();
+        tx.send(Err("boom".to_string())).unwrap();
         app.poll_remote();
         assert_eq!(
             app.remote_status,
@@ -3841,7 +3801,7 @@ mod tests {
         app.current_repo = Some(0);
         let (tx, rx) = mpsc::unbounded_channel();
         app.remote_rx = Some(rx);
-        tx.send(RemoteEvent::Done(Ok(()))).unwrap();
+        tx.send(Ok(())).unwrap();
         app.poll_remote();
         assert_eq!(app.remote_status, Some(RemoteStatus::Success));
         assert!(app.remote_rx.is_none());
@@ -3849,9 +3809,9 @@ mod tests {
         assert!(st.is_error, "{}", st.message);
         let _ = std::fs::remove_dir_all(&broken);
 
-        // Sender dropped without Done: explicit disconnect error.
+        // Sender dropped without a result: explicit disconnect error.
         let mut app = App::new(Config::default());
-        let (tx, rx) = mpsc::unbounded_channel::<RemoteEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<Result<(), String>>();
         app.remote_rx = Some(rx);
         drop(tx);
         app.poll_remote();

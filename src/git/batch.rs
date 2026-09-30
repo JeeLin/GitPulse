@@ -58,7 +58,7 @@ pub async fn batch_pull(
     let mut results = Vec::with_capacity(repos.len());
     for (i, repo) in repos.iter().enumerate() {
         progress(i, "进行中");
-        let result = remote::pull(&repo.path, |_| {}).await;
+        let result = remote::pull(&repo.path).await;
         let message = match &result {
             Ok(()) => "成功".to_string(),
             Err(err) => format!("失败: {err}"),
@@ -177,7 +177,7 @@ mod tests {
             repo.remote("origin", &origin_str).unwrap();
         }
         commit_file(&work, "a.txt", "v1\n", "v1");
-        crate::git::push(&work, |_| {})
+        crate::git::push(&work)
             .await
             .expect("initial push must succeed");
 
