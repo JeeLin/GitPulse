@@ -93,9 +93,16 @@ fn encode_non_utf8<S>(path: &Path, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
+    // Same spelling as [`super::git::show_path`] would render, but this
+    // module cannot borrow from the git layer (G36): the exact UTF-8 text
+    // when available, the `Debug` escape otherwise — never the lossy
+    // U+FFFD of `Path::display`.
+    let shown = path
+        .to_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{path:?}"));
     Err(serde::ser::Error::custom(format!(
-        "cannot store path {} in the config",
-        path.display()
+        "cannot store path {shown} in the config"
     )))
 }
 
@@ -176,6 +183,13 @@ fn path_bytes(path: &Path) -> Vec<u8> {
 #[cfg(unix)]
 fn path_from_bytes(bytes: Vec<u8>) -> Result<PathBuf, &'static str> {
     use std::os::unix::ffi::OsStringExt as _;
+    // Unix accepts any byte but a path can never contain NUL: the syscall
+    // layer would truncate it, so the config would silently point somewhere
+    // else. Reject it here (V10) instead of letting the failure surface far
+    // away in the directory scanner.
+    if bytes.contains(&0) {
+        return Err("`path_hex` bytes must not contain NUL");
+    }
     Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
 }
 
@@ -183,6 +197,9 @@ fn path_from_bytes(bytes: Vec<u8>) -> Result<PathBuf, &'static str> {
 /// are UTF-8.
 #[cfg(not(unix))]
 fn path_from_bytes(bytes: Vec<u8>) -> Result<PathBuf, &'static str> {
+    if bytes.contains(&0) {
+        return Err("`path_hex` bytes must not contain NUL");
+    }
     String::from_utf8(bytes)
         .map(PathBuf::from)
         .map_err(|_| "`path_hex` bytes are not valid UTF-8 on this platform")
@@ -193,7 +210,10 @@ fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        write!(out, "{byte:02x}").expect("writing to a String never fails");
+        // Writing into a `String` cannot fail, and a failed write would only
+        // drop one hex digit — `let _ =` keeps production code free of
+        // `expect` (G32) and matches [`super::show_bytes`].
+        let _ = write!(out, "{byte:02x}");
     }
     out
 }

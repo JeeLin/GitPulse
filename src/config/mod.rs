@@ -64,8 +64,14 @@ impl Config {
     /// Both scan-dir wire forms are accepted: the legacy plain strings and
     /// the `{ path_hex = .. }` markers for non-UTF-8 paths (documented in
     /// the `config::encoding` module).
+    ///
+    /// Any temp file a crashed earlier run left beside the config
+    /// (`<file name>.tmp-*`) is swept first (V7); see
+    /// [`cleanup_stale_temps`].
     pub fn load() -> Result<Self> {
-        load_from(&config_path())
+        let path = config_path();
+        cleanup_stale_temps(&path);
+        load_from(&path)
     }
 
     /// Save the config to [`config_path`], creating the config dir when missing.
@@ -136,6 +142,10 @@ fn write_atomically(path: &Path, contents: &str) -> Result<()> {
     let temp = temp_path(path);
     write_temp(&temp, contents)
         .and_then(|_| fs::rename(&temp, path))
+        // The temp file is best-effort cleanup: this arm already carries the
+        // original `fs::write`/`fs::rename` error, and that is the error
+        // worth reporting — a failed cleanup is deliberately swallowed so
+        // the caller still sees why the *save* failed (G37).
         .map_err(|source| {
             let _ = fs::remove_file(&temp);
             ConfigError::Write {
@@ -148,25 +158,23 @@ fn write_atomically(path: &Path, contents: &str) -> Result<()> {
 
 /// Create `temp` with owner-only permissions, write `contents` into it, and
 /// flush it to disk so the following rename publishes complete bytes.
+///
+/// The file is opened with `create_new` (V7): an existing path — including
+/// a symlink planted at a predicted temp name — is never followed or
+/// truncated. The only legitimate conflict is a leftover temp, so the
+/// offending entry is removed once and the open retried; `remove_file` on a
+/// symlink drops the link itself, not its target.
 fn write_temp(temp: &Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write as _;
 
-    #[cfg(unix)]
-    let mut file = {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(temp)?
-    };
-    #[cfg(not(unix))]
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(temp)?;
+    let mut file = open_temp(temp).or_else(|err| {
+        if err.kind() == std::io::ErrorKind::AlreadyExists {
+            let _ = fs::remove_file(temp);
+            open_temp(temp)
+        } else {
+            Err(err)
+        }
+    })?;
 
     // `mode` only applies when the file is created; a leftover temp file
     // from an earlier run keeps its old mode, so re-assert `0600` before
@@ -181,7 +189,33 @@ fn write_temp(temp: &Path, contents: &str) -> std::io::Result<()> {
     file.sync_all()
 }
 
+/// Open a fresh owner-only temp file, failing when `temp` already exists.
+fn open_temp(temp: &Path) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(temp)?
+    };
+    #[cfg(not(unix))]
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp)?;
+    Ok(file)
+}
+
 /// The sibling temp file used by [`write_atomically`]: `<name>.tmp-<pid>`.
+///
+/// The name stays deterministic for a given run — the threat model is a
+/// same-permission local writer (V7), and predictability alone cannot
+/// redirect the write: [`write_temp`] opens with `create_new`, never
+/// following a planted symlink, and removes a same-pid leftover once before
+/// retrying. The `tmp-` marker names the prefix [`cleanup_stale_temps`]
+/// sweeps at startup so a crash cannot litter the config dir forever.
 fn temp_path(path: &Path) -> PathBuf {
     let mut name = match path.file_name() {
         Some(name) => name.to_os_string(),
@@ -189,6 +223,38 @@ fn temp_path(path: &Path) -> PathBuf {
     };
     name.push(format!(".tmp-{}", std::process::id()));
     path.with_file_name(name)
+}
+
+/// Best-effort removal of the temp files a crashed run left beside `path`:
+/// every sibling named `<config file name>.tmp-*`.
+///
+/// Called once from [`Config::load`] at startup (V7). All failures are
+/// swallowed — a stale temp is inert, and a read-only config directory must
+/// not keep the config from loading.
+fn cleanup_stale_temps(path: &Path) {
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let Some(name) = path.file_name() else {
+        return;
+    };
+    if dir.as_os_str().is_empty() {
+        return;
+    }
+    let mut prefix = name.to_os_string();
+    prefix.push(".tmp-");
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .as_encoded_bytes()
+            .starts_with(prefix.as_encoded_bytes())
+        {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Serialize tests that exercise the shared, redirected config file.
@@ -451,5 +517,61 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "config must stay owner-only");
+    }
+
+    #[test]
+    fn cleanup_stale_temps_removes_siblings_and_keeps_the_config() {
+        // A crashed run leaves `<name>.tmp-*` beside the config; startup
+        // sweeps exactly that prefix (V7) without touching the config
+        // itself or unrelated files.
+        let dir = TempDir::new("stale-temp");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "scan_dirs = []\n").expect("config");
+        let stale_one = dir.path().join("config.toml.tmp-111-dead");
+        let stale_two = dir.path().join("config.toml.tmp-999-beef");
+        let unrelated = dir.path().join("other.toml.tmp-1-1");
+        fs::write(&stale_one, "junk").expect("stale one");
+        fs::write(&stale_two, "junk").expect("stale two");
+        fs::write(&unrelated, "keep").expect("unrelated");
+
+        cleanup_stale_temps(&path);
+
+        assert!(!stale_one.exists(), "stale temp must go");
+        assert!(!stale_two.exists(), "stale temp must go");
+        assert!(path.exists(), "the config itself must stay");
+        assert!(unrelated.exists(), "only this config's temps are swept");
+        fs::remove_dir_all(&dir.path().to_path_buf()).expect("cleanup");
+    }
+
+    /// A temp path pre-planted as a symlink must never be written through:
+    /// `create_new` fails on the existing link, the retry removes the link
+    /// itself (not its target) and creates a fresh regular file (V7).
+    #[cfg(unix)]
+    #[test]
+    fn write_temp_refuses_a_planted_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new("planted-symlink");
+        let temp = dir.path().join("config.toml.tmp-planted");
+        let victim = dir.path().join("victim.txt");
+        fs::write(&victim, "precious").expect("victim");
+        symlink(&victim, &temp).expect("plant link");
+
+        write_temp(&temp, "new bytes").expect("retry creates a fresh file");
+
+        assert!(
+            !fs::symlink_metadata(&temp)
+                .expect("temp metadata")
+                .file_type()
+                .is_symlink(),
+            "the planted link must be replaced, not written through"
+        );
+        assert_eq!(
+            fs::read_to_string(&victim).expect("victim content"),
+            "precious",
+            "the symlink target must stay untouched"
+        );
+        fs::remove_file(&temp).expect("remove temp");
+        fs::remove_dir_all(&dir.path().to_path_buf()).expect("cleanup");
     }
 }
