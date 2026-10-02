@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-02
+### Added
+- 提交历史视图：提交列表 + 分支/tag/HEAD 标记 + j/k 导航 + 提交详情（超 500 文件截断计数）
+- DAG 图示：分支/合并拓扑连线（`layout_graph`，固定 `MAX_LANES=6` 行宽，`GRAPH_WIDTH` 单值源）
+- tag 管理面板：列表、创建、删除（确认框），非 UTF-8 tag 守卫与非 commit tag 枚举（悬空/断链跳过）
+- tag 推送：单 tag / 全量（`--tags`）推送 + 远端状态行运行中/成功/失败三态反馈
+- 状态栏类型下沉 `src/ui/status.rs`（`StatusLine`/`RemoteStatus` 渲染）
+
+### Changed
+- `RemoteStatus::Progress` → `Running(String)`：删除冻结 0% 百分比，改为运行文本
+- `HistoryState.graph` 类型收敛 `Vec<Vec<char>>`（DAG 列单点生成）
+- 推送/拉取改用全 refspec `refs/heads/<branch>` / `refs/tags/<tag>`，分支/tag 名不可被解析为 git 选项
+- 远端名拒绝 `-` 开头；SSH 远端追加 `-oBatchMode=yes` 防止会话级锁死
+- 非交互远端操作：`GIT_TERMINAL_PROMPT=0` + askpass 清空 + 复用系统 credential helper
+
+### Fixed
+- 配置原子写：`create_new` 建临时文件 + 拒绝 planted symlink + 启动清 stale temp + 0600 权限
+- 非 UTF-8 路径：NUL 字节拒绝、错误链透出、`Config::save` 原子替换防回滚
+- 批量 pull 凭据阻塞：4 处 `Command::new("git")` 统一接入 `configure_git_cmd`
+- HistoryState/TagsState 光标逻辑收敛为 `select_row`/`move_row`（消除重复）
+- 模块文档与实现同步（进度百分比、死代码注释）
+
+### Removed
+- `git/mod.rs` 死导出：`RefMark`/`GraphCell` re-export（无非测试消费者）
+- `app.rs` 死代码 `current_repo_name`
+
 ## [0.2.0] - 2026-09-27
 ### Added
 - 配置管理面板：仪表盘空态引导、配置视图、添加/删除扫描目录、目录选择器
