@@ -4,7 +4,7 @@
 - 语言：Rust
 - TUI：ratatui
 - Git：git2-rs
-- GitHub API：octocrab
+- GitHub：octocrab（typed API，primary）+ gh CLI（auth token 解析，零配置；无 gh 时 GITHUB_TOKEN 兜底）
 - 异步：tokio
 - 依赖管理：mise
 
