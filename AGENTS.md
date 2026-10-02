@@ -14,7 +14,7 @@ GitPulse/
 ├── docs/
 │   ├── PRODUCT.md          # 产品文档
 │   └── DEVELOPMENT.md      # 开发设计文档
-├── .dev-flow/
+├── .mdflow/
 │   └── milestones/         # 里程碑文档与流程报告（本地存储，已 gitignore，不入库）
 ├── src/
 │   ├── main.rs
