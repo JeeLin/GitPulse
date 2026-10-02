@@ -6,9 +6,10 @@
 //! `pull` is strict fast-forward only (convention 7): diverged histories fail
 //! with an explicit error instead of merging or rebasing.
 //!
-//! The start message (0%) is pre-set by the App layer, and the completion is
-//! shown by the App layer from the task's return value, so these functions
-//! only run the git command and report its result.
+//! The start message is pre-set by the App layer as a running text (e.g.
+//! `正在 push…`), and the completion is shown by the App layer from the task's
+//! return value, so these functions only run the git command and report its
+//! result.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
