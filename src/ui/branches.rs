@@ -8,8 +8,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::StatusLine;
 use crate::git::BranchInfo;
+use crate::ui::status::StatusLine;
 
 use super::hint;
 
@@ -77,21 +77,12 @@ pub fn render_branches(f: &mut Frame, mut state: BranchesState<'_>) {
 /// mirrors each overlay's own title / `y n` line.
 fn key_hints(input_open: bool, confirm_open: bool) -> Line<'static> {
     if confirm_open {
-        // Same y/n wording as the overlay itself.
-        [
-            hint("y", "确认"),
-            hint("n", "取消"),
-            hint("Esc", "取消对话框"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        // Shared rows (G5): the y/n/Esc wording of the confirmation, and
+        // `Enter 创建` matching the create-input title
+        // `新建分支 (Enter 创建 / Esc 取消)`.
+        super::confirm_hints()
     } else if input_open {
-        // Matches the create-input title `新建分支 (Enter 创建 / Esc 取消)`.
-        [hint("Enter", "创建"), hint("Esc", "取消")]
-            .into_iter()
-            .flatten()
-            .collect()
+        super::submit_hints("创建")
     } else {
         [
             hint("j/k", "选择"),

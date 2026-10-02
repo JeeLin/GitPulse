@@ -4,18 +4,27 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
-use crate::app::StatusLine;
-use crate::git::{CommitDetail, CommitRow, GraphCell, RefKind};
+use crate::git::{CommitDetail, CommitRow, RefKind};
+use crate::ui::status::StatusLine;
 
 use super::hint;
 
 /// Inner width of the DAG column: one cell per lane, capped at the lanes
 /// `git::layout_graph` ever produces (`git::MAX_LANES`).
 const GRAPH_WIDTH: usize = crate::git::MAX_LANES;
+
+/// Columns the DAG column's own [`Block`] takes beyond [`GRAPH_WIDTH`]: the
+/// vertical border on each side costs one cell (G23).
+const GRAPH_BORDER_COLUMNS: u16 = 2;
+
+/// Empty-state copy of a repository without history (G7): an unborn HEAD
+/// loads zero commits, which is a valid state rather than a failure, so the
+/// panel says so instead of showing an empty list.
+const EMPTY_HISTORY: &str = "暂无提交记录";
 
 /// Borrowed render state for the history view, referencing `App.history`
 /// directly so no mock data source exists (checkpoint 2).
@@ -24,10 +33,15 @@ pub struct HistoryRender<'a> {
     pub commits: &'a [CommitRow],
     /// Detail payload of the highlighted commit, from `App.history.detail`.
     pub detail: Option<&'a CommitDetail>,
-    /// One DAG row per entry of `commits`, from `git::layout_graph`.
-    pub graph: &'a [Vec<GraphCell>],
+    /// One DAG row per entry of `commits`, from `git::layout_graph`: exactly
+    /// [`GRAPH_WIDTH`] characters, each column already holding its glyph.
+    pub graph: &'a [Vec<char>],
     /// Selection cursor shared across frames.
     pub list_state: &'a mut ListState,
+    /// Index of the highlighted commit, from `App.history.selected` — the
+    /// single source of "which row is selected" the renderer reads (G9), so
+    /// the view no longer re-derives it from `list_state`.
+    pub selected: usize,
     /// Name of the repository being read (shown in the title).
     pub repo_name: &'a str,
     /// Current status line, if any; errors render red and persist.
@@ -50,21 +64,29 @@ pub fn render_history(f: &mut Frame, mut state: HistoryRender<'_>) {
         ])
         .split(area);
 
+    let panes_area = chunks[0];
+    let status_area = chunks[1];
+    let hints_area = chunks[2];
+
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(GRAPH_WIDTH as u16 + 2), // DAG column + borders
-            Constraint::Min(24),                        // commit list
-            Constraint::Percentage(40),                 // detail pane
+            Constraint::Length(GRAPH_WIDTH as u16 + GRAPH_BORDER_COLUMNS), // DAG + borders
+            Constraint::Min(24),                                           // commit list
+            Constraint::Percentage(40),                                    // detail pane
         ])
-        .split(chunks[0]);
+        .split(panes_area);
 
-    render_commit_list(f, columns[1], &mut state);
-    render_graph(f, columns[0], &state);
-    render_detail(f, columns[2], &state);
+    let graph_area = columns[0];
+    let list_area = columns[1];
+    let detail_area = columns[2];
 
-    super::render_status_line(f, chunks[1], state.status);
-    f.render_widget(Paragraph::new(key_hints()), chunks[2]);
+    render_commit_list(f, list_area, &mut state);
+    render_graph(f, graph_area, &state);
+    render_detail(f, detail_area, &state);
+
+    super::render_status_line(f, status_area, state.status);
+    f.render_widget(Paragraph::new(key_hints()), hints_area);
 }
 
 /// Bottom key-hint row: list navigation, then the two keys that return to
@@ -81,30 +103,16 @@ fn key_hints() -> Line<'static> {
 /// An unborn HEAD loads zero commits, which is a valid state rather than a
 /// failure: the error status (rendered by the caller) covers failed loads.
 fn render_commit_list(f: &mut Frame, area: Rect, state: &mut HistoryRender<'_>) {
-    let block = Block::default()
-        .title(format!(
-            "提交历史 [{}] ({})",
-            state.repo_name,
-            state.commits.len()
-        ))
-        .borders(Borders::ALL);
-
-    if state.commits.is_empty() {
-        let paragraph = Paragraph::new(Span::styled(
-            "暂无提交记录",
-            Style::default().fg(Color::DarkGray),
-        ))
-        .block(block);
-        f.render_widget(paragraph, area);
-        return;
-    }
-
     let items: Vec<ListItem> = state.commits.iter().map(commit_item).collect();
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(super::list_highlight())
-        .highlight_symbol(super::HIGHLIGHT_SYMBOL);
-    f.render_stateful_widget(list, area, state.list_state);
+    super::render_named_list(
+        f,
+        area,
+        "提交历史",
+        state.repo_name,
+        EMPTY_HISTORY,
+        items,
+        state.list_state,
+    );
 }
 
 /// One commit row: short hash, summary, ref badges, then author and time.
@@ -140,21 +148,14 @@ fn ref_style(kind: RefKind) -> Style {
     }
 }
 
-/// DAG column: one row per commit, each glyph placed in its lane cell, laid
-/// out in lockstep with the commit list.
+/// DAG column: one row per commit, laid out in lockstep with the commit
+/// list. The git layer already positions every glyph at its lane, so a row
+/// only has to be joined into a line (G8).
 fn render_graph(f: &mut Frame, area: Rect, state: &HistoryRender<'_>) {
     let lines: Vec<Line> = state
         .graph
         .iter()
-        .map(|row| {
-            let mut cells = vec![' '; GRAPH_WIDTH];
-            for cell in row {
-                if let Some(slot) = cells.get_mut(cell.lane) {
-                    *slot = cell.glyph;
-                }
-            }
-            Line::from(cells.into_iter().collect::<String>())
-        })
+        .map(|row| Line::from(row.iter().collect::<String>()))
         .collect();
 
     let paragraph = Paragraph::new(lines)
@@ -202,21 +203,20 @@ fn render_detail(f: &mut Frame, area: Rect, state: &HistoryRender<'_>) {
     f.render_widget(paragraph, area);
 }
 
-/// The highlighted commit: the render cursor, when it still points inside
-/// the loaded list (a stale index yields the same `None` as an empty view).
+/// The highlighted commit: the index `App` passed in, when it still points
+/// inside the loaded list (a stale index yields the same `None` as an empty
+/// view). `HistoryState::select` keeps the index and the render cursor in
+/// sync, so the renderer reads the one source instead of re-deriving it from
+/// `list_state` (G9).
 fn selected_commit<'a>(state: &HistoryRender<'a>) -> Option<&'a CommitRow> {
-    let idx = state
-        .list_state
-        .selected()
-        .filter(|i| *i < state.commits.len())?;
-    state.commits.get(idx)
+    state.commits.get(state.selected)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::HistoryState;
-    use crate::git::{GraphCell, RefMark};
+    use crate::git::history::RefMark;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -225,6 +225,11 @@ mod tests {
     /// with a body plus changed files.
     fn loaded_state() -> HistoryState {
         let mut state = HistoryState::default();
+        // A positioned row exactly as `git::layout_graph` emits it: the dot
+        // in lane 0, the vertical in lane 1, every other lane a blank.
+        let mut graph_row = vec![' '; GRAPH_WIDTH];
+        graph_row[0] = '●';
+        graph_row[1] = '│';
         state.set_commits(
             vec![CommitRow {
                 full_id: "0123456789abcdef0123456789abcdef01234567".to_string(),
@@ -248,16 +253,7 @@ mod tests {
                 ],
                 parents: vec![],
             }],
-            vec![vec![
-                GraphCell {
-                    glyph: '●',
-                    lane: 0,
-                },
-                GraphCell {
-                    glyph: '│',
-                    lane: 1,
-                },
-            ]],
+            vec![graph_row],
         );
         state.detail = Some(CommitDetail {
             message: "merge things\n\nBody of the commit.".to_string(),
@@ -279,6 +275,7 @@ mod tests {
                     detail: state.detail.as_ref(),
                     graph: &state.graph,
                     list_state: &mut state.list_state,
+                    selected: state.selected,
                     repo_name: "demo",
                     status: None,
                 };

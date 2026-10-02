@@ -1,13 +1,14 @@
 //! Git operations layer: repository discovery and status queries.
 
 use std::fmt::Write as _;
+use std::path::Path;
 
 mod batch;
 mod branch;
 mod commit;
 mod discover;
 mod file;
-mod history;
+pub(crate) mod history;
 mod remote;
 mod status;
 mod tag;
@@ -17,13 +18,16 @@ pub use branch::{create_branch, delete_branch, list_branches, switch_branch, Bra
 pub use commit::commit;
 pub use discover::{canonical_or_self, discover_repos};
 pub use file::{diff_file, discard, list_file_status, stage, unstage, FileEntry, FileState};
-// `RefMark` is part of the exported API but has no non-test consumer in the
-// binary yet (tests build reference badges from it directly).
-#[allow(unused_imports)]
-pub use history::RefMark;
+// `RefMark` is intentionally not re-exported: outside `history.rs` nothing
+// names the type in non-test code (the UI reads `CommitRow::refs` through
+// `RefKind` and the fields), so the re-export was a dead API surface kept
+// alive only by `#[allow(unused_imports)]` (G35/I1). The type stays public
+// inside `history` for its own tests and badge builders; add a `pub use`
+// back only when a non-test consumer appears. `GraphCell` is gone for the
+// same reason: `layout_graph` now yields positioned rows of `Vec<char>`, so
+// no consumer names a cell type any more (G8).
 pub use history::{
-    commit_detail, layout_graph, list_commits, CommitDetail, CommitRow, GraphCell, RefKind,
-    MAX_LANES,
+    commit_detail, layout_graph, list_commits, CommitDetail, CommitRow, RefKind, MAX_LANES,
 };
 pub use remote::{pull, push, push_all_tags, push_tag};
 // part of the public Git API contract (M1 subtask 3)
@@ -39,11 +43,22 @@ pub fn short_id(oid: &git2::Oid) -> String {
     format!("{oid:.7}")
 }
 
+/// Repository display name derived from `path`: the final path component,
+/// falling back to the whole path when there is none (a bare `/` or `..`).
+///
+/// Shared by the dashboard, the config panel and the batch helpers so a
+/// directory name is spelled the same way everywhere (G31); a name that is
+/// not valid UTF-8 takes the [`show_path`] escaping.
+pub fn repo_display_name(path: &Path) -> String {
+    let component = path.file_name().map(Path::new);
+    show_path(component.unwrap_or(path))
+}
+
 /// Display form of `path` for user-facing messages: the exact UTF-8
 /// spelling when the path is valid Unicode, otherwise the `Debug` rendering
 /// so invalid bytes escape as `\xe9` instead of the lossy U+FFFD
 /// replacement produced by [`std::path::Path::display`].
-pub fn show_path(path: &std::path::Path) -> String {
+pub fn show_path(path: &Path) -> String {
     path.to_str()
         .map(str::to_string)
         .unwrap_or_else(|| format!("{path:?}"))

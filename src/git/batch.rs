@@ -11,31 +11,19 @@
 //! `失败: <reason>` on error.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use super::remote;
 use super::status::RepoInfo;
 
 /// Run `git fetch --all --prune` for one repository (blocking; call from
 /// `spawn_blocking`).
+///
+/// Reuses the shared [`remote::git_output`] so a failing fetch is reported
+/// exactly like a failing push/pull (G29).
 fn fetch_blocking(repo_path: &Path) -> Result<()> {
-    let mut cmd = Command::new("git");
-    remote::configure_git_cmd(&mut cmd);
-    let output = cmd
-        .arg("-C")
-        .arg(repo_path)
-        .args(["fetch", "--all", "--prune"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("启动 git 进程失败")?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("fetch 失败: {err}");
-    }
+    remote::git_output(repo_path, &["fetch", "--all", "--prune"])?;
     Ok(())
 }
 
@@ -93,6 +81,7 @@ pub async fn batch_fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::show_path;
     use crate::git::RepoInfo;
     use std::fs;
     use std::sync::{Arc, Mutex};
@@ -115,8 +104,8 @@ mod tests {
         RepoInfo {
             name: path
                 .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.display().to_string()),
+                .map(|n| show_path(std::path::Path::new(n)))
+                .unwrap_or_else(|| show_path(path)),
             path: path.to_path_buf(),
             branch: "main".to_string(),
             dirty: Default::default(),

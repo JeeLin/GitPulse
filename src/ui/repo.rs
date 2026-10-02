@@ -6,9 +6,9 @@ use ratatui::{
     Frame,
 };
 
-use super::{hint, remote, render_confirm_overlay, render_status_line};
-use crate::app::{RemoteStatus, StatusLine};
-use crate::git::{FileEntry, FileState};
+use super::{hint, render_confirm_overlay};
+use crate::git::FileEntry;
+use crate::ui::status::{RemoteStatus, StatusLine};
 
 /// State for rendering the single-repo view.
 pub struct RepoState<'a> {
@@ -46,13 +46,15 @@ pub fn render_repo(f: &mut Frame, mut state: RepoState<'_>) {
     render_file_list(f, file_list_area, &mut state);
 
     // Render status line: remote push/pull feedback takes precedence, and a
-    // notice written while the gauge runs shares the row with it (F1).
-    match state.remote_status {
-        Some(status) => {
-            remote::render_remote_status(f, status_area, status, state.remote_op, state.status)
-        }
-        None => render_status_line(f, status_area, state.status),
-    }
+    // notice written while it runs shares the row with it (F1). The
+    // branch itself is shared with the tag panel (G6).
+    super::render_status_or_remote(
+        f,
+        status_area,
+        state.remote_status,
+        state.remote_op,
+        state.status,
+    );
 
     // Render key hints (single-space separators keep the line under 80 cols)
     f.render_widget(
@@ -79,21 +81,12 @@ pub fn render_repo(f: &mut Frame, mut state: RepoState<'_>) {
 /// — including the panel entry — stays within the 80-column bottom line.
 fn key_hints(discard_confirm_open: bool, commit_input_open: bool) -> Line<'static> {
     if discard_confirm_open {
-        // Same y/n wording as the overlay itself.
-        [
-            hint("y", "确认"),
-            hint("n", "取消"),
-            hint("Esc", "取消对话框"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        // Shared rows (G5): the y/n/Esc wording of the confirmation, and
+        // `Enter 提交` matching the popup title
+        // `提交信息 (Enter 提交 / Esc 取消)`.
+        super::confirm_hints()
     } else if commit_input_open {
-        // Matches the popup title `提交信息 (Enter 提交 / Esc 取消)`.
-        [hint("Enter", "提交"), hint("Esc", "取消")]
-            .into_iter()
-            .flatten()
-            .collect()
+        super::submit_hints("提交")
     } else {
         [
             hint("j/k", "选择"),
@@ -116,13 +109,7 @@ fn render_file_list(f: &mut Frame, area: Rect, state: &mut RepoState<'_>) {
         .entries
         .iter()
         .map(|entry| {
-            let (symbol, color) = match entry.state {
-                FileState::Modified => ("M ", Color::Yellow),
-                FileState::Added => ("A ", Color::Green),
-                FileState::Deleted => ("D ", Color::Red),
-                FileState::Untracked => ("? ", Color::Cyan),
-                FileState::Conflicted => ("U ", Color::Magenta),
-            };
+            let (symbol, color) = super::file_state_symbol(entry.state);
 
             let line = Line::from(vec![
                 Span::styled(symbol, Style::default().fg(color)),
@@ -180,7 +167,7 @@ pub fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Progress;
+    use crate::git::FileState;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -385,31 +372,33 @@ mod tests {
         assert!(hints.contains("Esc取消"), "missing cancel hint: {hints}");
     }
 
-    /// The status row used to drop a pending status whenever the gauge was
-    /// on screen, which hid the `已有远端操作进行中` notice of a rejected
-    /// second push (F1). Both now share the row: the gauge keeps its own
-    /// label and the status renders beside it.
+    /// The status row used to drop a pending status whenever the running
+    /// feedback was on screen, which hid the `已有远端操作进行中` notice of a
+    /// rejected second push (F1). Both now share the row: the running
+    /// message keeps its own cell and the status renders beside it — and
+    /// with no progress source left (G1), the row carries the message
+    /// rather than a frozen percentage.
     #[test]
-    fn render_remote_progress_shows_gauge_and_pending_status_line() {
+    fn render_remote_running_shows_message_and_pending_status_line() {
         let status = StatusLine {
             message: "底层状态行".to_string(),
             is_error: false,
         };
-        let progress = RemoteStatus::Progress(Progress {
-            percent: 42,
-            message: "正在 push…".to_string(),
-        });
+        let running = RemoteStatus::Running("正在 push…".to_string());
         let mut list_state = ListState::default();
         let mut state = base_state(&[], &mut list_state, Some(&status));
-        state.remote_status = Some(&progress);
+        state.remote_status = Some(&running);
         state.remote_op = "push";
         let terminal = render_to_terminal(state);
         let text = compact(&terminal);
-        assert!(text.contains("正在push"), "missing gauge message: {text}");
-        assert!(text.contains("42%"), "missing gauge percent: {text}");
+        assert!(text.contains("正在push"), "missing running message: {text}");
+        assert!(
+            !text.contains('%'),
+            "frozen progress percent must be gone: {text}"
+        );
         assert!(
             text.contains("底层状态行"),
-            "pending status hidden by gauge: {text}"
+            "pending status hidden by the running line: {text}"
         );
     }
 

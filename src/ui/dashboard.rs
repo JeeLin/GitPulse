@@ -8,8 +8,9 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{BatchLogLine, StatusLine};
+use crate::app::BatchLogLine;
 use crate::git::RepoInfo;
+use crate::ui::status::StatusLine;
 
 use super::{hint, render_status_line};
 

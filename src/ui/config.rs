@@ -12,8 +12,8 @@ use ratatui::{
 
 use super::hint;
 use super::repo::centered_rect;
-use crate::app::StatusLine;
 use crate::git::show_path;
+use crate::ui::status::StatusLine;
 
 /// Borrowed render state for the config panel, referencing `App.config.scan_dirs`
 /// directly so no mock data source exists (checkpoint 2).
@@ -103,16 +103,10 @@ pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
 /// otherwise.
 fn key_hints(picker_open: bool, input_open: bool, confirm_open: bool) -> Line<'static> {
     if confirm_open {
-        // Same y/n wording as the overlay itself; every other list key is
-        // swallowed while the dialog is open, so none of them may be shown.
-        [
-            hint("y", "确认"),
-            hint("n", "取消"),
-            hint("Esc", "取消对话框"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        // Shared row (G5): the y/n/Esc wording of the confirmation; every
+        // other list key is swallowed while the dialog is open, so none of
+        // them may be shown.
+        super::confirm_hints()
     } else if picker_open {
         [
             hint("j/k", "移动"),
@@ -125,10 +119,8 @@ fn key_hints(picker_open: bool, input_open: bool, confirm_open: bool) -> Line<'s
         .flatten()
         .collect()
     } else if input_open {
-        [hint("Enter", "确认"), hint("Esc", "取消")]
-            .into_iter()
-            .flatten()
-            .collect()
+        // Matches the config manual input wording `Enter 确认` (G5).
+        super::submit_hints("确认")
     } else {
         [
             hint("j/k", "选择"),

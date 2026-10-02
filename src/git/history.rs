@@ -10,10 +10,19 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use git2::{BranchType, Commit, ErrorCode, Oid, Repository, Sort};
 
+use super::tag::TagTarget;
 use super::{short_id, show_bytes, show_path};
 
 /// Upper bound of DAG lanes the graph column can draw.
 pub const MAX_LANES: usize = 6;
+
+/// Upper bound of changed paths [`commit_detail`] reports.
+///
+/// The detail pane rebuilds its lines on every frame, so an unbounded file
+/// list would allocate once per file per frame on the UI thread (H3). Beyond
+/// this many entries the list is cut and the remainder is counted in a
+/// trailing `… 其余 N 项` line.
+pub const MAX_DETAIL_FILES: usize = 500;
 
 /// Reference pointing at a commit: HEAD, a local branch or a tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,15 +77,6 @@ pub struct CommitDetail {
     pub files: Vec<String>,
 }
 
-/// One rendered graph cell: a glyph inside a DAG lane.
-#[derive(Debug)]
-pub struct GraphCell {
-    /// Character drawn in this cell.
-    pub glyph: char,
-    /// Zero-based lane index, always `< MAX_LANES`.
-    pub lane: usize,
-}
-
 /// Walk the history newest-first and return at most `limit` commits.
 ///
 /// The walk starts at HEAD plus every local branch and tag, so commits on
@@ -86,18 +86,29 @@ pub fn list_commits(repo_path: &Path, limit: usize) -> Result<Vec<CommitRow>> {
     let repo = Repository::open(repo_path)?;
     let marks = collect_ref_marks(&repo);
 
-    // A freshly initialised repository has an unborn HEAD and no history.
-    let head = match repo.head() {
-        Ok(head) => head,
-        Err(err) if err.code() == ErrorCode::UnbornBranch => return Ok(Vec::new()),
+    // An unborn HEAD (a `git checkout --orphan` branch, or a repository that
+    // has no commit yet) contributes no starting point of its own, but the
+    // marks above already cover every local branch and tag: they still carry
+    // the whole reachable history, so only the HEAD mark is skipped and the
+    // walk continues instead of returning an empty list (V1).
+    match repo.head() {
+        Ok(head) => {
+            if head.peel_to_commit().is_err() {
+                // A HEAD that cannot be peeled to a commit is a corrupt
+                // reference: report it rather than quietly hiding history.
+                head.peel_to_commit()?;
+            }
+        }
+        Err(err) if err.code() == ErrorCode::UnbornBranch => {}
         Err(err) => return Err(err.into()),
-    };
-    // A HEAD that cannot be peeled to a commit (corrupt reference) is an
-    // error; its oid is already recorded in `marks` above.
-    head.peel_to_commit()?;
+    }
 
     let mut walk = repo.revwalk()?;
-    walk.set_sorting(Sort::TIME)?;
+    // Time order first, then topology: the graph layout draws a lane while
+    // waiting for the commit it leads to, and pure time order can produce a
+    // parent after its child (skewed clocks), leaving that lane dangling at
+    // the bottom of the column (V9).
+    walk.set_sorting(Sort::TIME | Sort::TOPOLOGICAL)?;
     // The marks already cover HEAD plus every local branch and tag tip.
     for oid in marks.keys() {
         walk.push(*oid)?;
@@ -140,17 +151,28 @@ pub fn commit_detail(repo_path: &Path, oid: &str) -> Result<CommitDetail> {
         .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))
         .context("生成提交差异失败")?;
     let mut files = Vec::new();
+    let mut total = 0usize;
     for delta in diff.deltas() {
         let path = delta.new_file().path().or_else(|| delta.old_file().path());
         if let Some(path) = path {
-            files.push(show_path(path));
+            total += 1;
+            // Cap the per-frame allocation on the UI thread: beyond
+            // `MAX_DETAIL_FILES` the remainder is counted, not listed (H3).
+            if files.len() < MAX_DETAIL_FILES {
+                files.push(show_path(path));
+            }
         }
+    }
+    if total > MAX_DETAIL_FILES {
+        files.push(format!("… 其余 {} 项", total - MAX_DETAIL_FILES));
     }
     Ok(CommitDetail { message, files })
 }
 
-/// Lay out the DAG column: one row of [`GraphCell`]s per input commit, in the
-/// same order as `commits`.
+/// Lay out the DAG column: one row of exactly [`MAX_LANES`] characters per
+/// input commit, in the same order as `commits`. A column without a glyph
+/// is a space, and the lane index is the column index — the row is already
+/// positioned, so the renderer only joins it into a line (G8).
 ///
 /// The first parent of a commit keeps the commit's lane, extra parents fork
 /// onto a new lane, and a commit awaited by several lanes joins those lanes
@@ -161,7 +183,7 @@ pub fn commit_detail(repo_path: &Path, oid: &str) -> Result<CommitDetail> {
 /// `─` once they are idle, and a lane holding both arms becomes `┼`. Lanes
 /// without any connection stay `│` (or `●` on the commit itself). Pure
 /// function; the lane count never exceeds [`MAX_LANES`].
-pub fn layout_graph(commits: &[CommitRow]) -> Vec<Vec<GraphCell>> {
+pub fn layout_graph(commits: &[CommitRow]) -> Vec<Vec<char>> {
     // `Some(id)` marks a lane that is waiting for that commit to arrive.
     let mut lanes: Vec<Option<String>> = Vec::new();
     let mut rows = Vec::with_capacity(commits.len());
@@ -211,17 +233,22 @@ fn push_span(spans: &mut Vec<(usize, usize)>, a: usize, b: usize) {
     }
 }
 
-/// Glyphs of one commit row: arms and crossings where a span starts, ends or
+/// Glyphs of one commit row, already placed at their lane index in a row of
+/// [`MAX_LANES`] characters: arms and crossings where a span starts, ends or
 /// passes through, `●` on a commit with no connection (or `┼` when several
-/// parents fold into one cell), `│` on lanes that merely run past, and no
-/// cell at all on idle lanes outside every span.
+/// parents fold into one cell), `│` on lanes that merely run past, and a
+/// space on idle lanes outside every span. Because each lane index occurs at
+/// most once per row, the placement is a single explicit write instead of a
+/// silent overwrite between this layer and the renderer (G8).
 fn graph_row(
     lanes: &[Option<String>],
     spans: &[(usize, usize)],
     primary: usize,
     parent_count: usize,
-) -> Vec<GraphCell> {
-    let mut cells = Vec::with_capacity(lanes.len());
+) -> Vec<char> {
+    // The layout never grows past `MAX_LANES` (`allocate_lane` folds onto
+    // the last lane instead), so every lane index fits this row.
+    let mut row = vec![' '; MAX_LANES];
     for (index, lane) in lanes.iter().enumerate() {
         // Does a span reach into this cell from the left / from the right?
         // Both answers include the lanes a span passes straight through.
@@ -261,9 +288,9 @@ fn graph_row(
             // Idle lane inside a span: the horizontal segment alone.
             '─'
         };
-        cells.push(GraphCell { glyph, lane: index });
+        row[index] = glyph;
     }
-    cells
+    row
 }
 
 /// Pick a lane for a new edge: reuse a free lane, grow the layout up to
@@ -319,13 +346,12 @@ fn collect_ref_marks(repo: &Repository) -> HashMap<Oid, Vec<RefMark>> {
     }
 
     let mut tags: Vec<(String, Oid)> = Vec::new();
-    if let Ok(references) = repo.references_glob("refs/tags/*") {
-        for reference in references.flatten() {
-            // Shorthand is byte-identical to `shorthand()`; a non-UTF-8 tag
-            // name is rendered escaped instead of being dropped.
-            let name = show_bytes(reference.shorthand_bytes());
-            if let Ok(commit) = reference.peel_to_commit() {
-                tags.push((name, commit.id()));
+    // Shared byte-level enumeration with `list_tags` (G33); only tags that
+    // peel to a commit earn a mark, non-commit targets stay panel-only.
+    if let Ok(walked) = super::tag::walk_tag_refs(repo) {
+        for tag in walked {
+            if let TagTarget::Commit(oid) = tag.target {
+                tags.push((tag.name, oid));
             }
         }
     }
@@ -687,6 +713,46 @@ mod tests {
         let _ = fs::remove_dir_all(&fixture.dir);
     }
 
+    /// Beyond `MAX_DETAIL_FILES` changed paths the detail list stops at the
+    /// cap and counts the remainder in one trailing line (H3).
+    #[test]
+    fn commit_detail_caps_large_file_lists() {
+        let dir = base_dir("detail-cap");
+        let repo = Repository::init(&dir).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "GitPulse Test").unwrap();
+        config.set_str("user.email", "test@gitpulse.local").unwrap();
+        drop(config);
+
+        let c1 = commit_files(&repo, &dir, &[("a.txt", "v1\n")], "initial", BASE_TIME, &[]);
+        let c1_commit = repo.find_commit(c1).unwrap();
+
+        // Second commit: a.txt modified plus 505 new files → 506 deltas.
+        let mut files: Vec<(String, String)> = vec![("a.txt".into(), "v2\n".into())];
+        for i in 0..505 {
+            files.push((format!("bulk/f{i:03}.txt"), "x\n".to_string()));
+        }
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(path, content)| (path.as_str(), content.as_str()))
+            .collect();
+        let c2 = commit_files(&repo, &dir, &refs, "bulk", BASE_TIME + 60, &[&c1_commit]);
+
+        let detail = commit_detail(&dir, &c2.to_string()).unwrap();
+        assert_eq!(
+            detail.files.len(),
+            MAX_DETAIL_FILES + 1,
+            "500 listed + one remainder line"
+        );
+        assert_eq!(
+            detail.files.last().unwrap(),
+            "… 其余 6 项",
+            "tail: {:?}",
+            &detail.files[detail.files.len() - 3..]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn layout_graph_single_chain_is_one_lane_of_dots() {
         let dir = base_dir("chain");
@@ -721,15 +787,17 @@ mod tests {
         let rows = layout_graph(&commits);
         assert_eq!(rows.len(), commits.len());
         for row in &rows {
-            assert_eq!(row.len(), 1);
-            assert_eq!(row[0].lane, 0);
-            assert_eq!(row[0].glyph, '●');
+            // One fixed-width row per commit: the dot sits in lane 0 and
+            // every unused lane stays a space (G8).
+            assert_eq!(row.len(), MAX_LANES);
+            assert_eq!(row[0], '●');
+            assert!(row[1..].iter().all(|glyph| *glyph == ' '), "row: {row:?}");
         }
         // A single chain has no connection to draw: never a horizontal arm.
         assert!(rows
             .iter()
             .flatten()
-            .all(|cell| !matches!(cell.glyph, '─' | '├' | '┤' | '┼')));
+            .all(|glyph| !matches!(glyph, '─' | '├' | '┤' | '┼')));
         assert!(layout_graph(&[]).is_empty());
 
         let _ = fs::remove_dir_all(&dir);
@@ -742,30 +810,31 @@ mod tests {
         let rows = layout_graph(&commits);
 
         assert_eq!(rows.len(), commits.len());
-        assert!(rows.iter().flatten().all(|cell| cell.lane < MAX_LANES));
+        // Every row is exactly the fixed column width the renderer draws (G8).
+        assert!(rows.iter().all(|row| row.len() == MAX_LANES));
 
         // The merge commit forks onto a second lane: the row carries both
         // connection ends, `├` next to `┤`, so the arms touch.
-        assert!(rows[0].len() >= 2);
-        assert_eq!((rows[0][0].lane, rows[0][0].glyph), (0, '├'));
-        assert_eq!((rows[0][1].lane, rows[0][1].glyph), (1, '┤'));
+        assert_eq!(rows[0][0], '├');
+        assert_eq!(rows[0][1], '┤');
 
         // The side branch runs on its own lane…
         let feature_row = &rows[2];
-        assert!(feature_row
-            .iter()
-            .any(|cell| cell.lane == 1 && cell.glyph == '●'));
+        assert_eq!(feature_row[1], '●', "row: {feature_row:?}");
 
         // …and joins the main lane back together, freeing its lane.
-        assert!(rows
-            .iter()
-            .any(|row| row.iter().any(|cell| cell.glyph == '┤')));
-        let max_lane = rows.iter().flatten().map(|cell| cell.lane).max().unwrap();
-        assert_eq!(max_lane, 1);
+        assert!(rows.iter().any(|row| row.contains(&'┤')));
 
         // The whole fixture, lane by lane: only the merge row and the join
         // row draw arms, every other row stays dots and verticals.
         let layout = graph_layout(&rows);
+        let max_lane = layout
+            .iter()
+            .flatten()
+            .map(|(lane, _)| *lane)
+            .max()
+            .unwrap();
+        assert_eq!(max_lane, 1);
         for row in &layout {
             assert_span_connected(row);
         }
@@ -798,10 +867,17 @@ mod tests {
         }
     }
 
-    /// Lane-indexed view of a graph row list, for exact comparisons.
-    fn graph_layout(rows: &[Vec<GraphCell>]) -> Vec<Vec<(usize, char)>> {
+    /// Lane-indexed view of a graph row list, for exact comparisons: a
+    /// row's column index is its lane, and a space carries no cell (G8).
+    fn graph_layout(rows: &[Vec<char>]) -> Vec<Vec<(usize, char)>> {
         rows.iter()
-            .map(|row| row.iter().map(|cell| (cell.lane, cell.glyph)).collect())
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .filter(|(_, glyph)| **glyph != ' ')
+                    .map(|(lane, glyph)| (lane, *glyph))
+                    .collect()
+            })
             .collect()
     }
 

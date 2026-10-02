@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use git2::Repository;
 
-use super::show_path;
+use super::{repo_display_name, short_id, show_bytes};
 
 /// Statistics about uncommitted changes in a repository.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -61,10 +61,7 @@ pub fn query_status(repo_path: &Path) -> Result<RepoInfo> {
     let (ahead, behind) = compute_ahead_behind(&repo)?;
     let last_commit = resolve_last_commit(&repo)?;
 
-    let name = repo_path
-        .file_name()
-        .map(|n| show_path(Path::new(n)))
-        .unwrap_or_else(|| show_path(repo_path));
+    let name = repo_display_name(repo_path);
 
     Ok(RepoInfo {
         name,
@@ -82,11 +79,14 @@ fn resolve_branch(repo: &Repository) -> Result<String> {
     match repo.head() {
         Ok(head) => {
             if head.is_branch() {
-                Ok(head.shorthand().unwrap_or("HEAD").to_string())
+                // A branch name that is not valid UTF-8 is rendered escaped
+                // (V8): falling back to the literal "HEAD" would claim the
+                // repository is not on a branch at all.
+                Ok(show_bytes(head.shorthand_bytes()))
             } else {
                 // Detached HEAD: show short hash.
                 let commit = head.peel_to_commit()?;
-                Ok(commit.id().to_string()[..7].to_string())
+                Ok(short_id(&commit.id()))
             }
         }
         // Unborn HEAD (no commits yet).
@@ -140,6 +140,9 @@ fn compute_ahead_behind(repo: &Repository) -> Result<(usize, usize)> {
         git2::BranchType::Local,
     ) {
         Ok(b) => b,
+        // No tracking info: a branch whose name is not valid UTF-8 cannot
+        // even be looked up here, so ahead/behind stays (0, 0) (V8) — the
+        // dashboard simply shows no counts for it.
         Err(_) => return Ok((0, 0)),
     };
     let upstream = match branch.upstream() {
@@ -168,8 +171,11 @@ fn resolve_last_commit(repo: &Repository) -> Result<CommitInfo> {
         Err(_) => return Ok(CommitInfo::default()),
     };
     let commit = head.peel_to_commit()?;
-    let summary = commit.summary().unwrap_or("").to_string();
-    let author = commit.author().name().unwrap_or("").to_string();
+    // Byte-level fields: a message or author name that is not valid UTF-8 is
+    // escaped the same way the history panel escapes it (V11) instead of
+    // collapsing into an empty string.
+    let summary = show_bytes(commit.summary_bytes().unwrap_or(b""));
+    let author = show_bytes(commit.author().name_bytes());
     let time = commit.time().seconds();
     Ok(CommitInfo {
         summary,
@@ -181,6 +187,7 @@ fn resolve_last_commit(repo: &Repository) -> Result<CommitInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::show_path;
 
     #[test]
     fn query_status_on_git_repo() {

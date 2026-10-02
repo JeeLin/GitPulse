@@ -16,29 +16,104 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 use git2::Repository;
 
+use super::show_bytes;
+
 /// Resolve the remote to operate on: `origin` when present, else the first
 /// configured remote; errors when the repository has no remote at all.
+///
+/// A remote name starting with `-` is refused (G28): git config accepts such
+/// a name, and it would then be handed to `git push`/`git pull` as a
+/// positional argument where git reads it as an option
+/// (`--upload-pack=…`-style injection).
 fn resolve_remote(repo_path: &Path) -> Result<String> {
     let repo = Repository::open(repo_path)?;
     let remotes = repo.remotes()?;
-    let names: Vec<&str> = remotes.iter().flatten().collect();
-    if names.is_empty() {
-        anyhow::bail!("未配置远端，无法执行远端操作");
+    // `StringArray::get` yields `None` for a name that is not valid UTF-8,
+    // which `iter().flatten()` would silently drop (V5): the repository
+    // would then look remote-less, or an unexpected remote would win. Walk
+    // the entries by index instead so such a name is reported.
+    let mut names: Vec<String> = Vec::with_capacity(remotes.len());
+    for index in 0..remotes.len() {
+        let Some(name) = remotes.get(index) else {
+            anyhow::bail!("远端名不是有效的 UTF-8，无法执行远端操作");
+        };
+        names.push(name.to_string());
     }
-    if names.contains(&"origin") {
+    pick_remote(&names)
+}
+
+/// Pick the remote to operate on out of the configured remote names:
+/// `origin` when present, otherwise the first one.
+fn pick_remote(names: &[String]) -> Result<String> {
+    if names.iter().any(|name| name == "origin") {
         return Ok("origin".to_string());
     }
-    Ok(names[0].to_string())
+    let Some(first) = names.first() else {
+        anyhow::bail!("未配置远端，无法执行远端操作");
+    };
+    if first.starts_with('-') {
+        anyhow::bail!("远端名不能以 - 开头: {first}");
+    }
+    Ok(first.clone())
+}
+
+/// Full refspec of a local branch: `refs/heads/<branch>`.
+///
+/// Handing the branch to git as a bare positional argument lets git read a
+/// branch named `--mirror` as an option (which really does mirror-delete
+/// remote branches) — G27. The full refspec can never be read as an option,
+/// and a `:` inside the name is refused because it would split the refspec
+/// into source and destination (V4).
+fn branch_refspec(branch: &str) -> Result<String> {
+    validate_ref_name(branch, "分支名", false)?;
+    Ok(format!("refs/heads/{branch}"))
+}
+
+/// Full refspec of a tag: `refs/tags/<tag>`.
+///
+/// The full refspec keeps git from reading a tag named `--force` as an option
+/// (R2); a `:` or a control character in the name is refused because it would
+/// split the refspec into source and destination, so `a:b` would update an
+/// arbitrary remote ref (V4).
+fn tag_refspec(tag: &str) -> Result<String> {
+    validate_ref_name(tag, "标签名", true)?;
+    Ok(format!("refs/tags/{tag}"))
+}
+
+/// Characters a name must not carry to be interpolated into a refspec.
+///
+/// `:` splits the refspec into source and destination, control characters
+/// would corrupt the command line, and a leading `-` makes a positional
+/// argument look like an option (`allow_leading_dash` is set for tag names,
+/// which always travel as a full refspec).
+fn validate_ref_name(name: &str, label: &str, allow_leading_dash: bool) -> Result<()> {
+    if !allow_leading_dash && name.starts_with('-') {
+        anyhow::bail!("{label}不能以 - 开头: {name}");
+    }
+    if name.chars().any(|ch| ch == ':' || ch.is_control()) {
+        anyhow::bail!("{label}含非法字符: {name}");
+    }
+    Ok(())
 }
 
 /// Resolve the current branch name; errors on detached or unborn HEAD.
+///
+/// A branch name that is not valid UTF-8 cannot be handed to the git CLI as
+/// a `&str` argument, so it is refused with an explicit error carrying the
+/// escaped spelling (V8) instead of a generic "无法解析分支名".
 fn current_branch(repo_path: &Path) -> Result<String> {
     let repo = Repository::open(repo_path)?;
     let head = repo.head().context("无法解析 HEAD")?;
     if !head.is_branch() {
         anyhow::bail!("处于 detached HEAD，无法执行远端操作");
     }
-    Ok(head.shorthand().context("无法解析分支名")?.to_string())
+    let Some(name) = head.shorthand() else {
+        anyhow::bail!(
+            "分支名不是有效的 UTF-8，无法执行远端操作: {}",
+            show_bytes(head.shorthand_bytes())
+        );
+    };
+    Ok(name.to_string())
 }
 
 /// Whether the current branch has an upstream tracking branch.
@@ -58,8 +133,10 @@ fn has_upstream(repo_path: &Path) -> bool {
     let Ok(branch) = repo.find_branch(name, git2::BranchType::Local) else {
         return false;
     };
-    let has_upstream = branch.upstream().is_ok();
-    has_upstream
+    // The `Result` returned by `upstream` keeps the `Branch` (and with it a
+    // borrow of `repo`) alive; bind it before returning so it drops first.
+    let upstream = branch.upstream();
+    upstream.is_ok()
 }
 
 /// Apply the shared non-interactive configuration to a `git` child process.
@@ -75,6 +152,16 @@ fn has_upstream(repo_path: &Path) -> bool {
 ///   terminal (the fix for the batch-pull credential hang).
 /// - `GIT_ASKPASS=` / `SSH_ASKPASS=` — external askpass dialogs would open
 ///   outside the TUI, so they are disabled as well.
+/// - `GIT_SSH_COMMAND` — set to `ssh -oBatchMode=yes` when the parent has no
+///   preference of its own (V3). The `GIT_TERMINAL_PROMPT`/`*_ASKPASS` switches
+///   only cover git's own credential prompts: OpenSSH reads its host-key
+///   confirmation and its key passphrase straight from `/dev/tty` whenever a
+///   controlling terminal exists, so an `git@host:` remote would block the
+///   child forever on a first connection and — because the task channel then
+///   never delivers a terminal event — lock every remote action out for the
+///   rest of the session. `BatchMode=yes` makes ssh fail fast instead. A
+///   `GIT_SSH_COMMAND` already present in the parent environment is kept: the
+///   user's own wrapper is their explicit choice.
 ///
 /// The parent environment is inherited untouched on purpose: `HOME`,
 /// `XDG_CONFIG_HOME`, `PATH` and `SSH_AUTH_SOCK` must reach the child so git
@@ -86,12 +173,19 @@ fn has_upstream(repo_path: &Path) -> bool {
 pub fn configure_git_cmd(cmd: &mut Command) -> &mut Command {
     cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "")
-        .env("SSH_ASKPASS", "")
+        .env("SSH_ASKPASS", "");
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        cmd.env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes");
+    }
+    cmd
 }
 
 /// Run `git -C <repo> <args>` and return its output, or an error carrying
 /// the operation name and the child's stderr (shown on the status line).
-fn git_output(repo_path: &Path, args: &[&str]) -> Result<std::process::Output> {
+///
+/// Shared with the batch helpers (G29), so every git child GitPulse spawns
+/// reports a failure the same way.
+pub(crate) fn git_output(repo_path: &Path, args: &[&str]) -> Result<std::process::Output> {
     let mut cmd = Command::new("git");
     configure_git_cmd(&mut cmd);
     let output = cmd
@@ -115,8 +209,8 @@ fn git_output(repo_path: &Path, args: &[&str]) -> Result<std::process::Output> {
 /// run `git push` with the arguments `args` builds for that remote, then
 /// return its result.
 ///
-/// The 0% start message is emitted by the App layer only (it pre-sets
-/// `RemoteStatus::Progress(0)` before spawning), and the completion is
+/// The running message is emitted by the App layer only (it sets
+/// `RemoteStatus::Running` before spawning), and the completion is
 /// displayed by the App layer from the returned result.
 fn push_refs(repo_path: &Path, args: impl FnOnce(&str) -> Result<Vec<String>>) -> Result<()> {
     let remote = resolve_remote(repo_path)?;
@@ -129,17 +223,20 @@ fn push_refs(repo_path: &Path, args: impl FnOnce(&str) -> Result<Vec<String>>) -
 
 /// Push the current branch to its remote.
 ///
-/// Uses `git push -u <remote> <branch>` so the first push to a freshly
-/// configured remote also establishes the upstream tracking branch.
+/// Uses `git push -u <remote> refs/heads/<branch>` so the first push to a
+/// freshly configured remote also establishes the upstream tracking branch,
+/// and so a branch name can never be read as a git option (G27).
 pub async fn push(repo_path: &Path) -> Result<()> {
     let repo_path: PathBuf = repo_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         push_refs(&repo_path, |remote| {
             let branch = current_branch(&repo_path)?;
+            // The full refspec keeps a branch named `--mirror` from being
+            // read as an option (G27).
             Ok(vec![
                 "-u".to_string(),
                 remote.to_string(),
-                branch.to_string(),
+                branch_refspec(&branch)?,
             ])
         })
     })
@@ -148,18 +245,19 @@ pub async fn push(repo_path: &Path) -> Result<()> {
 
 /// Pull the current branch, fast-forward only.
 ///
-/// Falls back to explicit `<remote> <branch>` arguments when the branch has
-/// no upstream yet; diverged histories fail with an explicit error
+/// Falls back to explicit `<remote> refs/heads/<branch>` arguments when the
+/// branch has no upstream yet; diverged histories fail with an explicit error
 /// (convention 7) instead of merging or rebasing.
 pub async fn pull(repo_path: &Path) -> Result<()> {
     let repo_path: PathBuf = repo_path.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<()> {
         let remote = resolve_remote(&repo_path)?;
         let branch = current_branch(&repo_path)?;
+        let refspec = branch_refspec(&branch)?;
         let args: Vec<&str> = if has_upstream(&repo_path) {
             vec!["pull", "--ff-only"]
         } else {
-            vec!["pull", "--ff-only", remote.as_str(), branch.as_str()]
+            vec!["pull", "--ff-only", remote.as_str(), refspec.as_str()]
         };
         git_output(&repo_path, &args)?;
         Ok(())
@@ -176,12 +274,16 @@ pub async fn pull(repo_path: &Path) -> Result<()> {
 ///
 /// The repository must have at least one remote configured; otherwise an
 /// error is returned with a readable reason (matching `push` behavior).
+///
+/// A tag name containing `:` or a control character is rejected: it would
+/// split the refspec into source and destination and update an arbitrary
+/// remote ref (V4).
 pub async fn push_tag(repo_path: &Path, tag: &str) -> Result<()> {
     let repo_path: PathBuf = repo_path.to_path_buf();
     let tag = tag.to_string();
     tokio::task::spawn_blocking(move || {
         push_refs(&repo_path, |remote| {
-            Ok(vec![remote.to_string(), format!("refs/tags/{tag}")])
+            Ok(vec![remote.to_string(), tag_refspec(&tag)?])
         })
     })
     .await?

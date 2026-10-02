@@ -8,18 +8,21 @@ pub mod diff;
 pub mod history;
 pub mod remote;
 pub mod repo;
+pub mod status;
 pub mod tags;
 
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
-use crate::app::{App, StatusLine, View};
+use crate::app::{App, View};
+use crate::git::{FileState, RepoInfo};
 use crate::ui::dashboard::DashboardState;
+use crate::ui::status::{RemoteStatus, StatusLine};
 
 /// Shared selection style for every list: dark background + bold keeps the
 /// cursor row readable on any block style.
@@ -45,6 +48,34 @@ pub(crate) fn hint(k: &str, desc: &str) -> Line<'static> {
     ])
 }
 
+/// Bottom hint row of every y/n confirmation overlay (convention 8): the
+/// `y` / `n` wording of the overlay itself plus the dismiss key. Every panel
+/// — repo discard, branch delete, tag delete, config remove — advertises the
+/// exact same three keys while the dialog swallows every other press, so the
+/// row lives here instead of being re-typed per panel (G5).
+pub(crate) fn confirm_hints() -> Line<'static> {
+    [
+        hint("y", "确认"),
+        hint("n", "取消"),
+        hint("Esc", "取消对话框"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Bottom hint row of the single-line input overlays (convention 9): `Enter`
+/// submits with the verb the overlay's own title advertises, `Esc` cancels.
+/// The verb is a parameter because the panels word it differently (`创建`
+/// for create/branch/tag inputs, `提交` for the commit message, `确认` for
+/// the manual config input), while the row shape is shared (G5).
+pub(crate) fn submit_hints(submit: &str) -> Line<'static> {
+    [hint("Enter", submit), hint("Esc", "取消")]
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 /// Draw the bottom status line shared by every view (convention 3): errors
 /// render red and persist until the next operation, anything else keeps the
 /// default style. `None` leaves the row blank.
@@ -56,6 +87,81 @@ pub fn render_status_line(f: &mut Frame, area: Rect, status: Option<&StatusLine>
             Style::default()
         };
         f.render_widget(Paragraph::new(status.message.clone()).style(style), area);
+    }
+}
+
+/// Render the bottom status row as push/pull feedback when a remote result
+/// is present, and as the plain status line otherwise (G6).
+///
+/// The two panels that own remote feedback (repo, tags) used to duplicate
+/// this `remote_status` / `status_line` split verbatim; keeping it here also
+/// keeps the notice written while an operation runs visible beside it, see
+/// [`remote::render_remote_status`].
+pub fn render_status_or_remote(
+    f: &mut Frame,
+    area: Rect,
+    remote_status: Option<&RemoteStatus>,
+    remote_op: &str,
+    status: Option<&StatusLine>,
+) {
+    match remote_status {
+        Some(remote) => remote::render_remote_status(f, area, remote, remote_op, status),
+        None => render_status_line(f, area, status),
+    }
+}
+
+/// Panel skeleton shared by the two named-item lists — the commit history
+/// and the tag list (G7): a bordered block titled `label [repo] (count)`
+/// around either the rows the caller built or, when there are none, the
+/// panel's own empty-state copy.
+///
+/// Zero rows is a valid state of both panels (an unborn HEAD, a repository
+/// without tags) rather than a failure, so the empty copy is rendered as
+/// data and the error status — drawn by the caller — still covers failed
+/// loads. The rows are handed in already built because each panel maps its
+/// own item type to a [`ListItem`]; only the block, the highlight style and
+/// the highlight symbol are shared.
+pub(crate) fn render_named_list(
+    f: &mut Frame,
+    area: Rect,
+    label: &str,
+    repo_name: &str,
+    empty: &'static str,
+    items: Vec<ListItem<'static>>,
+    list_state: &mut ListState,
+) {
+    let block = Block::default()
+        .title(format!("{label} [{repo_name}] ({})", items.len()))
+        .borders(Borders::ALL);
+
+    if items.is_empty() {
+        let paragraph =
+            Paragraph::new(Span::styled(empty, Style::default().fg(Color::DarkGray))).block(block);
+        f.render_widget(paragraph, area);
+        return;
+    }
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(list_highlight())
+        .highlight_symbol(HIGHLIGHT_SYMBOL);
+    f.render_stateful_widget(list, area, list_state);
+}
+
+/// Symbol and color of a working-tree [`FileState`] in the file list (G11).
+///
+/// The mapping is git semantics — which state a status flag means and which
+/// color stands for it — so it lives with the shared render helpers rather
+/// than in the closure that builds the rows; the repo panel only composes
+/// the styled spans. The symbol is two cells (`M `) so the path columns of
+/// every row line up.
+pub(crate) fn file_state_symbol(state: FileState) -> (&'static str, Color) {
+    match state {
+        FileState::Modified => ("M ", Color::Yellow),
+        FileState::Added => ("A ", Color::Green),
+        FileState::Deleted => ("D ", Color::Red),
+        FileState::Untracked => ("? ", Color::Cyan),
+        FileState::Conflicted => ("U ", Color::Magenta),
     }
 }
 
@@ -146,128 +252,167 @@ fn tail_scroll(line: &Line, inner_width: usize) -> u16 {
 /// Dispatch rendering to the active view.
 ///
 /// The current [`App`] fields are borrowed directly into the view state
-/// (checkpoint 2: no separate mock data source).
+/// (checkpoint 2: no separate mock data source). Every arm is a thin
+/// `render_*_view` wrapper so this function only dispatches (G12).
 pub fn render(f: &mut Frame, app: &mut App) {
     match app.view {
-        View::Dashboard => {
-            let batch_running = app.batch_running();
-            let mut state = DashboardState {
-                repos: &app.repos,
-                status: app.status.as_ref(),
-                list_state: &mut app.dashboard_state,
-                batch_log: &app.batch_log,
-                batch_op: app.batch_op,
-                batch_running,
-            };
-            dashboard::render_dashboard(f, &mut state);
-        }
-        View::Repo => {
-            let sel = app.file_state.selected();
-            let confirm_file = if app.show_discard_confirm {
-                sel.and_then(|i| app.file_entries.get(i))
-            } else {
-                None
-            };
-            let state = repo::RepoState {
-                entries: &app.file_entries,
-                status: app.status.as_ref(),
-                list_state: &mut app.file_state,
-                show_discard_confirm: app.show_discard_confirm,
-                confirm_file,
-                remote_status: app.remote_status.as_ref(),
-                remote_op: app.remote_op,
-                show_commit_input: false,
-            };
-            repo::render_repo(f, state);
-        }
-        View::Diff => {
-            diff::render_diff(f, app);
-        }
-        View::Commit => {
-            // Repo view as background, commit input popup on top.
-            {
-                let state = repo::RepoState {
-                    entries: &app.file_entries,
-                    status: app.status.as_ref(),
-                    list_state: &mut app.file_state,
-                    show_discard_confirm: false,
-                    confirm_file: None,
-                    remote_status: app.remote_status.as_ref(),
-                    remote_op: app.remote_op,
-                    show_commit_input: true,
-                };
-                repo::render_repo(f, state);
-            }
-            commit::render_commit_popup(f, &app.commit_message);
-        }
-        View::Branches => {
-            let confirm = if app.show_branch_delete_confirm {
-                app.branch_state
-                    .selected()
-                    .and_then(|i| app.branches.get(i))
-            } else {
-                None
-            };
-            let repo_name = app.branch_repo_name().to_string();
-            let state = branches::BranchesState {
-                branches: &app.branches,
-                status: app.status.as_ref(),
-                list_state: &mut app.branch_state,
-                repo_name: &repo_name,
-                show_input: app.show_branch_input,
-                input: &app.branch_input,
-                show_delete_confirm: app.show_branch_delete_confirm,
-                confirm_branch: confirm,
-            };
-            branches::render_branches(f, state);
-        }
-        View::Config => {
-            // Field-level borrow of `app.config` coexists with the
-            // `&mut app.config_state` below (disjoint fields).
-            let state = config::ConfigState {
-                scan_dirs: &app.config.scan_dirs,
-                status: app.status.as_ref(),
-                list_state: &mut app.config_state,
-                show_input: app.show_config_input,
-                input: &app.config_input,
-                show_delete_confirm: app.show_config_delete_confirm,
-                show_picker: app.show_config_picker,
-                picker_dir: &app.picker_dir,
-                picker_entries: &app.picker_entries,
-                picker_state: &mut app.picker_state,
-            };
-            config::render_config(f, state);
-        }
-        View::History => {
-            // Field-level borrows of `app.history` (data vs. cursor) and of
-            // the status line coexist (disjoint fields of `App`).
-            let repo_name = app.current_repo_name().to_string();
-            let state = history::HistoryRender {
-                commits: &app.history.commits,
-                detail: app.history.detail.as_ref(),
-                graph: &app.history.graph,
-                list_state: &mut app.history.list_state,
-                repo_name: &repo_name,
-                status: app.status.as_ref(),
-            };
-            history::render_history(f, state);
-        }
-        View::Tags => {
-            // Field-level borrows of `app.tags_state` (cursor vs. list) and
-            // of the status fields coexist (disjoint fields of `App`).
-            let repo_name = app.current_repo_name().to_string();
-            let state = tags::TagsRender {
-                tags: &app.tags_state.tags,
-                list_state: &mut app.tags_state.list_state,
-                modal: app.tags_state.modal.as_ref(),
-                status: app.status.as_ref(),
-                remote_status: app.remote_status.as_ref(),
-                remote_op: app.remote_op,
-                repo_name: &repo_name,
-            };
-            tags::render_tags(f, state);
-        }
+        View::Dashboard => render_dashboard_view(f, app),
+        View::Repo => render_repo_view(f, app),
+        View::Diff => diff::render_diff(f, app),
+        View::Commit => render_commit_view(f, app),
+        View::Branches => render_branches_view(f, app),
+        View::Config => render_config_view(f, app),
+        View::History => render_history_view(f, app),
+        View::Tags => render_tags_view(f, app),
     }
+}
+
+/// Name of the repository at `index` in `repos`, or `""` when the index is
+/// stale — the same "empty on a stale index" result the panel accessors
+/// produce.
+///
+/// It takes the two fields instead of `&App` so the returned `&str` borrows
+/// `repos` alone: the history and tag panels then hold it beside their own
+/// `&mut` cursor borrow instead of cloning it into a `String` every frame
+/// (G25).
+fn repo_name_of(repos: &[RepoInfo], index: Option<usize>) -> &str {
+    index
+        .and_then(|i| repos.get(i))
+        .map_or("", |repo| repo.name.as_str())
+}
+
+/// Dashboard arm of [`render`].
+fn render_dashboard_view(f: &mut Frame, app: &mut App) {
+    let batch_running = app.batch_running();
+    let mut state = DashboardState {
+        repos: &app.repos,
+        status: app.status.as_ref(),
+        list_state: &mut app.dashboard_state,
+        batch_log: &app.batch_log,
+        batch_op: app.batch_op,
+        batch_running,
+    };
+    dashboard::render_dashboard(f, &mut state);
+}
+
+/// Repo arm of [`render`]: the file list plus the discard confirmation.
+fn render_repo_view(f: &mut Frame, app: &mut App) {
+    let sel = app.file_state.selected();
+    let confirm_file = if app.show_discard_confirm {
+        sel.and_then(|i| app.file_entries.get(i))
+    } else {
+        None
+    };
+    let state = repo::RepoState {
+        entries: &app.file_entries,
+        status: app.status.as_ref(),
+        list_state: &mut app.file_state,
+        show_discard_confirm: app.show_discard_confirm,
+        confirm_file,
+        remote_status: app.remote_status.as_ref(),
+        remote_op: app.remote_op,
+        show_commit_input: false,
+    };
+    repo::render_repo(f, state);
+}
+
+/// Commit arm of [`render`]: repo view as background, commit input popup on
+/// top.
+fn render_commit_view(f: &mut Frame, app: &mut App) {
+    let state = repo::RepoState {
+        entries: &app.file_entries,
+        status: app.status.as_ref(),
+        list_state: &mut app.file_state,
+        show_discard_confirm: false,
+        confirm_file: None,
+        remote_status: app.remote_status.as_ref(),
+        remote_op: app.remote_op,
+        show_commit_input: true,
+    };
+    repo::render_repo(f, state);
+    commit::render_commit_popup(f, &app.commit_message);
+}
+
+/// Branch panel arm of [`render`].
+fn render_branches_view(f: &mut Frame, app: &mut App) {
+    let confirm = if app.show_branch_delete_confirm {
+        app.branch_state
+            .selected()
+            .and_then(|i| app.branches.get(i))
+    } else {
+        None
+    };
+    // `branch_repo` stays private to `App`, so the panel keeps asking the
+    // accessor — its `&str` borrows the whole `App` and cannot sit next to
+    // the `&mut` cursor borrow below. Unlike the history/tags arms the copy
+    // cannot be dropped without exposing the private index (G25).
+    let repo_name = app.branch_repo_name().to_string();
+    let state = branches::BranchesState {
+        branches: &app.branches,
+        status: app.status.as_ref(),
+        list_state: &mut app.branch_state,
+        repo_name: &repo_name,
+        show_input: app.show_branch_input,
+        input: &app.branch_input,
+        show_delete_confirm: app.show_branch_delete_confirm,
+        confirm_branch: confirm,
+    };
+    branches::render_branches(f, state);
+}
+
+/// Config panel arm of [`render`].
+fn render_config_view(f: &mut Frame, app: &mut App) {
+    // Field-level borrow of `app.config` coexists with the
+    // `&mut app.config_state` below (disjoint fields).
+    let state = config::ConfigState {
+        scan_dirs: &app.config.scan_dirs,
+        status: app.status.as_ref(),
+        list_state: &mut app.config_state,
+        show_input: app.show_config_input,
+        input: &app.config_input,
+        show_delete_confirm: app.show_config_delete_confirm,
+        show_picker: app.show_config_picker,
+        picker_dir: &app.picker_dir,
+        picker_entries: &app.picker_entries,
+        picker_state: &mut app.picker_state,
+    };
+    config::render_config(f, state);
+}
+
+/// History arm of [`render`].
+///
+/// Field-level borrows of `app.history` (data vs. cursor), `app.repos` (the
+/// title) and the status line coexist (disjoint fields of `App`).
+fn render_history_view(f: &mut Frame, app: &mut App) {
+    let repo_name = repo_name_of(&app.repos, app.current_repo);
+    let state = history::HistoryRender {
+        commits: &app.history.commits,
+        detail: app.history.detail.as_ref(),
+        graph: &app.history.graph,
+        list_state: &mut app.history.list_state,
+        selected: app.history.selected,
+        repo_name,
+        status: app.status.as_ref(),
+    };
+    history::render_history(f, state);
+}
+
+/// Tags arm of [`render`].
+///
+/// Field-level borrows of `app.tags_state` (cursor vs. list), `app.repos`
+/// (the title) and the status fields coexist (disjoint fields of `App`).
+fn render_tags_view(f: &mut Frame, app: &mut App) {
+    let repo_name = repo_name_of(&app.repos, app.current_repo);
+    let state = tags::TagsRender {
+        tags: &app.tags_state.tags,
+        list_state: &mut app.tags_state.list_state,
+        modal: app.tags_state.modal.as_ref(),
+        status: app.status.as_ref(),
+        remote_status: app.remote_status.as_ref(),
+        remote_op: app.remote_op,
+        repo_name,
+    };
+    tags::render_tags(f, state);
 }
 
 #[cfg(test)]

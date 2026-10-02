@@ -16,7 +16,8 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::git::{self, show_path, BranchInfo, FileEntry, RepoInfo};
-use crate::git::{CommitDetail, CommitRow, GraphCell, TagInfo};
+use crate::git::{CommitDetail, CommitRow, TagInfo};
+use crate::ui::status::{RemoteStatus, StatusLine};
 
 /// Terminal type used by the TUI.
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -58,8 +59,9 @@ pub struct HistoryState {
     pub selected: usize,
     /// Detail payload of the highlighted commit, reloaded on every move.
     pub detail: Option<CommitDetail>,
-    /// One DAG row per entry of `commits`, from `git::layout_graph`.
-    pub graph: Vec<Vec<GraphCell>>,
+    /// One DAG row per entry of `commits`, from `git::layout_graph`: exactly
+    /// `git::MAX_LANES` characters, each column already holding its glyph.
+    pub graph: Vec<Vec<char>>,
     /// Selection cursor shared across frames, kept in sync with `selected`.
     pub list_state: ListState,
 }
@@ -69,7 +71,7 @@ impl HistoryState {
     ///
     /// The cursor is reset together with the data so a selection left over
     /// from a previous repository never points past the new list.
-    pub fn set_commits(&mut self, commits: Vec<CommitRow>, graph: Vec<Vec<GraphCell>>) {
+    pub fn set_commits(&mut self, commits: Vec<CommitRow>, graph: Vec<Vec<char>>) {
         self.commits = commits;
         self.graph = graph;
         self.detail = None;
@@ -193,40 +195,18 @@ impl TagsState {
 
     /// Highlight the tag named `name`, leaving the selection untouched when
     /// the name is not in the list.
+    ///
+    /// The lookup walks the panel's own list, which [`git::list_tags`]
+    /// returns sorted alphabetically by name (G26): the caller relies on
+    /// that stable ordering to land on the row the panel shows for `name`
+    /// after a reload, rather than on an index handed back by the git
+    /// layer. A name missing from the list keeps the current highlight
+    /// instead of moving it.
     pub fn select_name(&mut self, name: &str) {
         if let Some(idx) = self.tags.iter().position(|t| t.name == name) {
             self.select(idx);
         }
     }
-}
-
-/// Bottom status line content: short message or error (convention 3).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatusLine {
-    /// Message text.
-    pub message: String,
-    /// `true` for errors, which render red and persist until the next operation.
-    pub is_error: bool,
-}
-
-/// Push/pull feedback rendered on the repo-view status line (convention 3).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RemoteStatus {
-    /// Operation in flight; carries the latest progress update.
-    Progress(Progress),
-    /// Operation finished successfully.
-    Success,
-    /// Operation failed; the reason persists until the next operation.
-    Error(String),
-}
-
-/// Progress update shown on the status line while a remote operation runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Progress {
-    /// Completion percentage (0-100).
-    pub percent: u8,
-    /// Human-readable status message.
-    pub message: String,
 }
 
 /// One line of the dashboard batch progress log: one repository (convention 6).
@@ -402,6 +382,22 @@ impl App {
         self.status = None;
     }
 
+    /// Drop the settled push/pull feedback so the next status message is not
+    /// outranked by it (G3).
+    ///
+    /// The panels that render `remote_status` above the plain status line
+    /// would otherwise keep showing a stale `Success` / `Error` under (or
+    /// over) a message written afterwards. A push still in flight keeps its
+    /// receiver and re-reports when it finishes, so its running feedback is
+    /// deliberately left alone — this is the one guard the tag panel, its
+    /// overlays and the history/config entry points (G19) share instead of
+    /// re-typing `if self.remote_rx.is_none()`.
+    fn clear_finished_push_feedback(&mut self) {
+        if self.remote_rx.is_none() {
+            self.remote_status = None;
+        }
+    }
+
     /// Discover git repositories from `config.scan_dirs` and load their status.
     ///
     /// On failure, records an error and clears `repos` so the UI shows the
@@ -567,8 +563,13 @@ impl App {
     }
 
     /// Open the single-line commit message input (convention 9).
+    ///
+    /// Blocked while a remote operation is in flight — it would contend on
+    /// the same repository locks — and the key reports that instead of
+    /// dropping silently, as the push/batch entry points do (G21, R7).
     pub fn open_commit(&mut self) {
         if self.remote_rx.is_some() {
+            self.set_info("已有远端操作进行中");
             return;
         }
         self.commit_message.clear();
@@ -593,7 +594,7 @@ impl App {
             return;
         };
         if repo_idx >= self.repos.len() {
-            self.set_error("commit 失败: 仓库索引失效");
+            self.set_error(invalid_repo_msg("commit 失败"));
             return;
         }
         let repo_path = self.repos[repo_idx].path.clone();
@@ -604,7 +605,7 @@ impl App {
                 // Refresh first: it clears the status line, so the success
                 // message must be written after, otherwise it never shows.
                 self.refresh_repo_status(repo_idx);
-                self.set_info_unless_error(format!("commit 成功 {}", short_oid(&oid)));
+                self.set_info_unless_error(format!("commit 成功 {}", git::short_id(&oid)));
             }
             Err(e) => {
                 self.set_error(format!("commit 失败: {e}"));
@@ -616,11 +617,12 @@ impl App {
     ///
     /// The task runs off the UI thread; its result arrives on an mpsc channel
     /// consumed each frame (convention 1), so the UI stays interactive while
-    /// the operation runs. No-op while another remote or batch op is in
-    /// flight (they would contend on the same repository locks), or outside
-    /// the repo view.
+    /// the operation runs. Outside the repo view, or with no valid repository
+    /// open, it stays a silent no-op; the remote/batch mutual-exclusion guard
+    /// lives in [`App::spawn_remote_task`] (H8), where every remote op shares
+    /// it (they would contend on the same repository locks).
     pub fn start_remote(&mut self, op: &'static str) {
-        if self.view != View::Repo || self.remote_rx.is_some() || self.batch_rx.is_some() {
+        if self.view != View::Repo {
             return;
         }
         let Some(repo_idx) = self.current_repo else {
@@ -635,7 +637,9 @@ impl App {
         } else {
             "正在 pull…".to_string()
         };
-        self.spawn_remote_task(op, message, move || async move {
+        // `None`: the plain push/pull keys have always ignored a busy remote
+        // silently, unlike the tag panel's `p`/`a`.
+        self.spawn_remote_task(op, message, None, move || async move {
             match op {
                 "push" => git::push(&repo_path).await,
                 _ => git::pull(&repo_path).await,
@@ -647,26 +651,36 @@ impl App {
     /// background worker behind it (convention 1).
     ///
     /// The receiver is armed on `remote_rx`, `remote_op` labels the running
-    /// operation, `message` is published as the initial
-    /// [`RemoteStatus::Progress`] and the plain status line is cleared.
-    /// `task` resolves to the operation's result, which is forwarded to
-    /// [`App::poll_remote`] as the terminal event — the template every
-    /// remote op shares.
+    /// operation, `message` is published as [`RemoteStatus::Running`] and the
+    /// plain status line is cleared. `task` resolves to the operation's
+    /// result, which is forwarded to [`App::poll_remote`] as the terminal
+    /// event — the template every remote op shares.
+    ///
+    /// The remote/batch mutual-exclusion guard lives here instead of at each
+    /// call site (H8): a second operation would replace the live receiver —
+    /// its result could never arrive — and contend on the same repository
+    /// locks. The refusal is silent when `busy_notice` is `None` and records
+    /// the notice (e.g. `已有远端操作进行中`, R7) when the caller would
+    /// otherwise swallow the key.
     fn spawn_remote_task<F>(
         &mut self,
         op: &'static str,
         message: String,
+        busy_notice: Option<&'static str>,
         task: impl FnOnce() -> F + Send + 'static,
     ) where
         F: std::future::Future<Output = Result<()>> + Send + 'static,
     {
+        if self.remote_rx.is_some() || self.batch_rx.is_some() {
+            if let Some(notice) = busy_notice {
+                self.set_info(notice);
+            }
+            return;
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         self.remote_rx = Some(rx);
         self.remote_op = op;
-        self.remote_status = Some(RemoteStatus::Progress(Progress {
-            percent: 0,
-            message,
-        }));
+        self.remote_status = Some(RemoteStatus::Running(message));
         self.status = None;
         tokio::spawn(async move {
             let _ = tx.send(task().await.map_err(|e| e.to_string()));
@@ -869,6 +883,9 @@ impl App {
             return;
         }
         self.view = View::History;
+        // Stale push feedback must not survive into the view; a push still
+        // in flight keeps its receiver (G3/G19).
+        self.clear_finished_push_feedback();
         self.clear_error();
         self.load_history();
     }
@@ -887,7 +904,7 @@ impl App {
     /// result is a valid state and keeps the status line clean.
     pub fn load_history(&mut self) {
         let Some(path) = self.current_repo_path() else {
-            self.set_error("历史视图: 仓库索引失效");
+            self.set_error(invalid_repo_msg("历史视图"));
             self.history.clear();
             return;
         };
@@ -911,6 +928,15 @@ impl App {
     ///
     /// Failures (unresolvable object, repository gone) surface on the status
     /// line instead of panicking; an empty history simply drops the detail.
+    /// The error chain is printed in full (`{e:#}`, H2) so the cause from
+    /// `git::commit_detail`'s context is not swallowed.
+    ///
+    /// Known limitation (G38): the whole-tree diff runs synchronously on the
+    /// UI thread — a `j`/`k` press pays for it once, and a press that cannot
+    /// move the cursor skips it entirely (see
+    /// [`App::move_history_selection`]). Moving it off-thread would need an
+    /// asynchronous detail slot plus a loading placeholder, and would change
+    /// what the entry path synchronously guarantees.
     pub fn load_history_detail(&mut self) {
         // `full_id`, not the 7-character `id` the list renders: an
         // abbreviated prefix can be ambiguous (`GIT_EAMBIGUOUS`) in a large
@@ -922,7 +948,7 @@ impl App {
         };
         let Some(path) = self.current_repo_path() else {
             self.history.detail = None;
-            self.set_error("历史视图: 仓库索引失效");
+            self.set_error(invalid_repo_msg("历史视图"));
             return;
         };
         match git::commit_detail(&path, &id) {
@@ -932,15 +958,9 @@ impl App {
             }
             Err(e) => {
                 self.history.detail = None;
-                self.set_error(format!("加载提交详情失败: {e}"));
+                self.set_error(format!("加载提交详情失败: {e:#}"));
             }
         }
-    }
-
-    /// Name of the currently opened repository (empty when the index is
-    /// stale or nothing is open).
-    pub fn current_repo_name(&self) -> &str {
-        self.repo_of(self.current_repo).map_or("", |r| &r.name)
     }
 
     /// Enter the tag panel for the current repository (repo `t`).
@@ -955,12 +975,8 @@ impl App {
         }
         self.view = View::Tags;
         self.tags_state.clear();
-        // Stale push feedback would outrank the load status below; a push
-        // still in flight keeps its receiver and re-reports on the next
-        // progress event.
-        if self.remote_rx.is_none() {
-            self.remote_status = None;
-        }
+        // Stale push feedback would outrank the load status below.
+        self.clear_finished_push_feedback();
         self.clear_error();
         self.load_tags();
     }
@@ -980,7 +996,7 @@ impl App {
     /// result is a valid state and keeps the status line clean.
     pub fn load_tags(&mut self) {
         let Some(path) = self.current_repo_path() else {
-            self.set_error("标签面板: 仓库索引失效");
+            self.set_error(invalid_repo_msg("标签面板"));
             self.tags_state.clear();
             return;
         };
@@ -1005,11 +1021,8 @@ impl App {
             buffer: String::new(),
         });
         self.status = None;
-        // A push still in flight keeps its receiver and re-reports on the
-        // next progress event; clearing it here would hide live progress.
-        if self.remote_rx.is_none() {
-            self.remote_status = None;
-        }
+        // Stale push feedback would outrank whatever the overlay reports.
+        self.clear_finished_push_feedback();
     }
 
     /// Cancel the tag-create input, keeping the list as it was.
@@ -1022,35 +1035,22 @@ impl App {
     ///
     /// An empty name keeps the input open with an error; a git-side failure
     /// (duplicate name, unborn HEAD) also keeps the typed text so it can be
-    /// corrected (convention 9).
+    /// corrected (convention 9). Validation, the git call and the shared
+    /// error wording live in [`App::submit_name_create`].
     pub fn submit_tag_create(&mut self) {
         let name = match &self.tags_state.modal {
             Some(TagsModal::Input { buffer }) => buffer.trim().to_string(),
             _ => return,
         };
-        if name.is_empty() {
-            self.set_error("标签名不能为空");
-            return;
-        }
-        let Some(path) = self.current_repo_path() else {
-            self.set_error("创建标签失败: 仓库索引失效");
-            return;
-        };
-        // Refresh-first ordering: `remote_status` would otherwise outrank
-        // the create error on the panel's status line. A push still in
-        // flight keeps its receiver and re-reports on the next progress
-        // event, so it is only cleared when nothing is running.
-        if self.remote_rx.is_none() {
-            self.remote_status = None;
-        }
-        match git::create_tag(&path, &name) {
-            Ok(()) => {
-                self.tags_state.modal = None;
-                self.load_tags();
-                self.tags_state.select_name(&name);
-                self.set_info_unless_error(format!("已创建标签 {name}"));
-            }
-            Err(e) => self.set_error(format!("创建标签失败: {e}")),
+        let path = self.current_repo_path();
+        let created = self.submit_name_create(&name, "标签", path, true, |path| {
+            git::create_tag(&path, &name)
+        });
+        if created {
+            self.tags_state.modal = None;
+            self.load_tags();
+            self.tags_state.select_name(&name);
+            self.finish_create("标签", &name);
         }
     }
 
@@ -1058,20 +1058,27 @@ impl App {
     /// confirmation, convention 8).
     ///
     /// An empty list reports an error instead of opening a dialog that could
-    /// not name a target.
+    /// not name a target. The status/feedback cleanup runs first on every
+    /// path, including that early return, so the panel always starts an
+    /// operation from the same state (H5). A tag whose name is not valid
+    /// UTF-8 is refused up front: the panel shows an escaped display form
+    /// that cannot be handed back as a ref name, and a dialog promising a
+    /// deletion that would then fail with a misleading "不存在" is worse than
+    /// a plain refusal (H1/V2).
     pub fn start_tag_delete(&mut self) {
+        self.status = None;
+        // Stale push feedback would outrank the messages below.
+        self.clear_finished_push_feedback();
         let Some(tag) = self.tags_state.selected_tag() else {
             self.set_error("没有可删除的标签");
             return;
         };
+        if std::str::from_utf8(&tag.name_bytes).is_err() {
+            self.set_error("非 UTF-8 标签名暂不支持删除");
+            return;
+        }
         let tag_to_delete = tag.name.clone();
         self.tags_state.modal = Some(TagsModal::Confirm { tag_to_delete });
-        self.status = None;
-        // A push still in flight keeps its receiver and re-reports on the
-        // next progress event; clearing it here would hide live progress.
-        if self.remote_rx.is_none() {
-            self.remote_status = None;
-        }
     }
 
     /// Cancel the tag-delete confirmation.
@@ -1089,21 +1096,19 @@ impl App {
             return;
         };
         let Some(path) = self.current_repo_path() else {
-            self.set_error("删除标签失败: 仓库索引失效");
+            self.set_error(invalid_repo_msg("删除标签失败"));
             return;
         };
-        // Refresh-first ordering, as in `submit_tag_create`: a push still
-        // in flight keeps its receiver and re-reports on the next progress
-        // event, so it is only cleared when nothing is running.
-        if self.remote_rx.is_none() {
-            self.remote_status = None;
-        }
+        // Refresh-first ordering, as in `submit_tag_create`: a stale push
+        // result would otherwise outrank the outcome written below.
+        self.clear_finished_push_feedback();
         match git::delete_tag(&path, &tag_to_delete) {
             Ok(()) => {
                 self.load_tags();
                 self.set_info_unless_error(format!("已删除标签 {tag_to_delete}"));
             }
-            Err(e) => self.set_error(format!("删除标签失败: {e}")),
+            // `{e:#}` keeps the git layer's cause next to its context (H2).
+            Err(e) => self.set_error(format!("删除标签失败: {e:#}")),
         }
     }
 
@@ -1115,49 +1120,75 @@ impl App {
     /// [`RemoteStatus`] on the panel's status line. Pressing `p` / `a`
     /// while another remote or batch op is in flight (they would contend on
     /// the same repository locks) reports `已有远端操作进行中` instead of
-    /// dropping the key silently; outside the tag panel it stays a no-op.
-    /// That notice shares the status row with the running gauge (see
-    /// [`crate::ui::remote::render_remote_status`]), so it is never hidden
-    /// by the very progress display that triggered it.
+    /// dropping the key silently — that refusal lives inside
+    /// [`App::spawn_remote_task`] with every other remote op (H8); outside
+    /// the tag panel it stays a no-op. The notice shares the status row with
+    /// the running feedback (see [`crate::ui::remote::render_remote_status`]),
+    /// so it is never hidden by the very display that triggered it. A
+    /// highlighted tag whose name is not valid UTF-8 is refused with an
+    /// explicit reason before any task is spawned (H1/V2).
     pub fn start_tag_push(&mut self, all: bool) {
         if self.view != View::Tags {
             return;
         }
-        if self.remote_rx.is_some() || self.batch_rx.is_some() {
-            self.set_info("已有远端操作进行中");
-            return;
-        }
+        // Every path below writes the status line, so stale feedback is
+        // dropped first — including on the early returns (H5).
+        self.clear_finished_push_feedback();
         let Some(path) = self.current_repo_path() else {
-            self.set_error("标签推送失败: 仓库索引失效");
+            self.set_error(invalid_repo_msg("标签推送失败"));
             return;
         };
-        let tag = if all {
-            // Pushing every tag on a repository without any would spawn a
-            // task that reports success while doing nothing.
-            if self.tags_state.tags.is_empty() {
-                self.set_error("没有可推送的标签");
+        let tag = match self.push_tag_target(all) {
+            Ok(tag) => tag,
+            Err(message) => {
+                self.set_error(message);
                 return;
-            }
-            None
-        } else {
-            match self.tags_state.selected_tag() {
-                Some(tag) => Some(tag.name.clone()),
-                None => {
-                    self.set_error("没有可推送的标签");
-                    return;
-                }
             }
         };
         let message = match &tag {
             Some(name) => format!("正在 push 标签 {name}…"),
             None => "正在 push 所有标签…".to_string(),
         };
-        self.spawn_remote_task("push", message, move || async move {
-            match tag {
-                Some(name) => git::push_tag(&path, &name).await,
-                None => git::push_all_tags(&path).await,
+        self.spawn_remote_task(
+            "push",
+            message,
+            Some("已有远端操作进行中"),
+            move || async move {
+                match tag {
+                    Some(name) => git::push_tag(&path, &name).await,
+                    None => git::push_all_tags(&path).await,
+                }
+            },
+        );
+    }
+
+    /// The tag a panel push should publish: `Ok(None)` for "every tag"
+    /// (`all == true`), `Ok(Some(name))` for the highlighted one, and `Err`
+    /// with the status-line text when there is nothing to push (G16).
+    ///
+    /// Pushing every tag on a repository without any would spawn a task that
+    /// reports success while doing nothing, and a push with no highlighted
+    /// tag has no target — both refuse before any task is spawned. A
+    /// highlighted tag whose name is not valid UTF-8 is refused the same way:
+    /// the panel holds an escaped display form, and feeding it back would
+    /// build a refspec that can never match the real ref (H1/V2). The
+    /// push-all path needs no name at all (`git push --tags`), so it stays
+    /// available.
+    fn push_tag_target(&self, all: bool) -> Result<Option<String>, &'static str> {
+        if all {
+            if self.tags_state.tags.is_empty() {
+                return Err("没有可推送的标签");
             }
-        });
+            Ok(None)
+        } else {
+            match self.tags_state.selected_tag() {
+                Some(tag) if std::str::from_utf8(&tag.name_bytes).is_err() => {
+                    Err("非 UTF-8 标签名暂不支持推送")
+                }
+                Some(tag) => Ok(Some(tag.name.clone())),
+                None => Err("没有可推送的标签"),
+            }
+        }
     }
 
     /// Enter the scan-dir configuration panel (dashboard `c`).
@@ -1168,6 +1199,9 @@ impl App {
     pub fn enter_config(&mut self) {
         self.view = View::Config;
         clamp_selection(&mut self.config_state, self.config.scan_dirs.len());
+        // Stale push feedback must not survive into the view; a push still
+        // in flight keeps its receiver (G3/G19).
+        self.clear_finished_push_feedback();
         self.clear_error();
     }
 
@@ -1452,7 +1486,7 @@ impl App {
     /// (checkpoint 2).
     pub fn load_branches(&mut self) {
         let Some(path) = self.branch_repo_path() else {
-            self.set_error("分支面板: 仓库索引失效".to_string());
+            self.set_error(invalid_repo_msg("分支面板"));
             self.branches.clear();
             self.branch_state.select(None);
             return;
@@ -1518,28 +1552,74 @@ impl App {
     ///
     /// An empty name keeps the input open with an error; a git-side failure
     /// also keeps the typed text so it can be corrected (convention 9).
+    /// Validation, the git call and the shared error wording live in
+    /// [`App::submit_name_create`]; the panel-specific refresh stays here.
     pub fn submit_branch_create(&mut self) {
         let name = self.branch_input.trim().to_string();
-        if name.is_empty() {
-            self.set_error("分支名不能为空".to_string());
-            return;
-        }
-        let Some(path) = self.branch_repo_path() else {
-            self.set_error("创建分支失败: 仓库索引失效".to_string());
-            return;
-        };
-        match git::create_branch(&path, &name) {
-            Ok(()) => {
-                self.show_branch_input = false;
-                self.branch_input.clear();
-                self.after_branch_change();
-                if let Some(i) = self.branches.iter().position(|b| b.name == name) {
-                    self.branch_state.select(Some(i));
-                }
-                self.set_info_unless_error(format!("已创建分支 {name}"));
+        let path = self.branch_repo_path();
+        // `false`: the branch panel never renders push feedback, so it keeps
+        // its historical no-op and leaves a settled remote result alone.
+        let created = self.submit_name_create(&name, "分支", path, false, |path| {
+            git::create_branch(&path, &name)
+        });
+        if created {
+            self.show_branch_input = false;
+            self.branch_input.clear();
+            self.after_branch_change();
+            if let Some(i) = self.branches.iter().position(|b| b.name == name) {
+                self.branch_state.select(Some(i));
             }
-            Err(e) => self.set_error(format!("创建分支失败: {e}")),
+            self.finish_create("分支", &name);
         }
+    }
+
+    /// Shared create flow behind the tag and branch name inputs (G4):
+    /// validate the trimmed `name` for `noun` (`标签` / `分支`), resolve the
+    /// repository, and run `create_fn` against it.
+    ///
+    /// Every message is the wording both panels already used verbatim:
+    /// `<noun>名不能为空`, [`invalid_repo_msg`] with `创建< noun >失败`, and
+    /// `创建< noun >失败: {e:#}` — the `#` keeps a cause added by the git
+    /// layer's context on the status line (H2). Returns `true` only when
+    /// `create_fn` succeeded, so the caller refreshes its own list and
+    /// selection on success alone.
+    ///
+    /// `clear_stale_feedback` drops settled push feedback before the git
+    /// call runs (refresh-first ordering: the tag panel renders it above the
+    /// status line, so a stale result would outrank the create error). The
+    /// branch panel passes `false` because it never shows that feedback.
+    fn submit_name_create(
+        &mut self,
+        name: &str,
+        noun: &str,
+        path: Option<std::path::PathBuf>,
+        clear_stale_feedback: bool,
+        create_fn: impl FnOnce(std::path::PathBuf) -> Result<()>,
+    ) -> bool {
+        if name.is_empty() {
+            self.set_error(format!("{noun}名不能为空"));
+            return false;
+        }
+        let Some(path) = path else {
+            self.set_error(invalid_repo_msg(&format!("创建{noun}失败")));
+            return false;
+        };
+        if clear_stale_feedback {
+            self.clear_finished_push_feedback();
+        }
+        match create_fn(path) {
+            Ok(()) => true,
+            Err(e) => {
+                self.set_error(format!("创建{noun}失败: {e:#}"));
+                false
+            }
+        }
+    }
+
+    /// Shared success report of the create flows (G4): `noun` is the panel's
+    /// word (`标签` / `分支`), so both read `已创建< noun > <name>`.
+    fn finish_create(&mut self, noun: &str, name: &str) {
+        self.set_info_unless_error(format!("已创建{noun} {name}"));
     }
 
     /// Open the delete confirmation for the selected branch (discard-style
@@ -1692,24 +1772,19 @@ impl App {
                     self.open_commit();
                     true
                 }
-                KeyCode::Char('p') => {
-                    self.start_remote("push");
-                    true
-                }
-                KeyCode::Char('l') => {
-                    self.start_remote("pull");
-                    true
-                }
-                KeyCode::Char('b') => {
-                    self.enter_branches();
-                    true
-                }
-                KeyCode::Char('h') => {
-                    self.enter_history();
-                    true
-                }
-                KeyCode::Char('t') => {
-                    self.enter_tags();
+                // The five entry keys are the same shape — run one action,
+                // keep looping — so they share a single arm instead of five
+                // copies (G15): push / pull, then the branch, history and
+                // tag panels.
+                KeyCode::Char(c) => {
+                    match c {
+                        'p' => self.start_remote("push"),
+                        'l' => self.start_remote("pull"),
+                        'b' => self.enter_branches(),
+                        'h' => self.enter_history(),
+                        't' => self.enter_tags(),
+                        _ => {}
+                    }
                     true
                 }
                 _ => true,
@@ -1811,26 +1886,28 @@ impl App {
     fn handle_history_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.leave_history(),
-            KeyCode::Char('j') | KeyCode::Down => {
-                // The detail reload opens the repository and re-diffs the
-                // whole tree, so a press that cannot move the cursor (empty
-                // list, already at the last row) must not pay for it.
-                let before = self.history.selected;
-                self.history.move_selection(true);
-                if self.history.selected != before {
-                    self.load_history_detail();
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                let before = self.history.selected;
-                self.history.move_selection(false);
-                if self.history.selected != before {
-                    self.load_history_detail();
-                }
-            }
+            KeyCode::Char('j') | KeyCode::Down => self.move_history_selection(true),
+            KeyCode::Char('k') | KeyCode::Up => self.move_history_selection(false),
             _ => {}
         }
         true
+    }
+
+    /// Move the history selection one row and reload the highlighted
+    /// commit's detail when the cursor actually moved (G13: both `j` and `k`
+    /// used to repeat this pair of steps verbatim).
+    ///
+    /// A press that cannot move the cursor (empty list, already at the edge)
+    /// skips the reload: it re-opens the repository and re-diffs the whole
+    /// tree, and a clamped press would otherwise pay for that on every
+    /// repeat. See [`App::load_history_detail`] for why that reload still
+    /// runs synchronously (known limitation, G38).
+    fn move_history_selection(&mut self, down: bool) {
+        let before = self.history.selected;
+        self.history.move_selection(down);
+        if self.history.selected != before {
+            self.load_history_detail();
+        }
     }
 
     /// Key handler for the tag panel: the create input and the delete
@@ -1843,46 +1920,61 @@ impl App {
     /// create input treats `q` as text, otherwise tag names could not
     /// contain the letter.
     fn handle_tags_key(&mut self, key: KeyEvent) -> bool {
-        // Route the press through the open overlay first; the borrow of
-        // `tags_state.modal` ends with this match so the actions below can
-        // take `&mut self` again.
-        let outcome = match self.tags_state.modal.as_mut() {
-            Some(TagsModal::Input { buffer }) => {
-                TagsOverlayOutcome::Input(input_modal_key(key, buffer))
-            }
+        // The routing match resolves the open overlay — or the list — into
+        // exactly one action, so the borrow of `tags_state.modal` ends
+        // before this single flat match acts on the app (G14).
+        match self.route_tags_key(key) {
+            TagsOverlayOutcome::CancelCreate => self.cancel_tag_create(),
+            TagsOverlayOutcome::SubmitCreate => self.submit_tag_create(),
+            TagsOverlayOutcome::ConfirmDelete => self.confirm_tag_delete(),
+            TagsOverlayOutcome::CancelDelete => self.cancel_tag_delete(),
+            TagsOverlayOutcome::Leave => self.leave_tags(),
+            TagsOverlayOutcome::Move(down) => self.tags_state.move_selection(down),
+            TagsOverlayOutcome::OpenCreate => self.start_tag_create(),
+            TagsOverlayOutcome::OpenDelete => self.start_tag_delete(),
+            TagsOverlayOutcome::Push(all) => self.start_tag_push(all),
+            TagsOverlayOutcome::Ignored => {}
+        }
+        true
+    }
+
+    /// Turn one press into the single action it asks for: routed through the
+    /// create input or the delete confirmation while one of them is open,
+    /// through the list keys otherwise. Nothing on the app is touched, so
+    /// the caller can act after the modal borrow has ended.
+    fn route_tags_key(&mut self, key: KeyEvent) -> TagsOverlayOutcome {
+        match self.tags_state.modal.as_mut() {
+            Some(TagsModal::Input { buffer }) => match input_modal_key(key, buffer) {
+                InputOutcome::Cancel => TagsOverlayOutcome::CancelCreate,
+                InputOutcome::Submit => TagsOverlayOutcome::SubmitCreate,
+                InputOutcome::Consumed => TagsOverlayOutcome::Ignored,
+            },
             Some(TagsModal::Confirm { .. }) => {
+                // `q` dismisses the confirmation like `n` (and every other
+                // press), so the "close the modal first" rule holds for
+                // both keys.
                 let confirm = if key.code == KeyCode::Char('q') {
                     ConfirmOutcome::No
                 } else {
                     confirm_modal_key(key)
                 };
-                TagsOverlayOutcome::Confirm(confirm)
+                match confirm {
+                    ConfirmOutcome::Yes => TagsOverlayOutcome::ConfirmDelete,
+                    ConfirmOutcome::No => TagsOverlayOutcome::CancelDelete,
+                    ConfirmOutcome::Ignored => TagsOverlayOutcome::Ignored,
+                }
             }
-            None => TagsOverlayOutcome::List,
-        };
-        match outcome {
-            TagsOverlayOutcome::Input(outcome) => match outcome {
-                InputOutcome::Cancel => self.cancel_tag_create(),
-                InputOutcome::Submit => self.submit_tag_create(),
-                InputOutcome::Consumed => {}
-            },
-            TagsOverlayOutcome::Confirm(outcome) => match outcome {
-                ConfirmOutcome::Yes => self.confirm_tag_delete(),
-                ConfirmOutcome::No => self.cancel_tag_delete(),
-                ConfirmOutcome::Ignored => {}
-            },
-            TagsOverlayOutcome::List => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => self.leave_tags(),
-                KeyCode::Char('j') | KeyCode::Down => self.tags_state.move_selection(true),
-                KeyCode::Char('k') | KeyCode::Up => self.tags_state.move_selection(false),
-                KeyCode::Char('c') => self.start_tag_create(),
-                KeyCode::Char('d') => self.start_tag_delete(),
-                KeyCode::Char('p') => self.start_tag_push(false),
-                KeyCode::Char('a') => self.start_tag_push(true),
-                _ => {}
+            None => match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => TagsOverlayOutcome::Leave,
+                KeyCode::Char('j') | KeyCode::Down => TagsOverlayOutcome::Move(true),
+                KeyCode::Char('k') | KeyCode::Up => TagsOverlayOutcome::Move(false),
+                KeyCode::Char('c') => TagsOverlayOutcome::OpenCreate,
+                KeyCode::Char('d') => TagsOverlayOutcome::OpenDelete,
+                KeyCode::Char('p') => TagsOverlayOutcome::Push(false),
+                KeyCode::Char('a') => TagsOverlayOutcome::Push(true),
+                _ => TagsOverlayOutcome::Ignored,
             },
         }
-        true
     }
 
     /// Key handler for the config panel: modal input / delete-confirm take
@@ -2033,17 +2125,35 @@ fn clamp_selection(state: &mut ListState, len: usize) {
     state.select(Some(idx));
 }
 
-/// What one key press did in the tag panel: routed through the open overlay
-/// (input or confirmation) or left for list navigation. Returned by the
-/// routing match in [`App::handle_tags_key`] so the borrow of the modal ends
-/// before the action runs on the app.
+/// What one key press in the tag panel asks the app to do.
+///
+/// [`App::route_tags_key`] resolves the press — through the open overlay, or
+/// through the list when none is open — into exactly one of these actions;
+/// [`App::handle_tags_key`] then runs it in a single flat match. Both the
+/// routing and the action happen after the borrow of `tags_state.modal` has
+/// ended (G14: the previous shape nested four matches deep).
 enum TagsOverlayOutcome {
-    /// The create input processed the key.
-    Input(InputOutcome),
-    /// The delete confirmation processed the key.
-    Confirm(ConfirmOutcome),
-    /// No overlay is open: the key belongs to the list.
-    List,
+    /// Esc on the create input: close it, keeping the list as it was.
+    CancelCreate,
+    /// Enter on the create input: create the typed tag.
+    SubmitCreate,
+    /// y on the delete confirmation: delete the named tag.
+    ConfirmDelete,
+    /// n / Esc / q on the delete confirmation: dismiss it.
+    CancelDelete,
+    /// `q` / `Esc` on the list: return to the repo view.
+    Leave,
+    /// j / k (or the arrows) on the list: move the highlight down / up.
+    Move(bool),
+    /// `c` on the list: open the create input.
+    OpenCreate,
+    /// `d` on the list: open the delete confirmation.
+    OpenDelete,
+    /// `p` / `a` on the list: push the highlighted tag / every local tag.
+    Push(bool),
+    /// A key the overlay consumed without asking the caller to act, or a
+    /// list key the panel does not bind.
+    Ignored,
 }
 
 /// Outcome of routing one key press through [`input_modal_key`].
@@ -2102,9 +2212,11 @@ fn confirm_modal_key(key: KeyEvent) -> ConfirmOutcome {
     }
 }
 
-/// Render the first 7 hex characters of a commit id for the status line.
-fn short_oid(oid: &git2::Oid) -> String {
-    oid.to_string().chars().take(7).collect()
+/// Status-line text for a stale repository index (G20): one template for
+/// every entry point, `<op>: 仓库索引失效`, so the wording cannot drift
+/// between the commit flow, the panels and the create/delete paths.
+fn invalid_repo_msg(op: &str) -> String {
+    format!("{op}: 仓库索引失效")
 }
 
 /// Run the TUI until the user quits (`q` / `Esc` on the dashboard).
@@ -2448,13 +2560,18 @@ mod tests {
         assert_eq!(app.view, View::Commit);
         assert!(app.commit_message.is_empty());
 
-        // ...but is blocked while a remote operation is in flight.
+        // ...but is blocked while a remote operation is in flight, and the
+        // key says so instead of dropping silently (G21, R7).
         let (_tx, rx) = mpsc::unbounded_channel();
         app.remote_rx = Some(rx);
         app.view = View::Repo;
         app.open_commit();
         assert_eq!(app.view, View::Repo);
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error, "{}", st.message);
+        assert_eq!(st.message, "已有远端操作进行中");
         app.remote_rx = None;
+        app.status = None;
 
         // Submit without an open repo: error, returns to the repo view,
         // typed message kept.
@@ -3758,7 +3875,8 @@ mod tests {
         app.remote_rx = None;
         drop(rtx);
 
-        // Valid start: arms the receiver, initial progress, clears the status.
+        // Valid start: arms the receiver, initial running status, clears the
+        // status.
         app.status = Some(StatusLine {
             message: "old".to_string(),
             is_error: true,
@@ -3766,7 +3884,7 @@ mod tests {
         app.start_remote("pull");
         assert!(app.remote_rx.is_some());
         assert_eq!(app.remote_op, "pull");
-        assert!(matches!(app.remote_status, Some(RemoteStatus::Progress(_))));
+        assert!(matches!(app.remote_status, Some(RemoteStatus::Running(_))));
         assert!(app.status.is_none());
     }
 
@@ -4180,7 +4298,7 @@ mod tests {
         assert_eq!(app.history.commits.len(), 1);
         assert_eq!(app.history.commits[0].summary, "v1");
         assert_eq!(app.history.graph.len(), 1);
-        assert_eq!(app.history.graph[0][0].glyph, '●');
+        assert_eq!(app.history.graph[0][0], '●');
         // First commit selected, cursor and detail preloaded, no error.
         assert_eq!(app.history.selected, 0);
         assert_eq!(app.history.list_state.selected(), Some(0));
@@ -4469,6 +4587,29 @@ mod tests {
         }
         assert_eq!(app.tags_state.tags.len(), 1, "no tag was created twice");
 
+        // Esc closes the stale overlay, a fresh `c` opens a clean one.
+        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.tags_state.modal.is_none());
+
+        // Invalid name: the status line carries the full git error chain,
+        // including the underlying `invalid reference name` (H2).
+        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        for c in "v1.0 beta".chars() {
+            assert!(app.handle_key(key(KeyCode::Char(c))));
+        }
+        assert!(app.handle_key(key(KeyCode::Enter)));
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(st.message.contains("创建标签失败"), "{}", st.message);
+        // The underlying libgit2 cause ("… reference name … is not valid")
+        // must surface past the anyhow context (H2).
+        assert!(st.message.contains("is not valid"), "{}", st.message);
+        match &app.tags_state.modal {
+            Some(TagsModal::Input { buffer }) => assert_eq!(buffer, "v1.0 beta"),
+            other => panic!("input overlay must stay open, got {other:?}"),
+        }
+        assert_eq!(app.tags_state.tags.len(), 1, "no tag was created");
+
         // Esc cancels the overlay but stays in the panel.
         assert!(app.handle_key(key(KeyCode::Esc)));
         assert!(app.tags_state.modal.is_none());
@@ -4525,6 +4666,84 @@ mod tests {
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
         assert!(st.message.contains("没有可删除的标签"), "{}", st.message);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H1/V2: a tag whose name is not valid UTF-8 stays visible in the panel
+    /// as an escaped display form, but that form is not the ref name — `d`
+    /// and `p` must refuse with an explicit reason instead of opening a
+    /// confirmation that would delete nothing or spawning a push whose
+    /// refspec can never match.
+    #[cfg(unix)]
+    #[test]
+    fn tags_non_utf8_name_refuses_delete_and_push_with_explicit_reason() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = temp_dir("tags-nonutf8");
+        init_repo_with_commit(&dir);
+        {
+            let repo = git2::Repository::open(&dir).unwrap();
+            let head = repo.head().unwrap();
+            let object = head.peel(git2::ObjectType::Commit).unwrap();
+            git::create_tag(&dir, "utf8-tag").unwrap();
+            // `git2` only accepts `&str` reference names, so the loose ref
+            // file is written directly with a name that is not valid UTF-8.
+            let ref_dir = repo.path().join("refs/tags");
+            std::fs::create_dir_all(&ref_dir).unwrap();
+            std::fs::write(
+                ref_dir.join(OsStr::from_bytes(b"bad-\xFF-tag")),
+                format!("{}\n", object.id()),
+            )
+            .unwrap();
+        }
+
+        let mut app = app_with_repo_at(&dir);
+        enter_tags(&mut app);
+        assert_eq!(app.tags_state.tags.len(), 2);
+        // The escaped name sorts first (`"` precedes every letter), so the
+        // highlighted tag is the non-UTF-8 one.
+        assert_eq!(
+            app.tags_state.selected_tag().unwrap().name,
+            "\"bad-\\xFF-tag\""
+        );
+
+        // d refuses before the confirmation: explicit error, no overlay,
+        // and nothing deleted.
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.tags_state.modal.is_none(), "confirmation must not open");
+        assert_eq!(app.tags_state.tags.len(), 2, "no tag was deleted");
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(
+            st.message.contains("非 UTF-8 标签名暂不支持删除"),
+            "{}",
+            st.message
+        );
+
+        // p refuses the same way and never spawns a push task (a
+        // `tokio::spawn` outside a runtime would panic).
+        assert!(app.handle_key(key(KeyCode::Char('p'))));
+        assert!(app.remote_rx.is_none());
+        let st = app.status.as_ref().unwrap();
+        assert!(st.is_error);
+        assert!(
+            st.message.contains("非 UTF-8 标签名暂不支持推送"),
+            "{}",
+            st.message
+        );
+
+        // The UTF-8 tag beside it still opens the confirmation normally.
+        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.tags_state.selected_tag().unwrap().name, "utf8-tag");
+        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert_eq!(
+            app.tags_state.modal,
+            Some(TagsModal::Confirm {
+                tag_to_delete: "utf8-tag".to_string()
+            })
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4680,10 +4899,10 @@ mod tests {
         let (dir, mut app) = app_with_tagged_repo("tags-push-noremote", &["v1.0"]);
         enter_tags(&mut app);
 
-        // p arms the task with an initial progress status line…
+        // p arms the task with an initial running status line…
         assert!(app.handle_key(key(KeyCode::Char('p'))));
         assert!(app.remote_rx.is_some());
-        assert!(matches!(app.remote_status, Some(RemoteStatus::Progress(_))));
+        assert!(matches!(app.remote_status, Some(RemoteStatus::Running(_))));
 
         // …and finishes with the readable "no remote" reason in red.
         settle_remote(&mut app).await;
@@ -4754,67 +4973,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// F1: pressing `p` while a push is already in flight records
-    /// `已有远端操作进行中` — and that notice must be on screen beside the gauge
-    /// that used to swallow it, in the very same frame.
+    /// F1/G1: pressing `p` while a push is already in flight records
+    /// `已有远端操作进行中` — and that notice must be on screen beside the
+    /// running feedback that used to swallow it, in the very same frame
+    /// (the feedback is the running text now, not a frozen gauge).
     #[test]
-    fn tags_push_rejected_while_running_shows_notice_beside_gauge() {
+    fn tags_push_rejected_while_running_shows_notice_beside_running_text() {
         let (dir, mut app) = app_with_tagged_repo("tags-push-busy", &["v1.0"]);
         enter_tags(&mut app);
 
-        // A push already in flight, with its gauge on the status row.
+        // A push already in flight, with its running text on the status row.
         let (_tx, rx) = mpsc::unbounded_channel::<Result<(), String>>();
         app.remote_rx = Some(rx);
         app.remote_op = "push";
-        app.remote_status = Some(RemoteStatus::Progress(Progress {
-            percent: 42,
-            message: "正在 push 标签 v1.0…".to_string(),
-        }));
+        app.remote_status = Some(RemoteStatus::Running("正在 push 标签 v1.0…".to_string()));
 
         assert!(app.handle_key(key(KeyCode::Char('p'))));
-        // The running operation is untouched: no second task, same gauge.
+        // The running operation is untouched: no second task, same status.
         assert!(app.remote_rx.is_some());
-        assert!(matches!(app.remote_status, Some(RemoteStatus::Progress(_))));
+        assert!(matches!(app.remote_status, Some(RemoteStatus::Running(_))));
         let st = app.status.as_ref().expect("notice must be recorded");
         assert!(!st.is_error, "{}", st.message);
         assert_eq!(st.message, "已有远端操作进行中");
 
+        // Both share one row: the running text keeps its cell and the
+        // notice renders beside it — and no frozen percentage is drawn.
         let text = render_text(&mut app);
         assert!(
             text.contains("已有远端操作进行中"),
-            "notice hidden by gauge: {text}"
+            "notice hidden by the running text: {text}"
         );
-        assert!(text.contains("42%"), "gauge must stay on screen: {text}");
+        assert!(
+            text.contains("正在push标签v1.0…"),
+            "running text must stay on screen: {text}"
+        );
+        assert!(
+            !text.contains('%'),
+            "frozen progress percent must be gone: {text}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Arm the receiver and gauge of a push that is still in flight — the
-    /// state `spawn_remote_task` publishes — and hand back the sender so the
-    /// channel stays connected for the duration of the test.
-    fn arm_remote_progress(
-        app: &mut App,
-        percent: u8,
-    ) -> mpsc::UnboundedSender<Result<(), String>> {
+    /// Arm the receiver and running status of a push that is still in
+    /// flight — the state `spawn_remote_task` publishes — and hand back the
+    /// sender so the channel stays connected for the duration of the test.
+    fn arm_remote_running(app: &mut App) -> mpsc::UnboundedSender<Result<(), String>> {
         let (tx, rx) = mpsc::unbounded_channel();
         app.remote_rx = Some(rx);
         app.remote_op = "push";
-        app.remote_status = Some(RemoteStatus::Progress(Progress {
-            percent,
-            message: "正在 push 标签 v1.0…".to_string(),
-        }));
+        app.remote_status = Some(RemoteStatus::Running("正在 push 标签 v1.0…".to_string()));
         tx
     }
 
     /// R6: while a push is running, opening the tag-create input must not
-    /// wipe its live gauge — the receiver keeps re-reporting on the next
-    /// progress event, so clearing `remote_status` here would hide it.
+    /// wipe its live running text — the receiver keeps reporting the state,
+    /// so clearing `remote_status` here would hide it.
     #[test]
     fn tags_create_input_keeps_live_progress_while_remote_running() {
         let (dir, mut app) = app_with_tagged_repo("tags-busy-create", &["v1.0"]);
         enter_tags(&mut app);
-        let _tx = arm_remote_progress(&mut app, 42);
-        let gauge = app.remote_status.clone();
+        let _tx = arm_remote_running(&mut app);
+        let running = app.remote_status.clone();
 
         assert!(app.handle_key(key(KeyCode::Char('c'))));
         assert!(
@@ -4826,21 +5046,21 @@ mod tests {
             "the running push keeps its receiver"
         );
         assert_eq!(
-            app.remote_status, gauge,
-            "live progress must not be cleared by `start_tag_create`"
+            app.remote_status, running,
+            "live running status must not be cleared by `start_tag_create`"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// R6: submitting the tag create while a push is running still creates
-    /// the tag, but the running gauge survives the entry point.
+    /// the tag, but the running text survives the entry point.
     #[test]
     fn tags_create_submit_keeps_live_progress_while_remote_running() {
         let (dir, mut app) = app_with_tagged_repo("tags-busy-create-submit", &["v1.0"]);
         enter_tags(&mut app);
-        let _tx = arm_remote_progress(&mut app, 42);
-        let gauge = app.remote_status.clone();
+        let _tx = arm_remote_running(&mut app);
+        let running = app.remote_status.clone();
 
         assert!(app.handle_key(key(KeyCode::Char('c'))));
         for c in "v2.0".chars() {
@@ -4856,21 +5076,21 @@ mod tests {
             "the running push keeps its receiver"
         );
         assert_eq!(
-            app.remote_status, gauge,
-            "live progress must not be cleared by `submit_tag_create`"
+            app.remote_status, running,
+            "live running status must not be cleared by `submit_tag_create`"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// R6: opening the delete confirmation while a push is running must not
-    /// wipe its live gauge either.
+    /// wipe its live running text either.
     #[test]
     fn tags_delete_start_keeps_live_progress_while_remote_running() {
         let (dir, mut app) = app_with_tagged_repo("tags-busy-delete", &["v1.0"]);
         enter_tags(&mut app);
-        let _tx = arm_remote_progress(&mut app, 42);
-        let gauge = app.remote_status.clone();
+        let _tx = arm_remote_running(&mut app);
+        let running = app.remote_status.clone();
 
         assert!(app.handle_key(key(KeyCode::Char('d'))));
         assert_eq!(
@@ -4885,21 +5105,21 @@ mod tests {
             "the running push keeps its receiver"
         );
         assert_eq!(
-            app.remote_status, gauge,
-            "live progress must not be cleared by `start_tag_delete`"
+            app.remote_status, running,
+            "live running status must not be cleared by `start_tag_delete`"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// R6: confirming the tag deletion while a push is running still deletes
-    /// the tag, but the running gauge survives the entry point.
+    /// the tag, but the running text survives the entry point.
     #[test]
     fn tags_delete_confirm_keeps_live_progress_while_remote_running() {
         let (dir, mut app) = app_with_tagged_repo("tags-busy-delete-confirm", &["drop", "keep"]);
         enter_tags(&mut app);
-        let _tx = arm_remote_progress(&mut app, 42);
-        let gauge = app.remote_status.clone();
+        let _tx = arm_remote_running(&mut app);
+        let running = app.remote_status.clone();
 
         assert!(app.handle_key(key(KeyCode::Char('d'))));
         assert!(app.handle_key(key(KeyCode::Char('y'))));
@@ -4910,8 +5130,8 @@ mod tests {
             "the running push keeps its receiver"
         );
         assert_eq!(
-            app.remote_status, gauge,
-            "live progress must not be cleared by `confirm_tag_delete`"
+            app.remote_status, running,
+            "live running status must not be cleared by `confirm_tag_delete`"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
