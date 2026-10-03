@@ -1,11 +1,15 @@
 //! TUI rendering: view dispatch shared by all screens.
 
 pub mod branches;
+pub mod checks;
 pub mod commit;
 pub mod config;
 pub mod dashboard;
 pub mod diff;
 pub mod history;
+pub mod issues;
+pub mod notifications;
+pub mod pulls;
 pub mod remote;
 pub mod repo;
 pub mod status;
@@ -264,6 +268,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
         View::Config => render_config_view(f, app),
         View::History => render_history_view(f, app),
         View::Tags => render_tags_view(f, app),
+        View::Pulls => pulls::render_pulls(f, app),
+        View::PullDetail => pulls::render_pull_detail(f, app),
+        View::Checks => checks::render_checks(f, app),
+        View::Issues => issues::render_issues(f, app),
+        View::Notifications => notifications::render_notifications(f, app),
     }
 }
 

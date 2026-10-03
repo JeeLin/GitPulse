@@ -58,6 +58,27 @@ fn pick_remote(names: &[String]) -> Result<String> {
     Ok(first.clone())
 }
 
+/// Resolve the URL of the repository's primary remote.
+///
+/// `origin` is preferred (the GitHub convention GitPulse assumes for receipt
+/// lookups), with `upstream` as a fallback so a fork that still points its
+/// upstream at GitHub resolves. Returns an error when neither is configured,
+/// mirroring [`resolve_remote`] but specialized for owner/repo resolution.
+pub fn remote_url(repo_path: &Path) -> Result<String> {
+    let repo = Repository::open(repo_path)?;
+    // `find_remote` errors when the name is absent; the second arm is the
+    // "try upstream" fallthrough (G29: shared git-process setup is not needed
+    // here because this is a git2 query, not a subprocess).
+    let remote = repo
+        .find_remote("origin")
+        .or_else(|_| repo.find_remote("upstream"))
+        .with_context(|| "仓库未配置 origin/upstream 远端，无法解析 GitHub 回执信息")?;
+    let Some(url) = remote.url() else {
+        anyhow::bail!("远端 URL 不是有效的 UTF-8，无法解析 GitHub 回执信息");
+    };
+    Ok(url.to_string())
+}
+
 /// Full refspec of a local branch: `refs/heads/<branch>`.
 ///
 /// Handing the branch to git as a bare positional argument lets git read a
@@ -427,6 +448,52 @@ mod tests {
             err.contains("terminal prompts disabled"),
             "expected a readable fast-failure, got: {err}"
         );
+    }
+
+    /// `remote_url` resolves the `origin` remote's URL, mirroring the
+    /// `base_dir`/`init_repo` fixture style used by the other tests in this
+    /// module.
+    #[test]
+    fn remote_url_resolves_origin_remote() {
+        let dir = base_dir("remote-url");
+        init_repo(&dir);
+        {
+            let repo = Repository::open(&dir).unwrap();
+            repo.remote("origin", "https://github.com/owner/repo.git")
+                .unwrap();
+        }
+        assert_eq!(
+            remote_url(&dir).unwrap(),
+            "https://github.com/owner/repo.git"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `remote_url` falls back to `upstream` when `origin` is absent.
+    #[test]
+    fn remote_url_falls_back_to_upstream() {
+        let dir = base_dir("remote-url-upstream");
+        init_repo(&dir);
+        {
+            let repo = Repository::open(&dir).unwrap();
+            repo.remote("upstream", "https://github.com/owner/fork")
+                .unwrap();
+        }
+        assert_eq!(remote_url(&dir).unwrap(), "https://github.com/owner/fork");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// No remote at all surfaces a readable error rather than panicking.
+    #[test]
+    fn remote_url_without_remote_reports_reason() {
+        let dir = base_dir("remote-url-none");
+        init_repo(&dir);
+        let err = remote_url(&dir).unwrap_err();
+        assert!(
+            err.to_string().contains("origin/upstream"),
+            "unexpected error: {err}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

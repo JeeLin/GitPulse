@@ -42,6 +42,83 @@ pub enum View {
     History,
     /// Tag management panel (create / delete / push).
     Tags,
+    /// GitHub receipts hub: the open-pull list (entered from the repo view via `g`).
+    Pulls,
+    /// Pull-request detail panel (opened from the pulls hub by `Enter`).
+    PullDetail,
+    /// CI checks panel (head-commit checks for the selected pull).
+    Checks,
+    /// GitHub issues panel.
+    Issues,
+    /// GitHub notifications panel.
+    Notifications,
+}
+
+/// Active tab within the GitHub receipts hub (`p`/`c`/`i`/`n`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GithubTab {
+    /// Open pull requests (the hub entry point).
+    #[default]
+    Pulls,
+    /// Head-commit checks for the selected pull.
+    Checks,
+    /// Open issues (excluding PRs).
+    Issues,
+    /// Repository notifications.
+    Notifications,
+}
+
+/// State of the GitHub receipts spine, owned by [`App`] and rendered directly
+/// by the `ui::pulls`/`checks`/`issues`/`notifications` panels (checkpoint 2:
+/// no separate mock data source).
+///
+/// `client` is the readiness gate built once by [`App::enter_github`]; the
+/// per-fetch tasks reconstruct a client from `owner`/`repo` (the token is
+/// cached in `resolve_token`, so that is cheap), keeping the field as an
+/// `Option<crate::github::GithubClient>` per the Lane B contract.
+#[derive(Default)]
+pub struct GithubState {
+    /// Active receipts tab.
+    pub tab: GithubTab,
+    /// `github.com` owner parsed from the current repo's remote URL.
+    pub owner: String,
+    /// Repository name parsed from the current repo's remote URL.
+    pub repo: String,
+    /// Cached client used as a credential-validity gate; `None` until
+    /// `enter_github` succeeds in building one.
+    pub client: Option<crate::github::GithubClient>,
+    /// Index of the highlighted row in the active list.
+    pub selected: usize,
+    /// Latest open-PR list.
+    pub pulls: Vec<crate::github::PrSummary>,
+    /// Detail payload of the highlighted pull request.
+    pub detail: Option<crate::github::PrDetail>,
+    /// Latest check-run list for the selected pull's head commit.
+    pub checks: Vec<crate::github::CheckSummary>,
+    /// Latest issue list.
+    pub issues: Vec<crate::github::IssueSummary>,
+    /// Latest notification list.
+    pub notifications: Vec<crate::github::NotificationSummary>,
+}
+
+/// Message sent from a background GitHub fetch task over its channel.
+///
+/// A task emits exactly one terminal message, consumed per-frame by
+/// [`App::poll_github`] — the same template every remote op shares (convention 1).
+#[derive(Debug)]
+enum GithubMsg {
+    /// Open pull-request list result.
+    Pulls(Vec<crate::github::PrSummary>),
+    /// Selected pull-request detail result.
+    Detail(crate::github::PrDetail),
+    /// Head-commit check-run list result.
+    Checks(Vec<crate::github::CheckSummary>),
+    /// Open issue list result.
+    Issues(Vec<crate::github::IssueSummary>),
+    /// Repository notification list result.
+    Notifications(Vec<crate::github::NotificationSummary>),
+    /// User-facing failure rendered via `github::render_error`.
+    Error(String),
 }
 
 /// Number of commits loaded into the history view (`App::enter_history`).
@@ -325,6 +402,10 @@ pub struct App {
     pub history: HistoryState,
     /// Tag-panel state (`View::Tags`).
     pub tags_state: TagsState,
+    /// GitHub receipts spine state (pulls / detail / checks / issues / notifications).
+    pub github_state: GithubState,
+    /// Receiver for a single in-flight GitHub fetch task (convention 1).
+    github_rx: Option<mpsc::UnboundedReceiver<GithubMsg>>,
 }
 
 impl App {
@@ -366,6 +447,8 @@ impl App {
             picker_state: ListState::default(),
             history: HistoryState::default(),
             tags_state: TagsState::default(),
+            github_state: GithubState::default(),
+            github_rx: None,
         }
     }
 
@@ -713,6 +796,301 @@ impl App {
                 self.remote_status = Some(RemoteStatus::Error("远端任务意外退出".to_string()));
                 self.remote_rx = None;
             }
+        }
+    }
+
+    /// Enter the GitHub receipts hub from the repo view (`g`).
+    ///
+    /// Resolves the current repo's remote URL to `(owner, repo)`, builds a
+    /// `GithubClient` once (cached as a credential-validity gate) and lands on
+    /// the pulls list. On a missing/non-GitHub remote or a missing token the
+    /// view still becomes [`View::Pulls`] so the panel can surface the error
+    /// and the user can retry with `r`.
+    pub fn enter_github(&mut self) {
+        self.github_state.tab = GithubTab::Pulls;
+        self.github_state.selected = 0;
+        self.github_state.owner.clear();
+        self.github_state.repo.clear();
+        self.view = View::Pulls;
+        self.clear_error();
+
+        let Some(repo) = self.current_repo_path() else {
+            self.set_error("打开 GitHub 回执失败: 未打开仓库");
+            return;
+        };
+        let url = match crate::git::remote_url(&repo) {
+            Ok(url) => url,
+            Err(e) => {
+                self.set_error(format!("解析远端失败: {e}"));
+                return;
+            }
+        };
+        let (owner, repo_name) = match crate::github::parse_remote_owner_repo(&url) {
+            Ok(parts) => parts,
+            Err(e) => {
+                self.set_error(crate::github::render_error(&e));
+                return;
+            }
+        };
+        self.github_state.owner = owner;
+        self.github_state.repo = repo_name;
+
+        if self.github_state.client.is_none() {
+            match crate::github::GithubClient::new(
+                &self.github_state.owner,
+                &self.github_state.repo,
+            ) {
+                Ok(client) => self.github_state.client = Some(client),
+                Err(e) => {
+                    self.set_error(crate::github::render_error(&e));
+                    return;
+                }
+            }
+        }
+        self.refresh_github();
+    }
+
+    /// Number of rows in the active receipts list (`0` for an empty list).
+    fn github_list_len(&self) -> usize {
+        match self.github_state.tab {
+            GithubTab::Pulls => self.github_state.pulls.len(),
+            GithubTab::Checks => self.github_state.checks.len(),
+            GithubTab::Issues => self.github_state.issues.len(),
+            GithubTab::Notifications => self.github_state.notifications.len(),
+        }
+    }
+
+    /// Clamp `selected` to the current list length.
+    fn clamp_github_selection(&mut self) {
+        let len = self.github_list_len();
+        if self.github_state.selected >= len {
+            self.github_state.selected = len.saturating_sub(1);
+        }
+    }
+
+    /// Move the receipts selection one row (`down` = toward the last row).
+    fn move_github_selection(&mut self, down: bool) {
+        let len = self.github_list_len();
+        if len == 0 {
+            return;
+        }
+        if down {
+            if self.github_state.selected + 1 < len {
+                self.github_state.selected += 1;
+            }
+        } else if self.github_state.selected > 0 {
+            self.github_state.selected -= 1;
+        }
+    }
+
+    /// Switch the active receipts tab and refresh its list.
+    fn switch_github_tab(&mut self, tab: GithubTab) -> bool {
+        self.github_state.tab = tab;
+        self.github_state.selected = 0;
+        self.view = match tab {
+            GithubTab::Pulls => View::Pulls,
+            GithubTab::Checks => View::Checks,
+            GithubTab::Issues => View::Issues,
+            GithubTab::Notifications => View::Notifications,
+        };
+        if self.github_state.client.is_some() {
+            self.refresh_github();
+        }
+        true
+    }
+
+    /// Open the detail view for the highlighted pull request.
+    fn open_github_detail(&mut self) {
+        self.view = View::PullDetail;
+        let Some(number) = self
+            .github_state
+            .pulls
+            .get(self.github_state.selected)
+            .map(|p| p.number)
+        else {
+            return;
+        };
+        // No client yet, or a fetch already in flight: just show the panel
+        // (which surfaces the error / empty state) without spawning.
+        if self.github_state.client.is_none() || self.github_rx.is_some() {
+            return;
+        }
+        let owner = self.github_state.owner.clone();
+        let repo = self.github_state.repo.clone();
+        self.remote_status = Some(RemoteStatus::Running("加载 PR…".to_string()));
+        self.remote_op = "github";
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.github_rx = Some(rx);
+        tokio::spawn(async move {
+            match crate::github::GithubClient::new(&owner, &repo) {
+                Ok(client) => match client.get_pull(number).await {
+                    Ok(detail) => {
+                        let _ = tx.send(GithubMsg::Detail(detail));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(GithubMsg::Error(crate::github::render_error(&e)));
+                    }
+                },
+                Err(e) => {
+                    let _ = tx.send(GithubMsg::Error(crate::github::render_error(&e)));
+                }
+            }
+        });
+    }
+
+    /// Refresh the active receipts list from GitHub (convention 1: background
+    /// task, per-frame drain by [`App::poll_github`]).
+    ///
+    /// The cached `client` is the readiness gate; each fetch task rebuilds a
+    /// client from `owner`/`repo` because `GithubClient` is not `Clone` and
+    /// the Lane A github module must stay untouched. The token itself is
+    /// cached in `resolve_token` (a `OnceLock`), so the rebuild is cheap.
+    fn refresh_github(&mut self) {
+        if self.github_state.client.is_none() {
+            return;
+        }
+        if self.remote_rx.is_some() || self.batch_rx.is_some() || self.github_rx.is_some() {
+            return;
+        }
+        self.remote_status = Some(RemoteStatus::Running("加载 GitHub 回执…".to_string()));
+        self.remote_op = "github";
+        let owner = self.github_state.owner.clone();
+        let repo = self.github_state.repo.clone();
+        let tab = self.github_state.tab;
+        let selected = self.github_state.selected;
+        // The Checks tab surfaces head-commit checks via the selected pull's
+        // detail — the only `get_pull` path on the verified GitHub surface.
+        let checks_number = match tab {
+            GithubTab::Checks => self.github_state.pulls.get(selected).map(|p| p.number),
+            _ => None,
+        };
+        self.github_state.detail = None;
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.github_rx = Some(rx);
+        tokio::spawn(async move {
+            let client = match crate::github::GithubClient::new(&owner, &repo) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(GithubMsg::Error(crate::github::render_error(&e)));
+                    return;
+                }
+            };
+            let send = |msg: GithubMsg| {
+                let _ = tx.send(msg);
+            };
+            match tab {
+                GithubTab::Pulls => match client.list_pulls().await {
+                    Ok(v) => send(GithubMsg::Pulls(v)),
+                    Err(e) => send(GithubMsg::Error(crate::github::render_error(&e))),
+                },
+                GithubTab::Issues => match client.list_issues().await {
+                    Ok(v) => send(GithubMsg::Issues(v)),
+                    Err(e) => send(GithubMsg::Error(crate::github::render_error(&e))),
+                },
+                GithubTab::Notifications => match client.list_notifications().await {
+                    Ok(v) => send(GithubMsg::Notifications(v)),
+                    Err(e) => send(GithubMsg::Error(crate::github::render_error(&e))),
+                },
+                GithubTab::Checks => match checks_number {
+                    Some(number) => match client.get_pull(number).await {
+                        Ok(detail) => send(GithubMsg::Checks(detail.checks)),
+                        Err(e) => send(GithubMsg::Error(crate::github::render_error(&e))),
+                    },
+                    None => send(GithubMsg::Checks(Vec::new())),
+                },
+            }
+        });
+    }
+
+    /// Drain the single GitHub fetch result per frame (convention 1).
+    pub fn poll_github(&mut self) {
+        let Some(rx) = self.github_rx.as_mut() else {
+            return;
+        };
+        let msg = match rx.try_recv() {
+            Ok(m) => m,
+            Err(mpsc::error::TryRecvError::Empty) => return,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.github_rx = None;
+                self.remote_status = Some(RemoteStatus::Error("GitHub 任务意外退出".to_string()));
+                return;
+            }
+        };
+        self.github_rx = None;
+        match msg {
+            GithubMsg::Pulls(v) => {
+                self.github_state.pulls = v;
+                self.clamp_github_selection();
+                self.remote_status = Some(RemoteStatus::Success);
+            }
+            GithubMsg::Detail(d) => {
+                self.github_state.detail = Some(d);
+                self.remote_status = Some(RemoteStatus::Success);
+            }
+            GithubMsg::Checks(v) => {
+                self.github_state.checks = v;
+                self.remote_status = Some(RemoteStatus::Success);
+            }
+            GithubMsg::Issues(v) => {
+                self.github_state.issues = v;
+                self.remote_status = Some(RemoteStatus::Success);
+            }
+            GithubMsg::Notifications(v) => {
+                self.github_state.notifications = v;
+                self.remote_status = Some(RemoteStatus::Success);
+            }
+            GithubMsg::Error(e) => {
+                self.remote_status = Some(RemoteStatus::Error(e));
+            }
+        }
+    }
+
+    /// Key handler for the GitHub receipts hub and its detail panel.
+    ///
+    /// `p`/`c`/`i`/`n` switch tabs, `r` refreshes, `j`/`k` (and arrows / space)
+    /// navigate, `Enter` opens the pull detail from the pulls hub, and `Esc`
+    /// pops: PullDetail → Pulls, any other receipts view → Repo. This handler
+    /// never exits the app (`q` returns to Repo, not the dashboard).
+    fn handle_github_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('p') => self.switch_github_tab(GithubTab::Pulls),
+            KeyCode::Char('c') => self.switch_github_tab(GithubTab::Checks),
+            KeyCode::Char('i') => self.switch_github_tab(GithubTab::Issues),
+            KeyCode::Char('n') => self.switch_github_tab(GithubTab::Notifications),
+            KeyCode::Char('r') => {
+                if self.github_state.client.is_some() {
+                    self.refresh_github();
+                }
+                true
+            }
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::Char(' ') | KeyCode::Char(',') => {
+                self.move_github_selection(true);
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.move_github_selection(false);
+                true
+            }
+            KeyCode::Enter if self.view == View::Pulls => {
+                self.open_github_detail();
+                true
+            }
+            // `Esc` pops one level: PullDetail → Pulls, all other receipt
+            // views → Repo. `q` always returns to Repo (never exits here).
+            KeyCode::Esc => {
+                if self.view == View::PullDetail {
+                    self.view = View::Pulls;
+                    self.github_state.tab = GithubTab::Pulls;
+                } else {
+                    self.view = View::Repo;
+                }
+                true
+            }
+            KeyCode::Char('q') => {
+                self.view = View::Repo;
+                true
+            }
+            _ => true,
         }
     }
 
@@ -1684,6 +2062,9 @@ impl App {
             View::Config => self.handle_config_key(key),
             View::History => self.handle_history_key(key),
             View::Tags => self.handle_tags_key(key),
+            View::Pulls | View::PullDetail | View::Checks | View::Issues | View::Notifications => {
+                self.handle_github_key(key)
+            }
         }
     }
 
@@ -1770,6 +2151,12 @@ impl App {
                 }
                 KeyCode::Char('c') => {
                     self.open_commit();
+                    true
+                }
+                // Enter the GitHub receipts hub from the repo view (M1.2: `g` is
+                // the only receipts entry key in the repo view).
+                KeyCode::Char('g') => {
+                    self.enter_github();
                     true
                 }
                 // The five entry keys are the same shape — run one action,
@@ -2253,6 +2640,7 @@ fn event_loop(terminal: &mut Tui, app: &mut App) -> Result<()> {
         }
         app.poll_remote();
         app.poll_batch();
+        app.poll_github();
     }
 }
 
@@ -5135,5 +5523,157 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pure state-machine tests for the GitHub receipts spine: no network, no
+    /// client (the readiness gate stays `None`), so no `tokio::spawn` runs and
+    /// these assert only `view` / `tab` / `selected` transitions.
+    mod github_receipt_tests {
+        use super::*;
+
+        fn github_app() -> App {
+            let mut app = App::new(Config::default());
+            app.github_state.owner = "owner".to_string();
+            app.github_state.repo = "repo".to_string();
+            // No client: every refresh/entry fetch path stays a no-op here.
+            app.github_state.client = None;
+            app
+        }
+
+        fn sample_pulls(n: usize) -> Vec<crate::github::PrSummary> {
+            (0..n)
+                .map(|i| crate::github::PrSummary {
+                    number: i as u64,
+                    title: format!("pr-{i}"),
+                    state: "open".to_string(),
+                    draft: false,
+                    author: "alice".to_string(),
+                    head_ref: "feature".to_string(),
+                    base_ref: "main".to_string(),
+                    updated_at: String::new(),
+                })
+                .collect()
+        }
+
+        #[test]
+        fn tab_switch_keys_change_view_and_tab() {
+            let mut app = github_app();
+            app.view = View::Pulls;
+
+            assert!(app.handle_key(key(KeyCode::Char('p'))));
+            assert_eq!(app.view, View::Pulls);
+            assert_eq!(app.github_state.tab, GithubTab::Pulls);
+
+            assert!(app.handle_key(key(KeyCode::Char('c'))));
+            assert_eq!(app.view, View::Checks);
+            assert_eq!(app.github_state.tab, GithubTab::Checks);
+
+            assert!(app.handle_key(key(KeyCode::Char('i'))));
+            assert_eq!(app.view, View::Issues);
+            assert_eq!(app.github_state.tab, GithubTab::Issues);
+
+            assert!(app.handle_key(key(KeyCode::Char('n'))));
+            assert_eq!(app.view, View::Notifications);
+            assert_eq!(app.github_state.tab, GithubTab::Notifications);
+        }
+
+        #[test]
+        fn tab_switch_from_checks_to_pulls() {
+            let mut app = github_app();
+            app.view = View::Checks;
+            app.github_state.tab = GithubTab::Checks;
+            assert!(app.handle_key(key(KeyCode::Char('p'))));
+            assert_eq!(app.view, View::Pulls);
+            assert_eq!(app.github_state.tab, GithubTab::Pulls);
+        }
+
+        #[test]
+        fn enter_on_pulls_opens_detail() {
+            let mut app = github_app();
+            app.view = View::Pulls;
+            app.github_state.tab = GithubTab::Pulls;
+            app.github_state.pulls = sample_pulls(1);
+            app.github_state.selected = 0;
+            // client is `None`: sets the view without spawning a fetch task.
+            assert!(app.handle_key(key(KeyCode::Enter)));
+            assert_eq!(app.view, View::PullDetail);
+        }
+
+        #[test]
+        fn detail_esc_pops_back_to_pulls() {
+            let mut app = github_app();
+            app.view = View::PullDetail;
+            assert!(app.handle_key(key(KeyCode::Esc)));
+            assert_eq!(app.view, View::Pulls);
+        }
+
+        #[test]
+        fn detail_q_returns_to_repo() {
+            let mut app = github_app();
+            app.view = View::PullDetail;
+            assert!(app.handle_key(key(KeyCode::Char('q'))));
+            assert_eq!(app.view, View::Repo);
+        }
+
+        #[test]
+        fn pulls_esc_returns_to_repo() {
+            let mut app = github_app();
+            app.view = View::Pulls;
+            assert!(app.handle_key(key(KeyCode::Esc)));
+            assert_eq!(app.view, View::Repo);
+        }
+
+        #[test]
+        fn issues_esc_returns_to_repo() {
+            let mut app = github_app();
+            app.view = View::Issues;
+            assert!(app.handle_key(key(KeyCode::Esc)));
+            assert_eq!(app.view, View::Repo);
+        }
+
+        #[test]
+        fn q_in_pulls_returns_to_repo_not_exit() {
+            let mut app = github_app();
+            app.view = View::Pulls;
+            assert!(app.handle_key(key(KeyCode::Char('q'))));
+            assert_eq!(app.view, View::Repo);
+        }
+
+        #[test]
+        fn refresh_without_client_is_a_no_op() {
+            let mut app = github_app();
+            app.view = View::Pulls;
+            app.github_state.client = None;
+            // No client: refresh never spawns and never panics.
+            assert!(app.handle_key(key(KeyCode::Char('r'))));
+            assert_eq!(app.view, View::Pulls);
+            assert!(app.github_rx.is_none());
+        }
+
+        #[test]
+        fn jk_moves_selection_within_bounds() {
+            let mut app = github_app();
+            app.view = View::Pulls;
+            app.github_state.tab = GithubTab::Pulls;
+            app.github_state.pulls = sample_pulls(5);
+            app.github_state.selected = 0;
+
+            assert!(app.handle_key(key(KeyCode::Char('j'))));
+            assert_eq!(app.github_state.selected, 1);
+            assert!(app.handle_key(key(KeyCode::Char('j'))));
+            assert_eq!(app.github_state.selected, 2);
+            assert!(app.handle_key(key(KeyCode::Char('k'))));
+            assert_eq!(app.github_state.selected, 1);
+
+            // Clamp at the top.
+            app.github_state.selected = 0;
+            assert!(app.handle_key(key(KeyCode::Char('k'))));
+            assert_eq!(app.github_state.selected, 0);
+
+            // Clamp at the bottom.
+            app.github_state.selected = 4;
+            assert!(app.handle_key(key(KeyCode::Char('j'))));
+            assert_eq!(app.github_state.selected, 4);
+        }
     }
 }
