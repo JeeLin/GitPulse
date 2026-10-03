@@ -1,14 +1,15 @@
 //! Issues receipts panel: the open issues of the current repository.
 
 use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
 use crate::app::App;
-use crate::github::IssueSummary;
+use crate::github::{IssueDetail, IssueSummary};
 
 use super::pulls::{
     cells, ellipsize, list_cursor, meta_budget, panel_chunks, panel_title, render_disconnected,
@@ -64,12 +65,139 @@ pub fn render_issues(f: &mut Frame, app: &App) {
     render_footer(f, chunks[1], chunks[2], app);
 }
 
-/// Render the selected issue's detail (summary line + wrapped body + hints).
+/// Placeholder of the issue detail while its payload has not arrived yet.
+const ISSUE_DETAIL_PLACEHOLDER: &str = "—（暂无 Issue 详情）";
+
+/// Render the selected issue's detail (summary head + wrapped body + hints).
 ///
-/// Stub: the designer lane replaces this with the real layout against
-/// `github_state.issue_detail` (summary, labels, body, footer hints).
+/// Mirrors the pull detail panel (`render_pull_detail`): a disconnected gate
+/// while the GitHub client is not ready, the placeholder while the detail
+/// payload has not landed, then a bordered shell split into a summary head
+/// (identification + metadata) and a soft-wrapped body. Issues carry no
+/// check sub-list, so there is no third pane.
 pub fn render_issue_detail(f: &mut Frame, app: &App) {
-    let _ = (f, app);
+    let area = f.area();
+    let chunks = panel_chunks(area);
+    if app.github_state.client.is_none() {
+        render_disconnected(f, chunks[0], "Issue 详情", app);
+        render_footer(f, chunks[1], chunks[2], app);
+        return;
+    }
+
+    let block = Block::default()
+        .title(panel_title(
+            "Issue 详情",
+            &app.github_state.owner,
+            &app.github_state.repo,
+        ))
+        .borders(Borders::ALL);
+
+    let Some(detail) = app.github_state.issue_detail.as_ref() else {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                ISSUE_DETAIL_PLACEHOLDER,
+                Style::default().fg(Color::DarkGray),
+            ))
+            .block(block),
+            chunks[0],
+        );
+        render_footer(f, chunks[1], chunks[2], app);
+        return;
+    };
+
+    let inner = block.inner(chunks[0]);
+    f.render_widget(block, chunks[0]);
+    render_detail_panes(f, detail, inner);
+    render_footer(f, chunks[1], chunks[2], app);
+}
+
+/// Split the issue detail shell into its two panes — the summary head and the
+/// wrapped body — and draw each one.
+fn render_detail_panes(f: &mut Frame, detail: &IssueDetail, inner: Rect) {
+    let panes = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // summary head
+            Constraint::Min(3),    // wrapped body
+        ])
+        .split(inner);
+
+    // The summary head sits directly on the pane (no block of its own), so it
+    // uses the full inner width.
+    f.render_widget(
+        Paragraph::new(summary_lines(&detail.summary, panes[0].width as usize)),
+        panes[0],
+    );
+    f.render_widget(body_paragraph(detail), panes[1]);
+}
+
+/// The issue's markdown body inside its `正文` block, soft-wrapped without
+/// trimming the leading whitespace markdown relies on; an empty body renders
+/// the empty-state copy instead of a blank pane.
+fn body_paragraph(detail: &IssueDetail) -> Paragraph<'static> {
+    let body: Vec<Line> = if detail.body.trim().is_empty() {
+        vec![Line::from(Span::styled(
+            "（无正文）",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else {
+        detail
+            .body
+            .lines()
+            .map(|l| Line::from(l.to_string()))
+            .collect()
+    };
+    Paragraph::new(body)
+        .block(Block::default().title("正文").borders(Borders::ALL))
+        .wrap(Wrap { trim: false })
+}
+
+/// Summary head of the issue detail: `#N title (state)` over a dark meta line
+/// of `author  assignee  labels  updated_at`. Each line is fitted to the pane
+/// the way the list row is — `meta_budget` bounds the meta, `ellipsize` cuts
+/// what does not fit, `cells` measures the fixed head — so a long label list
+/// never pushes the identifying `#N title` off the row: identification wins
+/// over metadata, the same trade-off `issue_item` makes.
+fn summary_lines(issue: &IssueSummary, width: usize) -> Vec<Line<'static>> {
+    let number = format!("#{} ", issue.number);
+    let state_tag = format!(" ({})", issue.state);
+
+    let mut meta = issue.author.clone();
+    if let Some(assignee) = &issue.assignee {
+        meta.push_str(META_GAP);
+        meta.push_str(assignee);
+    }
+    if !issue.labels.is_empty() {
+        meta.push_str(META_GAP);
+        meta.push_str(&issue.labels.join("、"));
+    }
+    meta.push_str(META_GAP);
+    meta.push_str(&issue.updated_at);
+
+    // Same head/meta budget as `issue_item`: the meta keeps the budget it may
+    // occupy, the head keeps what remains, and a meta that can't be squeezed
+    // in (budget == 0) is dropped — the head then takes the full width.
+    let budget = meta_budget(&meta, width);
+    let (head_width, meta_width) = if budget > 0 {
+        (width - budget - cells(META_GAP), budget)
+    } else {
+        (width, 0)
+    };
+    let fixed = cells(&number) + cells(&state_tag);
+
+    let head = Line::from(vec![
+        Span::styled(number, Style::default().fg(Color::Cyan)),
+        Span::raw(ellipsize(&issue.title, head_width.saturating_sub(fixed))),
+        Span::styled(state_tag, state_style(&issue.state)),
+    ]);
+    let mut lines = vec![head];
+    if budget > 0 {
+        lines.push(Line::from(Span::styled(
+            ellipsize(&meta, meta_width),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines
 }
 
 /// One issue row: `#N title (state)` followed by author, labels and the
@@ -220,5 +348,102 @@ mod tests {
             !text.contains("#1ghost"),
             "no rows without a client: {text}"
         );
+    }
+
+    /// Render one frame of the issue detail view and return the
+    /// whitespace-stripped buffer text (wide CJK glyphs leave padding cells).
+    fn render_detail_text(app: &App) -> String {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_issue_detail(f, app)).unwrap();
+        let raw: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        raw.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// Build an [`IssueDetail`] reusing the list-row builder so the summary
+    /// and the detail stay in lockstep.
+    fn detail(
+        number: u64,
+        title: &str,
+        state: &str,
+        labels: &[&str],
+        assignee: Option<&str>,
+        body: &str,
+    ) -> IssueDetail {
+        let mut summary = issue(number, title, state, labels);
+        summary.assignee = assignee.map(str::to_string);
+        IssueDetail {
+            summary,
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn issue_detail_disconnected_gates_before_the_head() {
+        let mut app = App::new(Config::default());
+        app.set_error("GitHub 认证失败");
+        app.github_state.issue_detail = Some(detail(7, "Ghost", "open", &[], None, "body"));
+        let text = render_detail_text(&app);
+        assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
+        assert!(
+            !text.contains("#7"),
+            "no head renders without a client: {text}"
+        );
+    }
+
+    #[test]
+    fn issue_detail_placeholder_waits_for_the_payload() {
+        let app = connected_app();
+        let text = render_detail_text(&app);
+        assert!(
+            text.contains("—（暂无Issue详情）"),
+            "missing placeholder: {text}"
+        );
+        assert!(
+            !text.contains('#'),
+            "no head renders before the payload: {text}"
+        );
+    }
+
+    #[test]
+    fn issue_detail_renders_summary_meta_and_body() {
+        let mut app = connected_app();
+        app.github_state.issue_detail = Some(detail(
+            12,
+            "Bad login",
+            "open",
+            &["bug", "urgent"],
+            Some("alice"),
+            "Root cause: Safari rejects the cookie.",
+        ));
+        let text = render_detail_text(&app);
+        assert!(
+            text.contains("Issue详情·octo/demo"),
+            "missing title: {text}"
+        );
+        assert!(text.contains("#12Badlogin(open)"), "missing head: {text}");
+        assert!(
+            text.contains("bobalicebug、urgent2026-02-03T04:05:06Z"),
+            "missing meta line: {text}"
+        );
+        assert!(
+            text.contains("Rootcause:Safarirejectsthecookie."),
+            "missing body text: {text}"
+        );
+    }
+
+    #[test]
+    fn issue_detail_marks_an_empty_body() {
+        let mut app = connected_app();
+        app.github_state.issue_detail = Some(detail(3, "Bare", "closed", &[], None, ""));
+        let text = render_detail_text(&app);
+        assert!(text.contains("（无正文）"), "missing body copy: {text}");
+        assert!(text.contains("#3Bare(closed)"), "missing head: {text}");
     }
 }
