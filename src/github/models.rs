@@ -27,6 +27,8 @@ pub struct PrDetail {
     pub summary: PrSummary,
     /// Markdown body (possibly empty).
     pub body: String,
+    /// PR labels (names); empty when the PR has none.
+    pub labels: Vec<String>,
     /// Mergeability: `None` means GitHub has not computed it yet.
     pub mergeable: Option<bool>,
     /// Check runs for the head commit (M2 step2: `PrDetail.checks`).
@@ -51,9 +53,20 @@ pub struct IssueSummary {
     pub title: String,
     pub state: String,
     pub author: String,
+    /// Assignee login; `None` when unassigned.
+    pub assignee: Option<String>,
     pub updated_at: String,
     /// Label names; empty when the issue has none.
     pub labels: Vec<String>,
+}
+
+/// Detail of an issue, fetched by `get_issue`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueDetail {
+    /// Core issue fields reused verbatim by the detail panel.
+    pub summary: IssueSummary,
+    /// Markdown body (possibly empty).
+    pub body: String,
 }
 
 /// One notification row (repo-filtered to the current repo).
@@ -69,4 +82,54 @@ pub struct NotificationSummary {
     pub reason: String,
     pub updated_at: String,
     pub unread: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pr_detail_carries_labels() {
+        let d = PrDetail {
+            summary: PrSummary {
+                number: 1,
+                title: "t".to_string(),
+                state: "open".to_string(),
+                draft: false,
+                author: "a".to_string(),
+                head_ref: "h".to_string(),
+                base_ref: "b".to_string(),
+                updated_at: String::new(),
+            },
+            body: String::new(),
+            labels: vec!["bug".to_string()],
+            mergeable: None,
+            checks: Vec::new(),
+        };
+        assert_eq!(d.labels, vec!["bug".to_string()]);
+    }
+
+    #[test]
+    fn issue_summary_and_detail_carry_assignee_and_body() {
+        let base = IssueSummary {
+            number: 2,
+            title: "t".to_string(),
+            state: "open".to_string(),
+            author: "a".to_string(),
+            assignee: None,
+            updated_at: String::new(),
+            labels: Vec::new(),
+        };
+        assert_eq!(base.assignee, None);
+        let assigned = IssueSummary {
+            assignee: Some("bob".to_string()),
+            ..base.clone()
+        };
+        assert_eq!(assigned.assignee.as_deref(), Some("bob"));
+        let d = IssueDetail {
+            summary: assigned,
+            body: "text".to_string(),
+        };
+        assert_eq!(d.body, "text");
+    }
 }

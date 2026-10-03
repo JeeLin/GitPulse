@@ -74,6 +74,20 @@ pub fn query_status(repo_path: &Path) -> Result<RepoInfo> {
     })
 }
 
+/// SHA-1 of the current `HEAD` commit (full 40 hex), used by the Checks tab to
+/// fetch head-commit check runs. A missing repository or an unborn HEAD (no
+/// commits yet) returns a readable error rather than a raw git message.
+pub fn head_sha(repo_path: &Path) -> Result<String> {
+    let repo = Repository::open(repo_path).map_err(|e| anyhow::anyhow!("打开仓库失败: {e}"))?;
+    let head = repo
+        .head()
+        .map_err(|_| anyhow::anyhow!("无法解析 HEAD（可能是空仓库）"))?;
+    let commit = head
+        .peel_to_commit()
+        .map_err(|e| anyhow::anyhow!("解析 HEAD 提交失败: {e}"))?;
+    Ok(commit.id().to_string())
+}
+
 /// Resolve the current branch name, detached HEAD short hash, or `unborn`.
 fn resolve_branch(repo: &Repository) -> Result<String> {
     match repo.head() {
@@ -202,5 +216,19 @@ mod tests {
             .map(|n| show_path(Path::new(n)))
             .unwrap_or_else(|| show_path(&repo_path));
         assert_eq!(info.name, expected);
+    }
+
+    #[test]
+    fn head_sha_returns_40_hex_of_head_commit() {
+        let repo_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let sha = head_sha(&repo_path).unwrap();
+        assert_eq!(sha.len(), 40);
+        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn head_sha_missing_repo_errors_readably() {
+        let err = head_sha(Path::new("/nonexistent/gitpulse")).unwrap_err();
+        assert!(err.to_string().contains("打开仓库失败"));
     }
 }

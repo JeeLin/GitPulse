@@ -636,6 +636,7 @@ mod tests {
         app.github_state.detail = Some(PrDetail {
             summary: pull(42, "Fix login bug", false),
             body: "Root cause and fix go here.".to_string(),
+            labels: Vec::new(),
             mergeable: Some(false),
             checks: vec![CheckSummary {
                 name: "unit".to_string(),
@@ -668,6 +669,7 @@ mod tests {
         app.github_state.detail = Some(PrDetail {
             summary: pull(3, "Bare", true),
             body: String::new(),
+            labels: Vec::new(),
             mergeable: None,
             checks: Vec::new(),
         });

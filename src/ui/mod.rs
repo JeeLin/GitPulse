@@ -272,6 +272,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         View::PullDetail => pulls::render_pull_detail(f, app),
         View::Checks => checks::render_checks(f, app),
         View::Issues => issues::render_issues(f, app),
+        View::IssueDetail => issues::render_issue_detail(f, app),
         View::Notifications => notifications::render_notifications(f, app),
     }
 }

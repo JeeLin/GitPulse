@@ -19,7 +19,9 @@ pub mod models;
 
 pub use client::GithubClient;
 pub use error::{render_error, GithubError};
-pub use models::{CheckSummary, IssueSummary, NotificationSummary, PrDetail, PrSummary};
+pub use models::{
+    CheckSummary, IssueDetail, IssueSummary, NotificationSummary, PrDetail, PrSummary,
+};
 
 /// Parse a git remote URL into `(owner, repo)` for `github.com` remotes.
 ///

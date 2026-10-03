@@ -64,6 +64,14 @@ pub fn render_issues(f: &mut Frame, app: &App) {
     render_footer(f, chunks[1], chunks[2], app);
 }
 
+/// Render the selected issue's detail (summary line + wrapped body + hints).
+///
+/// Stub: the designer lane replaces this with the real layout against
+/// `github_state.issue_detail` (summary, labels, body, footer hints).
+pub fn render_issue_detail(f: &mut Frame, app: &App) {
+    let _ = (f, app);
+}
+
 /// One issue row: `#N title (state)` followed by author, labels and the
 /// update time, ellipsized as a pair so the identifying head never loses its
 /// tail to a long label list.
@@ -127,6 +135,7 @@ mod tests {
             title: title.to_string(),
             state: state.to_string(),
             author: "bob".to_string(),
+            assignee: None,
             updated_at: "2026-02-03T04:05:06Z".to_string(),
             labels: labels.iter().map(|l| l.to_string()).collect(),
         }
@@ -179,6 +188,7 @@ mod tests {
             title: "Short".to_string(),
             state: "open".to_string(),
             author: "bob".to_string(),
+            assignee: None,
             updated_at: "2026-02-03T04:05:06Z".to_string(),
             labels: long_labels,
         }];

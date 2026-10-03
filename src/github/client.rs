@@ -11,7 +11,9 @@ use octocrab::{models, Octocrab, Page};
 use super::auth::resolve_token;
 use super::debug_lower;
 use super::error::GithubError;
-use super::models::{CheckSummary, IssueSummary, NotificationSummary, PrDetail, PrSummary};
+use super::models::{
+    CheckSummary, IssueDetail, IssueSummary, NotificationSummary, PrDetail, PrSummary,
+};
 
 /// GitHub API client (single backend; token resolved once via [`resolve_token`]).
 pub struct GithubClient {
@@ -57,18 +59,22 @@ impl GithubClient {
             .await?;
         let sha = pr.head.sha.clone();
         // Best effort: checks failing to load leaves the list empty, not an error.
-        let checks = self.check_runs(&sha).await.unwrap_or_default();
+        let checks = self.list_checks(&sha).await.unwrap_or_default();
         let summary = pr_to_summary(&pr);
         Ok(PrDetail {
             summary,
             body: pr.body.clone().unwrap_or_default(),
+            labels: pr.labels.iter().flatten().map(|l| l.name.clone()).collect(),
             mergeable: pr.mergeable,
             checks,
         })
     }
 
     /// Check runs for a commit SHA (`Commitish`, not `Reference`).
-    async fn check_runs(&self, sha: &str) -> Result<Vec<CheckSummary>, GithubError> {
+    ///
+    /// Shared by `get_pull` (head-commit snapshot) and the Checks tab, which
+    /// fetches the local `HEAD` SHA via `crate::git::head_sha`.
+    pub async fn list_checks(&self, sha: &str) -> Result<Vec<CheckSummary>, GithubError> {
         let res = self
             .octocrab
             .checks(self.owner.as_str(), self.repo.as_str())
@@ -100,6 +106,20 @@ impl GithubClient {
             .collect())
     }
 
+    /// Single issue detail (summary fields + markdown body).
+    pub async fn get_issue(&self, number: u64) -> Result<IssueDetail, GithubError> {
+        let issue: models::issues::Issue = self
+            .octocrab
+            .issues(self.owner.as_str(), self.repo.as_str())
+            .get(number)
+            .await?;
+        let body = issue.body.clone().unwrap_or_default();
+        Ok(IssueDetail {
+            summary: issue_to_summary(issue),
+            body,
+        })
+    }
+
     /// Repo-scoped notifications (read-only: never marked-as-read).
     pub async fn list_notifications(&self) -> Result<Vec<NotificationSummary>, GithubError> {
         let page: Page<models::activity::Notification> = self
@@ -109,11 +129,26 @@ impl GithubClient {
             .list_for_repo(self.owner.as_str(), self.repo.as_str())
             .send()
             .await?;
-        Ok(page
-            .items
-            .into_iter()
-            .map(notification_to_summary)
-            .collect())
+        let full = format!("{}/{}", self.owner, self.repo);
+        Ok(Self::filter_repo(
+            page.items
+                .into_iter()
+                .map(notification_to_summary)
+                .collect(),
+            &full,
+        ))
+    }
+
+    /// Keep only the notifications that belong to `full_name` (`owner/repo`).
+    ///
+    /// The `list_for_repo` endpoint is already repo-scoped, but we filter on the
+    /// client too so a future switch to the org-wide list cannot leak other
+    /// repositories' rows into the panel (covered by a unit test).
+    pub(crate) fn filter_repo(
+        items: Vec<NotificationSummary>,
+        full_name: &str,
+    ) -> Vec<NotificationSummary> {
+        items.into_iter().filter(|n| n.repo == full_name).collect()
     }
 }
 
@@ -140,6 +175,7 @@ fn issue_to_summary(i: models::issues::Issue) -> IssueSummary {
         title: i.title.clone(),
         state: debug_lower(&Some(i.state)),
         author: i.user.login.clone(),
+        assignee: i.assignee.as_ref().map(|u| u.login.clone()),
         updated_at: format!("{}", i.updated_at),
         labels: i.labels.iter().map(|l| l.name.clone()).collect(),
     }
@@ -169,5 +205,36 @@ fn notification_to_summary(n: models::activity::Notification) -> NotificationSum
         reason: n.reason.clone(),
         updated_at: format!("{}", n.updated_at),
         unread: n.unread,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn note(id: &str, repo: &str) -> NotificationSummary {
+        NotificationSummary {
+            id: id.to_string(),
+            repo: repo.to_string(),
+            subject_title: String::new(),
+            subject_type: String::new(),
+            reason: String::new(),
+            updated_at: String::new(),
+            unread: false,
+        }
+    }
+
+    #[test]
+    fn filter_repo_keeps_only_current_repo() {
+        let items = vec![note("1", "octocat/repo"), note("2", "other/repo")];
+        let kept = GithubClient::filter_repo(items, "octocat/repo");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "1");
+    }
+
+    #[test]
+    fn filter_repo_empty_when_no_match() {
+        let items = vec![note("1", "octocat/repo")];
+        assert_eq!(GithubClient::filter_repo(items, "nope/nada").len(), 0);
     }
 }
