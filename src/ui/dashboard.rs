@@ -12,7 +12,7 @@ use crate::app::BatchLogLine;
 use crate::git::RepoInfo;
 use crate::ui::status::StatusLine;
 
-use super::{hint, render_status_line};
+use super::{hint, pulls, render_status_line};
 
 /// Borrowed render state for the dashboard, referencing `App.repos` directly
 /// so no mock data source exists (checkpoint 2).
@@ -116,9 +116,9 @@ fn render_repo_list(f: &mut Frame, area: Rect, state: &mut DashboardState<'_>) {
             };
 
             let line = Line::from(vec![
-                Span::raw(format!("{:<20}", repo.name)),
+                Span::raw(pad_cells(&pulls::ellipsize(&repo.name, 20), 20)),
                 Span::styled(
-                    format!("{:<15}", repo.branch),
+                    pad_cells(&pulls::ellipsize(&repo.branch, 15), 15),
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::styled(
@@ -176,7 +176,10 @@ fn render_batch_log(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
                 Color::DarkGray
             };
             Line::from(vec![
-                Span::styled(format!("{:<20}", entry.name), Style::default().fg(color)),
+                Span::styled(
+                    pad_cells(&pulls::ellipsize(&entry.name, 20), 20),
+                    Style::default().fg(color),
+                ),
                 Span::styled(entry.message.clone(), Style::default().fg(color)),
             ])
         })
@@ -227,6 +230,19 @@ fn render_key_hints(f: &mut Frame, area: Rect) {
     .flatten()
     .collect::<Line>();
     f.render_widget(Paragraph::new(hints), area);
+}
+
+/// Pad `text` to exactly `width` terminal cells by appending spaces, counting
+/// CJK glyphs as two cells (ratatui's display-width model) so the fixed columns
+/// of the dashboard row stay aligned when a repo/branch name mixes scripts —
+/// the same width model [`pulls::ellipsize`] and [`pulls::cells`] use.
+fn pad_cells(text: &str, width: usize) -> String {
+    let used = pulls::cells(text);
+    if used >= width {
+        text.to_string()
+    } else {
+        format!("{text}{}", " ".repeat(width - used))
+    }
 }
 
 /// Format a Unix timestamp as `YYYY-MM-DD HH:MM` (UTC) without chrono.

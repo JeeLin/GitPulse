@@ -192,20 +192,24 @@ fn column(value: &str) -> String {
 
 /// Bottom hint row of every receipt panel: hub entry, the four tabs, the
 /// refresh and the two ways out.
-pub(crate) fn receipt_hints() -> Line<'static> {
-    [
+///
+/// `Enter 详情` is only useful on the Pulls and Issues *lists* (where it opens
+/// the selected item's detail); pass `show_enter = true` there and `false` for
+/// the Checks / Notifications / detail views, where Enter is a no-op.
+pub(crate) fn receipt_hints(show_enter: bool) -> Line<'static> {
+    let mut hints: Vec<Line<'static>> = vec![
         hint("g", "进入"),
         hint("p", "PR"),
         hint("c", "checks"),
         hint("i", "issues"),
         hint("n", "通知"),
         hint("r", "刷新"),
-        hint("Esc", "返回"),
-        hint("Enter", "详情"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
+        hint("q/Esc", "返回"),
+    ];
+    if show_enter {
+        hints.push(hint("Enter", "详情"));
+    }
+    hints.into_iter().flatten().collect()
 }
 
 /// Readiness-gate client for the panel tests.
@@ -245,7 +249,13 @@ pub(crate) fn panel_chunks(area: Rect) -> std::rc::Rc<[Rect]> {
 /// While no client is ready the body already carries the status/error line
 /// (see [`render_disconnected`]), so the row stays blank rather than printing
 /// the same message twice.
-pub(crate) fn render_footer(f: &mut Frame, status_area: Rect, hints_area: Rect, app: &App) {
+pub(crate) fn render_footer(
+    f: &mut Frame,
+    status_area: Rect,
+    hints_area: Rect,
+    app: &App,
+    show_enter: bool,
+) {
     if app.github_state.client.is_some() {
         super::render_status_or_remote(
             f,
@@ -255,7 +265,7 @@ pub(crate) fn render_footer(f: &mut Frame, status_area: Rect, hints_area: Rect, 
             app.status.as_ref(),
         );
     }
-    f.render_widget(Paragraph::new(receipt_hints()), hints_area);
+    f.render_widget(Paragraph::new(receipt_hints(show_enter)), hints_area);
 }
 
 /// Panel body shown while the GitHub client is not ready: the status or
@@ -300,7 +310,7 @@ pub fn render_pulls(f: &mut Frame, app: &App) {
     let chunks = panel_chunks(area);
     if app.github_state.client.is_none() {
         render_disconnected(f, chunks[0], "PR 列表", app);
-        render_footer(f, chunks[1], chunks[2], app);
+        render_footer(f, chunks[1], chunks[2], app, true);
         return;
     }
 
@@ -333,7 +343,7 @@ pub fn render_pulls(f: &mut Frame, app: &App) {
             .highlight_symbol(HIGHLIGHT_SYMBOL);
         f.render_stateful_widget(list, chunks[0], &mut state);
     }
-    render_footer(f, chunks[1], chunks[2], app);
+    render_footer(f, chunks[1], chunks[2], app, true);
 }
 
 /// One pull row: `#N title (state)` plus a `草稿` badge when the pull is a
@@ -372,7 +382,7 @@ pub fn render_pull_detail(f: &mut Frame, app: &App) {
     let chunks = panel_chunks(area);
     if app.github_state.client.is_none() {
         render_disconnected(f, chunks[0], "PR 详情", app);
-        render_footer(f, chunks[1], chunks[2], app);
+        render_footer(f, chunks[1], chunks[2], app, false);
         return;
     }
 
@@ -393,14 +403,14 @@ pub fn render_pull_detail(f: &mut Frame, app: &App) {
             .block(block),
             chunks[0],
         );
-        render_footer(f, chunks[1], chunks[2], app);
+        render_footer(f, chunks[1], chunks[2], app, false);
         return;
     };
 
     let inner = block.inner(chunks[0]);
     f.render_widget(block, chunks[0]);
     render_detail_panes(f, detail, inner);
-    render_footer(f, chunks[1], chunks[2], app);
+    render_footer(f, chunks[1], chunks[2], app, false);
 }
 
 /// Split the detail shell into its three panes — summary head, wrapped

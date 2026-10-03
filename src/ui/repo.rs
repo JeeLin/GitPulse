@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::{hint, render_confirm_overlay};
+use super::{hint, pulls, render_confirm_overlay};
 use crate::git::FileEntry;
 use crate::ui::status::{RemoteStatus, StatusLine};
 
@@ -90,7 +90,7 @@ fn key_hints(discard_confirm_open: bool, commit_input_open: bool) -> Line<'stati
     } else {
         [
             hint("j/k", "选择"),
-            hint("d", "diff"),
+            hint("g", "进入"),
             hint("s/u", "暂存切换"),
             hint("x", "丢弃"),
             hint("c", "commit"),
@@ -105,6 +105,7 @@ fn key_hints(discard_confirm_open: bool, commit_input_open: bool) -> Line<'stati
 }
 
 fn render_file_list(f: &mut Frame, area: Rect, state: &mut RepoState<'_>) {
+    let width = pulls::row_width(area);
     let items: Vec<ListItem> = state
         .entries
         .iter()
@@ -113,7 +114,7 @@ fn render_file_list(f: &mut Frame, area: Rect, state: &mut RepoState<'_>) {
 
             let line = Line::from(vec![
                 Span::styled(symbol, Style::default().fg(color)),
-                Span::raw(entry.path.display().to_string()),
+                Span::raw(pulls::ellipsize(&entry.path.display().to_string(), width)),
             ]);
             ListItem::new(line)
         })

@@ -29,7 +29,7 @@ pub fn render_notifications(f: &mut Frame, app: &App) {
     let chunks = panel_chunks(area);
     if app.github_state.client.is_none() {
         render_disconnected(f, chunks[0], "通知", app);
-        render_footer(f, chunks[1], chunks[2], app);
+        render_footer(f, chunks[1], chunks[2], app, false);
         return;
     }
 
@@ -65,7 +65,7 @@ pub fn render_notifications(f: &mut Frame, app: &App) {
             .highlight_symbol(super::HIGHLIGHT_SYMBOL);
         f.render_stateful_widget(list, chunks[0], &mut state);
     }
-    render_footer(f, chunks[1], chunks[2], app);
+    render_footer(f, chunks[1], chunks[2], app, false);
 }
 
 /// One notification row: `subject_title [subject_type]` after the unread dot,

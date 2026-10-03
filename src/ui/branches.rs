@@ -11,7 +11,7 @@ use ratatui::{
 use crate::git::BranchInfo;
 use crate::ui::status::StatusLine;
 
-use super::hint;
+use super::{hint, pulls};
 
 /// Borrowed render state for the branch panel, referencing `App.branches`
 /// directly so no mock data source exists (checkpoint 2).
@@ -90,6 +90,7 @@ fn key_hints(input_open: bool, confirm_open: bool) -> Line<'static> {
             hint("n", "新建"),
             hint("d", "删除"),
             hint("r", "刷新"),
+            hint("q", "退出"),
             hint("Esc", "返回"),
         ]
         .into_iter()
@@ -99,6 +100,7 @@ fn key_hints(input_open: bool, confirm_open: bool) -> Line<'static> {
 }
 
 fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) {
+    let width = pulls::row_width(area);
     let items: Vec<ListItem> = state
         .branches
         .iter()
@@ -113,11 +115,11 @@ fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) 
             };
             let mut spans = vec![
                 Span::raw(marker),
-                Span::styled(branch.name.clone(), name_style),
+                Span::styled(pulls::ellipsize(&branch.name, width), name_style),
             ];
             if let Some(upstream) = &branch.upstream {
                 spans.push(Span::styled(
-                    format!("  → {upstream}"),
+                    format!("  → {}", pulls::ellipsize(upstream, width)),
                     Style::default().fg(Color::DarkGray),
                 ));
             }
@@ -143,7 +145,7 @@ fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) 
 
 /// Single-line create input (convention 9): Enter creates, Esc cancels.
 fn render_create_input(f: &mut Frame, area: Rect, input: &str) {
-    super::render_input_overlay(f, area, "新建分支 (Enter 创建 / Esc 取消)", input, false);
+    super::render_input_overlay(f, area, "新建分支", input, true);
 }
 
 /// Delete confirmation dialog (discard-style, convention 8): y confirms.
@@ -153,7 +155,7 @@ fn render_delete_dialog(f: &mut Frame, area: Rect, branch: &BranchInfo) {
         Span::styled(branch.name.clone(), Style::default().fg(Color::Yellow)),
         Span::raw("?"),
     ])];
-    super::render_confirm_overlay(f, area, "确认删除分支", 50, 8, body, false);
+    super::render_confirm_overlay(f, area, "确认删除分支", 50, 8, body, true);
 }
 
 #[cfg(test)]

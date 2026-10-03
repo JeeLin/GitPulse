@@ -127,6 +127,7 @@ fn key_hints(picker_open: bool, input_open: bool, confirm_open: bool) -> Line<'s
             hint("a", "添加"),
             hint("i", "手动"),
             hint("d", "删除"),
+            hint("q", "退出"),
             hint("Esc", "返回"),
         ]
         .into_iter()

@@ -12,7 +12,7 @@ use crate::app::TagsModal;
 use crate::git::TagInfo;
 use crate::ui::status::{RemoteStatus, StatusLine};
 
-use super::hint;
+use super::{hint, pulls};
 
 /// Empty-state copy of a repository that carries no tag (G7): zero tags is a
 /// valid state rather than a failure, so the panel says so instead of
@@ -119,7 +119,8 @@ fn key_hints(modal: Option<&TagsModal>) -> Line<'static> {
 /// Zero tags is a valid state rather than a failure: the error status
 /// (rendered by the caller) covers failed loads.
 fn render_tag_list(f: &mut Frame, area: Rect, state: &mut TagsRender<'_>) {
-    let items: Vec<ListItem> = state.tags.iter().map(tag_item).collect();
+    let width = pulls::row_width(area);
+    let items: Vec<ListItem> = state.tags.iter().map(|tag| tag_item(tag, width)).collect();
     super::render_named_list(
         f,
         area,
@@ -133,16 +134,16 @@ fn render_tag_list(f: &mut Frame, area: Rect, state: &mut TagsRender<'_>) {
 
 /// One tag row: name, short hash of the target commit, then the
 /// lightweight / annotated marker.
-fn tag_item(tag: &TagInfo) -> ListItem<'static> {
+fn tag_item(tag: &TagInfo, width: usize) -> ListItem<'static> {
     let (kind, kind_style) = if tag.annotated {
         ("注释", Style::default().fg(Color::Cyan))
     } else {
         ("轻量", Style::default().fg(Color::DarkGray))
     };
     ListItem::new(Line::from(vec![
-        Span::raw(tag.name.clone()),
+        Span::raw(pulls::ellipsize(&tag.name, width)),
         Span::styled(
-            format!("  {}", tag.target),
+            format!("  {}", pulls::ellipsize(&tag.target, width)),
             Style::default().fg(Color::Yellow),
         ),
         Span::styled(format!("  {kind}"), kind_style),
@@ -151,7 +152,7 @@ fn tag_item(tag: &TagInfo) -> ListItem<'static> {
 
 /// Single-line create input (convention 9): Enter creates, Esc cancels.
 fn render_create_input(f: &mut Frame, area: Rect, buffer: &str) {
-    super::render_input_overlay(f, area, "新建标签 (Enter 创建 / Esc 取消)", buffer, false);
+    super::render_input_overlay(f, area, "新建标签", buffer, true);
 }
 
 /// Delete confirmation dialog (discard-style, convention 8): y confirms.

@@ -11,7 +11,7 @@ use ratatui::{
 use crate::git::{CommitDetail, CommitRow, RefKind};
 use crate::ui::status::StatusLine;
 
-use super::hint;
+use super::{hint, pulls};
 
 /// Inner width of the DAG column: one cell per lane, capped at the lanes
 /// `git::layout_graph` ever produces (`git::MAX_LANES`).
@@ -103,7 +103,12 @@ fn key_hints() -> Line<'static> {
 /// An unborn HEAD loads zero commits, which is a valid state rather than a
 /// failure: the error status (rendered by the caller) covers failed loads.
 fn render_commit_list(f: &mut Frame, area: Rect, state: &mut HistoryRender<'_>) {
-    let items: Vec<ListItem> = state.commits.iter().map(commit_item).collect();
+    let width = pulls::row_width(area);
+    let items: Vec<ListItem> = state
+        .commits
+        .iter()
+        .map(|commit| commit_item(commit, width))
+        .collect();
     super::render_named_list(
         f,
         area,
@@ -116,11 +121,11 @@ fn render_commit_list(f: &mut Frame, area: Rect, state: &mut HistoryRender<'_>) 
 }
 
 /// One commit row: short hash, summary, ref badges, then author and time.
-fn commit_item(commit: &CommitRow) -> ListItem<'static> {
+fn commit_item(commit: &CommitRow, width: usize) -> ListItem<'static> {
     let mut spans = vec![
         Span::styled(commit.id.clone(), Style::default().fg(Color::Yellow)),
         Span::raw(" "),
-        Span::raw(commit.summary.clone()),
+        Span::raw(pulls::ellipsize(&commit.summary, width)),
     ];
     for mark in &commit.refs {
         spans.push(Span::raw(" "));

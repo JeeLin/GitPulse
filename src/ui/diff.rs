@@ -17,15 +17,21 @@ pub fn render_diff(f: &mut Frame, app: &crate::app::App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),    // diff content
+            Constraint::Length(1), // status line
             Constraint::Length(1), // key hints
         ])
         .split(area);
 
     let diff_area = chunks[0];
-    let hints_area = chunks[1];
+    let status_area = chunks[1];
+    let hints_area = chunks[2];
 
     // Render diff content
     render_diff_content(f, diff_area, &app.diff_content, app.diff_scroll);
+
+    // Render status line (errors / notices) — the bottom track every other
+    // panel reserves (R4); the title stays `文件差异`.
+    super::render_status_line(f, status_area, app.status.as_ref());
 
     // Render key hints
     let hints = [hint("j/k", "滚动"), hint("Esc", "返回"), hint("q", "退出")]

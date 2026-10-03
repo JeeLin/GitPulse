@@ -26,7 +26,7 @@ pub fn render_issues(f: &mut Frame, app: &App) {
     let chunks = panel_chunks(area);
     if app.github_state.client.is_none() {
         render_disconnected(f, chunks[0], "Issues", app);
-        render_footer(f, chunks[1], chunks[2], app);
+        render_footer(f, chunks[1], chunks[2], app, true);
         return;
     }
 
@@ -62,7 +62,7 @@ pub fn render_issues(f: &mut Frame, app: &App) {
             .highlight_symbol(super::HIGHLIGHT_SYMBOL);
         f.render_stateful_widget(list, chunks[0], &mut state);
     }
-    render_footer(f, chunks[1], chunks[2], app);
+    render_footer(f, chunks[1], chunks[2], app, true);
 }
 
 /// Placeholder of the issue detail while its payload has not arrived yet.
@@ -80,7 +80,7 @@ pub fn render_issue_detail(f: &mut Frame, app: &App) {
     let chunks = panel_chunks(area);
     if app.github_state.client.is_none() {
         render_disconnected(f, chunks[0], "Issue 详情", app);
-        render_footer(f, chunks[1], chunks[2], app);
+        render_footer(f, chunks[1], chunks[2], app, false);
         return;
     }
 
@@ -101,14 +101,14 @@ pub fn render_issue_detail(f: &mut Frame, app: &App) {
             .block(block),
             chunks[0],
         );
-        render_footer(f, chunks[1], chunks[2], app);
+        render_footer(f, chunks[1], chunks[2], app, false);
         return;
     };
 
     let inner = block.inner(chunks[0]);
     f.render_widget(block, chunks[0]);
     render_detail_panes(f, detail, inner);
-    render_footer(f, chunks[1], chunks[2], app);
+    render_footer(f, chunks[1], chunks[2], app, false);
 }
 
 /// Split the issue detail shell into its two panes — the summary head and the

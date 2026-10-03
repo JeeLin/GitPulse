@@ -9,13 +9,7 @@ use super::render_input_overlay;
 /// Single-line input (convention 9): `Enter` commits, `Esc` cancels; the
 /// typed text lives in `App::commit_message` and is passed in per frame.
 pub fn render_commit_popup(f: &mut Frame, message: &str) {
-    render_input_overlay(
-        f,
-        f.area(),
-        "提交信息 (Enter 提交 / Esc 取消)",
-        message,
-        false,
-    );
+    render_input_overlay(f, f.area(), "提交信息", message, true);
 }
 
 #[cfg(test)]
