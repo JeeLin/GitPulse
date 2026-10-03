@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-03
+### Added
+- 单平台远端回据层（GitHub）：PR 列表/详情、CI checks、Issues、通知面板 + 手动刷新 `r`
+- octocrab 单后端（0.54）；`gh` 仅作为 GitHub token 解析器（`GITHUB_TOKEN` → `gh auth token`）；OnceLock client 缓存
+- Issue 详情面板：`#N title (state)` 头行 + meta（author / assignee / labels / updated_at） + 软袭的 `正文`，布局复用 render_pull_detail（无 checks 子窗）
+- 回据 hub 键位：`g` 进入；`p`/`c`/`i`/`n` 切页 Checks/PR/Issues/Notifications；Enter 详情 / Esc 返回
+- CI checks 页签取 HEAD commit 运行列表（`git head_sha` + `list_checks`，不走 get_pull）
+### Changed
+- 远端回据刷新改为手动 `r` 触发（不自动轮循，留待后续评估）
+### Fixed
+- IssueDetail 详情刷新前置 `None`，清除 stale payload 后从远端再拉
+
 ## [0.3.0] - 2026-10-02
 ### Added
 - 提交历史视图：提交列表 + 分支/tag/HEAD 标记 + j/k 导航 + 提交详情（超 500 文件截断计数）
