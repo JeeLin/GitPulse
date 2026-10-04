@@ -4,6 +4,7 @@ mod app;
 mod config;
 mod git;
 mod github;
+mod platform;
 mod ui;
 
 use anyhow::Result;

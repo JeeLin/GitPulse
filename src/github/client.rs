@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use octocrab::models::pulls::PullRequest;
 use octocrab::{models, Octocrab, Page};
 
@@ -14,6 +15,7 @@ use super::error::GithubError;
 use super::models::{
     CheckSummary, IssueDetail, IssueSummary, NotificationSummary, PrDetail, PrSummary,
 };
+use crate::platform::{PlatformClient, PlatformError};
 
 /// GitHub API client (single backend; token resolved once via [`resolve_token`]).
 pub struct GithubClient {
@@ -149,6 +151,36 @@ impl GithubClient {
         full_name: &str,
     ) -> Vec<NotificationSummary> {
         items.into_iter().filter(|n| n.repo == full_name).collect()
+    }
+}
+
+/// [`PlatformClient`] impl: forwards to the inherent methods and normalizes
+/// [`GithubError`] → [`PlatformError`] via the `From` conversion. No existing
+/// behavior is changed — the inherent methods above are still the source of truth.
+#[async_trait]
+impl PlatformClient for GithubClient {
+    async fn list_pulls(&self) -> Result<Vec<PrSummary>, PlatformError> {
+        Self::list_pulls(self).await.map_err(Into::into)
+    }
+
+    async fn get_pull(&self, number: u64) -> Result<PrDetail, PlatformError> {
+        Self::get_pull(self, number).await.map_err(Into::into)
+    }
+
+    async fn list_checks(&self, sha: &str) -> Result<Vec<CheckSummary>, PlatformError> {
+        Self::list_checks(self, sha).await.map_err(Into::into)
+    }
+
+    async fn list_issues(&self) -> Result<Vec<IssueSummary>, PlatformError> {
+        Self::list_issues(self).await.map_err(Into::into)
+    }
+
+    async fn get_issue(&self, number: u64) -> Result<IssueDetail, PlatformError> {
+        Self::get_issue(self, number).await.map_err(Into::into)
+    }
+
+    async fn list_notifications(&self) -> Result<Vec<NotificationSummary>, PlatformError> {
+        Self::list_notifications(self).await.map_err(Into::into)
     }
 }
 
