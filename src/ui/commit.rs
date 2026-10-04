@@ -3,6 +3,7 @@
 use ratatui::Frame;
 
 use super::render_input_overlay;
+use crate::ui::components::footer::HintRow;
 
 /// Render the commit message popup centered over the current view.
 ///
@@ -10,6 +11,14 @@ use super::render_input_overlay;
 /// typed text lives in `App::commit_message` and is passed in per frame.
 pub fn render_commit_popup(f: &mut Frame, message: &str) {
     render_input_overlay(f, f.area(), "提交信息", message, true);
+}
+
+/// Footer hint row for the commit view (§2.3): the commit input owns focus,
+/// so the row advertises only its submit/cancel keys — `Enter 提交 / Esc 取消`
+/// (convention 9), re-using [`super::submit_hints`] so the wording matches the
+/// popup title `提交信息 (Enter 提交 / Esc 取消)`.
+pub(crate) fn commit_hints() -> HintRow {
+    HintRow::new(super::submit_hints("提交"))
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! Notifications receipts panel: repository-scoped GitHub notifications.
 
 use ratatui::{
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
@@ -24,8 +25,8 @@ const EMPTY_NOTIFICATIONS: &str = "—（暂无通知）";
 const UNREAD_MARKER: &str = "● ";
 
 /// Render the repository-scoped notifications list.
-pub fn render_notifications(f: &mut Frame, app: &App) {
-    let area = f.area();
+pub fn render_notifications(f: &mut Frame, content: Rect, app: &App) {
+    let area = content;
     let chunks = panel_chunks(area);
     if app.github_state.client.is_none() {
         render_disconnected(f, chunks[0], "通知", app);
@@ -146,7 +147,9 @@ mod tests {
     fn render(app: &App) -> Terminal<TestBackend> {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_notifications(f, app)).unwrap();
+        terminal
+            .draw(|f| render_notifications(f, f.area(), app))
+            .unwrap();
         terminal
     }
 

@@ -13,6 +13,7 @@ use ratatui::{
 use super::hint;
 use super::repo::centered_rect;
 use crate::git::show_path;
+use crate::ui::components::footer::HintRow;
 use crate::ui::status::StatusLine;
 
 /// Borrowed render state for the config panel, referencing `App.config.scan_dirs`
@@ -45,8 +46,8 @@ pub struct ConfigState<'a> {
 ///
 /// While an overlay is open the bottom hints switch to its keys; the delete
 /// confirmation renders a `y/n` overlay over the list.
-pub fn render_config(f: &mut Frame, mut state: ConfigState<'_>) {
-    let area = f.area();
+pub fn render_config(f: &mut Frame, content: Rect, mut state: ConfigState<'_>) {
+    let area = content;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -134,6 +135,17 @@ fn key_hints(picker_open: bool, input_open: bool, confirm_open: bool) -> Line<'s
         .flatten()
         .collect()
     }
+}
+
+/// Footer hint row for the config panel (§2.3): re-uses the same
+/// [`key_hints`] the panel draws inline, so the picker/input/confirm wording
+/// never drifts between the two rows.
+pub(crate) fn config_hints(
+    show_picker: bool,
+    show_input: bool,
+    show_delete_confirm: bool,
+) -> HintRow {
+    HintRow::new(key_hints(show_picker, show_input, show_delete_confirm))
 }
 
 /// Interactive directory browser overlay: the current path on the first row,
@@ -312,7 +324,9 @@ mod tests {
     fn render_to_text(state: ConfigState<'_>) -> String {
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_config(f, state)).unwrap();
+        terminal
+            .draw(|f| render_config(f, f.area(), state))
+            .unwrap();
         // Wide CJK glyphs leave padding cells; compare whitespace-stripped.
         let raw: String = terminal
             .backend()
@@ -478,7 +492,9 @@ mod tests {
 
             let backend = TestBackend::new(size.0, size.1);
             let mut terminal = Terminal::new(backend).unwrap();
-            terminal.draw(|f| render_config(f, state)).unwrap();
+            terminal
+                .draw(|f| render_config(f, f.area(), state))
+                .unwrap();
 
             let inner = confirm_inner(&terminal, size);
             assert!(

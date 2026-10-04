@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use crate::git::BranchInfo;
+use crate::ui::components::footer::HintRow;
 use crate::ui::status::StatusLine;
 
 use super::{hint, pulls};
@@ -39,8 +40,8 @@ pub struct BranchesState<'a> {
 ///
 /// A failed load arrives as an error [`StatusLine`] with an empty list, so
 /// an empty panel never masquerades as success (checkpoint 2).
-pub fn render_branches(f: &mut Frame, mut state: BranchesState<'_>) {
-    let area = f.area();
+pub fn render_branches(f: &mut Frame, content: Rect, mut state: BranchesState<'_>) {
+    let area = content;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -97,6 +98,13 @@ fn key_hints(input_open: bool, confirm_open: bool) -> Line<'static> {
         .flatten()
         .collect()
     }
+}
+
+/// Footer hint row for the branch panel (§2.3): re-uses the same
+/// [`key_hints`] the panel draws inline so the modal-aware wording never
+/// drifts between the two rows.
+pub(crate) fn branches_hints(show_input: bool, show_delete_confirm: bool) -> HintRow {
+    HintRow::new(key_hints(show_input, show_delete_confirm))
 }
 
 fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) {
@@ -202,7 +210,9 @@ mod tests {
     ) -> Terminal<TestBackend> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_branches(f, state)).unwrap();
+        terminal
+            .draw(|f| render_branches(f, f.area(), state))
+            .unwrap();
         terminal
     }
 

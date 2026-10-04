@@ -12,6 +12,7 @@ use crate::git::{CommitDetail, CommitRow, RefKind};
 use crate::ui::status::StatusLine;
 
 use super::{hint, pulls};
+use crate::ui::components::footer::HintRow;
 
 /// Inner width of the DAG column: one cell per lane, capped at the lanes
 /// `git::layout_graph` ever produces (`git::MAX_LANES`).
@@ -53,8 +54,8 @@ pub struct HistoryRender<'a> {
 ///
 /// The list is drawn first so the DAG column can scroll with the offset the
 /// list actually settled on, keeping graph rows and commit rows aligned.
-pub fn render_history(f: &mut Frame, mut state: HistoryRender<'_>) {
-    let area = f.area();
+pub fn render_history(f: &mut Frame, content: Rect, mut state: HistoryRender<'_>) {
+    let area = content;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -96,6 +97,12 @@ fn key_hints() -> Line<'static> {
         .into_iter()
         .flatten()
         .collect()
+}
+
+/// Footer hint row for the history view (§2.3): re-uses the same
+/// [`key_hints`] the panel draws inline.
+pub(crate) fn history_hints() -> HintRow {
+    HintRow::new(key_hints())
 }
 
 /// Commit list, or the empty-state copy for a repository without history.
@@ -284,7 +291,7 @@ mod tests {
                     repo_name: "demo",
                     status: None,
                 };
-                render_history(f, render)
+                render_history(f, f.area(), render)
             })
             .unwrap();
         let raw: String = terminal

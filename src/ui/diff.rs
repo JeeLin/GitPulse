@@ -9,10 +9,11 @@ use ratatui::{
 };
 
 use super::hint;
+use crate::ui::components::footer::HintRow;
 
 /// Render the diff content with syntax highlighting for +/- lines.
-pub fn render_diff(f: &mut Frame, app: &crate::app::App) {
-    let area = f.area();
+pub fn render_diff(f: &mut Frame, content: Rect, app: &crate::app::App) {
+    let area = content;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -34,11 +35,23 @@ pub fn render_diff(f: &mut Frame, app: &crate::app::App) {
     super::render_status_line(f, status_area, app.status.as_ref());
 
     // Render key hints
-    let hints = [hint("j/k", "滚动"), hint("Esc", "返回"), hint("q", "退出")]
+    f.render_widget(
+        Paragraph::new(key_hints()).style(Style::default()),
+        hints_area,
+    );
+}
+
+/// Bottom key-hint row for the diff view: the scroll keys and the way out.
+fn key_hints() -> Line<'static> {
+    [hint("j/k", "滚动"), hint("Esc", "返回"), hint("q", "退出")]
         .into_iter()
         .flatten()
-        .collect::<Line>();
-    f.render_widget(Paragraph::new(hints).style(Style::default()), hints_area);
+        .collect()
+}
+
+/// Footer hint row for the diff view (§2.3).
+pub(crate) fn diff_hints() -> HintRow {
+    HintRow::new(key_hints())
 }
 
 fn render_diff_content(f: &mut Frame, area: Rect, content: &str, scroll: u16) {
@@ -104,7 +117,7 @@ mod tests {
     fn render_app(app: &App) -> Terminal<TestBackend> {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_diff(f, app)).unwrap();
+        terminal.draw(|f| render_diff(f, f.area(), app)).unwrap();
         terminal
     }
 

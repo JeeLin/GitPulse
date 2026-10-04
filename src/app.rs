@@ -56,6 +56,27 @@ pub enum View {
     Notifications,
 }
 
+/// Every screen the command palette can jump to (DESIGN §6.11). The drill-down
+/// states — `Commit`, `Diff`, `PullDetail`, `IssueDetail` — are reached by
+/// `Enter` inside their hub, not as direct palette targets, but they are listed
+/// anyway so the palette's screen list stays in step with `View`.
+pub(crate) const SCREENS: [View; 14] = [
+    View::Dashboard,
+    View::Repo,
+    View::Diff,
+    View::Commit,
+    View::Branches,
+    View::Config,
+    View::History,
+    View::Tags,
+    View::Pulls,
+    View::PullDetail,
+    View::Checks,
+    View::Issues,
+    View::IssueDetail,
+    View::Notifications,
+];
+
 /// Active tab within the GitHub receipts hub (`p`/`c`/`i`/`n`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GithubTab {
@@ -335,7 +356,7 @@ enum BatchEvent {
 
 /// Application state shared across views.
 pub struct App {
-    /// Current view; key presses are dispatched per view in [`App::handle_key`].
+    /// Current view; key presses are dispatched per view in [`App::dispatch_key`].
     pub view: View,
     /// Loaded configuration; repo discovery consumes it (M1 subtask 3).
     /// `pub(crate)` so the config panel can borrow `scan_dirs` by field
@@ -412,6 +433,16 @@ pub struct App {
     pub github_state: GithubState,
     /// Receiver for a single in-flight GitHub fetch task (convention 1).
     github_rx: Option<mpsc::UnboundedReceiver<GithubMsg>>,
+    /// `?` help overlay toggle (DESIGN §6.11). The dispatch already owns the
+    /// key so it can never be read as navigation; Wave 2 renders the overlay.
+    pub help_open: bool,
+    /// `Ctrl-P` command-palette toggle (DESIGN §6.11), same prepared-state
+    /// contract as [`App::help_open`].
+    pub palette_open: bool,
+    /// Cursor for the `Ctrl-P` command-palette jump-target list (§6.11). The
+    /// palette owns its selection separately from the view beneath it, so the
+    /// underlying list keeps its own position while the palette is open.
+    pub palette_state: ListState,
 }
 
 impl App {
@@ -455,6 +486,9 @@ impl App {
             tags_state: TagsState::default(),
             github_state: GithubState::default(),
             github_rx: None,
+            help_open: false,
+            palette_open: false,
+            palette_state: ListState::default(),
         }
     }
 
@@ -1096,23 +1130,18 @@ impl App {
 
     /// Key handler for the GitHub receipts hub and its detail panels.
     ///
-    /// `p`/`c`/`i`/`n` switch tabs, `r` refreshes, `j`/`k` (and arrows / space)
-    /// navigate, `Enter` opens the pull detail from the pulls hub or the issue
-    /// detail from the issues hub, and `Esc` pops: PullDetail → Pulls,
-    /// IssueDetail → Issues, any other receipts view → Repo. This handler
-    /// never exits the app (`q` returns to Repo, not the dashboard).
+    /// `p`/`c`/`i`/`n` switch tabs, `j`/`k` (and arrows / space) navigate and
+    /// `Enter` opens the pull detail from the pulls hub or the issue detail
+    /// from the issues hub. The grammar keys belong to
+    /// [`App::dispatch_key`]: `Esc` pops (PullDetail → Pulls, IssueDetail →
+    /// Issues, any other receipts view → Repo), `r` re-fetches and `q` quits
+    /// the app like on every other non-modal screen.
     fn handle_github_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('p') => self.switch_github_tab(GithubTab::Pulls),
             KeyCode::Char('c') => self.switch_github_tab(GithubTab::Checks),
             KeyCode::Char('i') => self.switch_github_tab(GithubTab::Issues),
             KeyCode::Char('n') => self.switch_github_tab(GithubTab::Notifications),
-            KeyCode::Char('r') => {
-                if self.github_state.client.is_some() {
-                    self.refresh_github();
-                }
-                true
-            }
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Char(' ') | KeyCode::Char(',') => {
                 self.move_github_selection(true);
                 true
@@ -1127,24 +1156,6 @@ impl App {
             }
             KeyCode::Enter if self.view == View::Issues => {
                 self.open_issue_detail();
-                true
-            }
-            // `Esc` pops one level: PullDetail → Pulls, IssueDetail → Issues,
-            // any other receipts view → Repo. `q` always returns to Repo (never
-            // exits here).
-            KeyCode::Esc => {
-                if self.view == View::PullDetail {
-                    self.view = View::Pulls;
-                    self.github_state.tab = GithubTab::Pulls;
-                } else if self.view == View::IssueDetail {
-                    self.view = View::Issues;
-                } else {
-                    self.view = View::Repo;
-                }
-                true
-            }
-            KeyCode::Char('q') => {
-                self.view = View::Repo;
                 true
             }
             _ => true,
@@ -1325,7 +1336,7 @@ impl App {
         self.load_history();
     }
 
-    /// Leave the history view back to the repo view (`q` / `Esc`).
+    /// Leave the history view back to the repo view (`Esc`).
     pub fn leave_history(&mut self) {
         self.view = View::Repo;
         self.clear_error();
@@ -1416,7 +1427,7 @@ impl App {
         self.load_tags();
     }
 
-    /// Leave the tag panel back to the repo view (`q` / `Esc`).
+    /// Leave the tag panel back to the repo view (`Esc`).
     pub fn leave_tags(&mut self) {
         self.view = View::Repo;
         self.tags_state.modal = None;
@@ -2105,16 +2116,83 @@ impl App {
         }
     }
 
-    /// Dispatch a key press for the current view; returns `false` when the app should exit.
-    pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+    /// Single entry point for every key press (DESIGN §0/§2.1). The press is
+    /// resolved in a fixed order, so no view can redefine the global verbs:
+    ///
+    /// 1. key-release event → ignored
+    /// 2. `Ctrl-C` → force quit (any state, modals included)
+    /// 3. open modal → focus trap (§2.4), only the overlay's own keys act
+    /// 4. `q` → quit the app from any non-modal screen
+    /// 5. global verbs (`Esc`/`?`/`Ctrl-P`/`Tab`/`BackTab`/`<`/`>`/`r`/`/`/
+    ///    `g`/`G`/`Home`/`End`)
+    /// 6. the current view's own keys (its `Enter` "open" verbs included)
+    ///
+    /// Returns `false` when the app should exit.
+    pub fn dispatch_key(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
             return true;
         }
+        // `Ctrl-C` force-quits in every state, modals included (§0: 任何时刻生效).
+        if is_ctrl_c(key) {
+            return false;
+        }
+        // Modal focus trap (§2.4): while an overlay owns the keyboard no
+        // global verb reaches the view — `q` types, `r` types, `Esc` closes
+        // the overlay instead of popping the screen behind it.
+        if self.active_modal().is_some() {
+            return self.dispatch_modal_key(key);
+        }
+        // Wave-2 float overlays (`?` help / Ctrl-P palette) own the keyboard
+        // just like the v1 modals (§2.4 / §6.11): `q` and `Esc` dismiss them
+        // instead of quitting or popping the screen behind, `?`/Ctrl-P still
+        // toggle between the two, and the palette's j/k/Enter navigate+jump.
+        if self.help_open || self.palette_open {
+            return self.dispatch_overlay_key(key);
+        }
+        // `q` exits the app from every non-modal screen (§0 / §1.3); the
+        // v0.4.0 "q returns to the repo view" readings are gone.
+        if is_plain_char(key, 'q') {
+            return false;
+        }
+        match key.code {
+            KeyCode::Esc => self.pop_one_level(),
+            KeyCode::Char('?') if is_plain(key) => self.toggle_help_overlay(),
+            KeyCode::Char('p') if is_ctrl(key) => self.toggle_palette_overlay(),
+            // Panel focus and context tags never enter the stack (§1.1);
+            // their cycling state lands with the repo-workspace tabs, so the
+            // keys are reserved here and stay no-ops for now.
+            KeyCode::Tab | KeyCode::BackTab => {}
+            KeyCode::Char('<') if is_plain(key) => {}
+            KeyCode::Char('>') if is_plain(key) => {}
+            KeyCode::Char('r') if is_plain(key) => self.refresh_current_view(),
+            // Search/filter state lands with the view subtasks; owning the
+            // key here keeps it from ever falling through to a view verb.
+            KeyCode::Char('/') if is_plain(key) => {}
+            KeyCode::Char('g' | 'G') | KeyCode::Home | KeyCode::End if is_plain(key) => {
+                // Transitional exception: repo `g` still opens the receipts
+                // hub (`g 进入` hint) until the repo workspace replaces that
+                // entry with its 远端 context tab (DESIGN §6.2.5); on every
+                // other screen `g` is the "jump to the first row" verb (§0).
+                if self.view == View::Repo && key.code == KeyCode::Char('g') {
+                    return self.handle_repo_key(key);
+                }
+                self.jump_focus_list(key.code);
+            }
+            _ => return self.handle_view_key(key),
+        }
+        true
+    }
+
+    /// Route a key the global layer does not own to the current view's own
+    /// verbs (DESIGN §2.1): views get `Enter` (open), the letter verbs
+    /// (`s`/`u`/`c`/`n`/`d`/…) and `j`/`k` list movement.
+    fn handle_view_key(&mut self, key: KeyEvent) -> bool {
         match self.view {
             View::Dashboard => self.handle_dashboard_key(key),
             View::Repo => self.handle_repo_key(key),
             View::Diff => self.handle_diff_key(key),
-            View::Commit => self.handle_commit_key(key),
+            // Unreachable: an open input is caught by the focus trap above.
+            View::Commit => true,
             View::Branches => self.handle_branches_key(key),
             View::Config => self.handle_config_key(key),
             View::History => self.handle_history_key(key),
@@ -2128,20 +2206,378 @@ impl App {
         }
     }
 
+    /// The overlay (if any) that owns the keyboard right now — the single
+    /// source for the focus trap (§2.4: 同时只允许一个模态). Exactly one flag
+    /// can be set at a time (`start_*` always clears the sibling overlays).
+    fn active_modal(&self) -> Option<ModalKind> {
+        if self.view == View::Commit {
+            return Some(ModalKind::Input(InputSlot::Commit));
+        }
+        if self.show_branch_input {
+            return Some(ModalKind::Input(InputSlot::BranchCreate));
+        }
+        if self.show_branch_delete_confirm {
+            return Some(ModalKind::Confirm(ConfirmSlot::BranchDelete));
+        }
+        if self.show_config_picker {
+            return Some(ModalKind::Picker);
+        }
+        if self.show_config_input {
+            return Some(ModalKind::Input(InputSlot::ConfigAdd));
+        }
+        if self.show_config_delete_confirm {
+            return Some(ModalKind::Confirm(ConfirmSlot::ConfigDelete));
+        }
+        if let Some(modal) = &self.tags_state.modal {
+            return Some(match modal {
+                TagsModal::Input { .. } => ModalKind::Input(InputSlot::TagCreate),
+                TagsModal::Confirm { .. } => ModalKind::Confirm(ConfirmSlot::TagDelete),
+            });
+        }
+        if self.show_discard_confirm {
+            return Some(ModalKind::Confirm(ConfirmSlot::Discard));
+        }
+        None
+    }
+
+    /// Run one key press through the overlay returned by
+    /// [`App::active_modal`] (§2.4): text input, y/n confirmation or the
+    /// directory picker. Only the overlay's own keys act — `Enter`/`Esc`
+    /// first, then its letters — and everything else (including `q`, `r`,
+    /// `?`, `Ctrl-P`) is literal input or swallowed. Always returns `true`:
+    /// an overlay never quits the app.
+    fn dispatch_modal_key(&mut self, key: KeyEvent) -> bool {
+        let Some(modal) = self.active_modal() else {
+            return self.handle_view_key(key);
+        };
+        match modal {
+            ModalKind::Input(slot) => {
+                let outcome = match slot {
+                    InputSlot::Commit => input_modal_key(key, &mut self.commit_message),
+                    InputSlot::BranchCreate => input_modal_key(key, &mut self.branch_input),
+                    InputSlot::ConfigAdd => input_modal_key(key, &mut self.config_input),
+                    InputSlot::TagCreate => match self.tags_state.modal.as_mut() {
+                        Some(TagsModal::Input { buffer }) => input_modal_key(key, buffer),
+                        // Raced away between the two lookups: swallow.
+                        _ => InputOutcome::Consumed,
+                    },
+                };
+                match (slot, outcome) {
+                    (InputSlot::Commit, InputOutcome::Cancel) => self.cancel_commit(),
+                    (InputSlot::Commit, InputOutcome::Submit) => self.submit_commit(),
+                    (InputSlot::BranchCreate, InputOutcome::Cancel) => self.cancel_branch_create(),
+                    (InputSlot::BranchCreate, InputOutcome::Submit) => self.submit_branch_create(),
+                    (InputSlot::ConfigAdd, InputOutcome::Cancel) => self.cancel_config_add(),
+                    (InputSlot::ConfigAdd, InputOutcome::Submit) => self.submit_config_add(),
+                    (InputSlot::TagCreate, InputOutcome::Cancel) => self.cancel_tag_create(),
+                    (InputSlot::TagCreate, InputOutcome::Submit) => self.submit_tag_create(),
+                    (_, InputOutcome::Consumed) => {}
+                }
+            }
+            ModalKind::Confirm(slot) => match (slot, confirm_modal_key(key)) {
+                (ConfirmSlot::Discard, ConfirmOutcome::Yes) => self.confirm_discard(),
+                (ConfirmSlot::Discard, ConfirmOutcome::No) => self.cancel_discard(),
+                (ConfirmSlot::BranchDelete, ConfirmOutcome::Yes) => self.confirm_branch_delete(),
+                (ConfirmSlot::BranchDelete, ConfirmOutcome::No) => self.cancel_branch_delete(),
+                (ConfirmSlot::ConfigDelete, ConfirmOutcome::Yes) => self.confirm_config_delete(),
+                (ConfirmSlot::ConfigDelete, ConfirmOutcome::No) => self.cancel_config_delete(),
+                (ConfirmSlot::TagDelete, ConfirmOutcome::Yes) => self.confirm_tag_delete(),
+                (ConfirmSlot::TagDelete, ConfirmOutcome::No) => self.cancel_tag_delete(),
+                (_, ConfirmOutcome::Ignored) => {}
+            },
+            ModalKind::Picker => self.handle_config_picker_key(key),
+        }
+        true
+    }
+
+    /// `Esc`: pop exactly one level of the screen stack (§1.1). The root
+    /// screen never exits — it toasts 「已在顶层」 instead, because quitting is
+    /// `q`'s job (§1.2). A prepared help/palette overlay closes first.
+    fn pop_one_level(&mut self) {
+        if self.help_open || self.palette_open {
+            self.help_open = false;
+            self.palette_open = false;
+            return;
+        }
+        match self.view {
+            // Root screen (stack depth 1): no exit on `Esc`.
+            View::Dashboard => self.set_info("已在顶层"),
+            View::Repo => self.view = View::Dashboard,
+            View::Diff => self.view = View::Repo,
+            // Defensive: the commit input is an overlay, closed by the trap.
+            View::Commit => self.cancel_commit(),
+            View::Branches => self.leave_branches(),
+            View::Config => self.leave_config(),
+            View::History => self.leave_history(),
+            View::Tags => self.leave_tags(),
+            View::PullDetail => {
+                self.view = View::Pulls;
+                self.github_state.tab = GithubTab::Pulls;
+            }
+            View::IssueDetail => self.view = View::Issues,
+            View::Pulls | View::Checks | View::Issues | View::Notifications => {
+                self.view = View::Repo
+            }
+        }
+    }
+
+    /// `r`: reload the current view's data (§0/§1.3), the same reload each
+    /// view's entry point performs — one rule for local git and GitHub alike.
+    fn refresh_current_view(&mut self) {
+        match self.view {
+            View::Dashboard => self.refresh_repos(),
+            View::Repo => {
+                if let Some(idx) = self.current_repo.filter(|i| *i < self.repos.len()) {
+                    self.refresh_repo_status(idx);
+                }
+            }
+            // Re-read the diff of the highlighted file (resets the scroll).
+            View::Diff => self.view_file_diff(),
+            View::Commit => {}
+            View::Branches => self.load_branches(),
+            // The scan-dir list is in-memory; `r` re-runs the scan it shows.
+            View::Config => self.refresh_repos(),
+            View::History => self.load_history(),
+            View::Tags => self.load_tags(),
+            View::Pulls
+            | View::PullDetail
+            | View::Checks
+            | View::Issues
+            | View::Notifications
+            | View::IssueDetail => self.refresh_github(),
+        }
+    }
+
+    /// `g`/`Home` → first row, `G`/`End` → last row of the focused list
+    /// (§0 辅动词): never enters the stack, so it is safe on every screen.
+    /// Screens without a list (the diff scroll area jumps to its top) ignore
+    /// the key they cannot honour.
+    fn jump_focus_list(&mut self, code: KeyCode) {
+        let head = matches!(code, KeyCode::Char('g') | KeyCode::Home);
+        match self.view {
+            View::Dashboard => jump_selection(&mut self.dashboard_state, self.repos.len(), head),
+            View::Repo => jump_selection(&mut self.file_state, self.file_entries.len(), head),
+            View::Diff => {
+                if head {
+                    self.diff_scroll = 0;
+                } else {
+                    // One logical line can wrap into several rows, so landing
+                    // on the last line is the closest safe estimate: scrolling
+                    // past the end would render a blank panel.
+                    self.diff_scroll =
+                        u16::try_from(self.diff_content.lines().count().saturating_sub(1))
+                            .unwrap_or(u16::MAX);
+                }
+            }
+            View::Commit => {}
+            View::Branches => jump_selection(&mut self.branch_state, self.branches.len(), head),
+            View::Config => {
+                jump_selection(&mut self.config_state, self.config.scan_dirs.len(), head)
+            }
+            View::History => {
+                let idx = if head {
+                    0
+                } else {
+                    self.history.commits.len().saturating_sub(1)
+                };
+                let before = self.history.selected;
+                self.history.select(idx);
+                // The detail pane follows the cursor, like `j`/`k` do.
+                if self.history.selected != before {
+                    self.load_history_detail();
+                }
+            }
+            View::Tags => {
+                let idx = if head {
+                    0
+                } else {
+                    self.tags_state.tags.len().saturating_sub(1)
+                };
+                self.tags_state.select(idx);
+            }
+            View::Pulls
+            | View::PullDetail
+            | View::Checks
+            | View::Issues
+            | View::Notifications
+            | View::IssueDetail => {
+                let len = self.github_list_len();
+                self.github_state.selected = if head { 0 } else { len.saturating_sub(1) };
+            }
+        }
+    }
+
+    /// `?` (§6.11): toggle the help overlay state. The dispatch owns the key
+    /// so it can never be read as a view verb; Wave 2 renders the overlay.
+    fn toggle_help_overlay(&mut self) {
+        self.help_open = !self.help_open;
+        if self.help_open {
+            self.palette_open = false;
+        }
+    }
+
+    /// `Ctrl-P` (§6.11): toggle the command-palette state, same prepared-state
+    /// contract as [`App::toggle_help_overlay`]. Never reached from an input
+    /// modal, where the chord is swallowed as a literal chord would be.
+    fn toggle_palette_overlay(&mut self) {
+        self.palette_open = !self.palette_open;
+        if self.palette_open {
+            self.help_open = false;
+        }
+    }
+
+    /// Jump targets the command palette lists (§6.11): every screen, plus the
+    /// current repo / branch when a repository is open. The list is read-only
+    /// here so the palette can render and the dispatch can navigate it while the
+    /// view beneath it stays untouched.
+    pub(crate) fn palette_targets(&self) -> Vec<PaletteTarget> {
+        let mut targets = SCREENS
+            .iter()
+            .copied()
+            .map(PaletteTarget::View)
+            .collect::<Vec<_>>();
+        if let Some(idx) = self.current_repo.filter(|i| *i < self.repos.len()) {
+            let repo = &self.repos[idx];
+            targets.push(PaletteTarget::Repo(repo.name.clone()));
+            targets.push(PaletteTarget::Branch(repo.branch.clone()));
+        }
+        targets
+    }
+    /// Route a key through an open float overlay (§6.11): `Esc` and `q` dismiss
+    /// the overlay (never quit, never pop the screen behind it), `?`/Ctrl-P
+    /// toggle between help and palette, and the palette's j/k/Enter navigate
+    /// and jump. Every other key is swallowed while an overlay is open so the
+    /// view beneath it is never disturbed.
+    fn dispatch_overlay_key(&mut self, key: KeyEvent) -> bool {
+        // `Esc` and `q` both close whichever float is open; while an overlay
+        // owns the keyboard they must never reach the quit / pop path.
+        if key.code == KeyCode::Esc || is_plain_char(key, 'q') {
+            self.help_open = false;
+            self.palette_open = false;
+            return true;
+        }
+        // `?` / Ctrl-P toggle between the two overlays (mutual exclusion), the
+        // same verbs the global layer owns when no overlay is open.
+        if is_plain(key) && matches!(key.code, KeyCode::Char('?')) {
+            self.toggle_help_overlay();
+            return true;
+        }
+        if is_ctrl(key) && matches!(key.code, KeyCode::Char('p')) {
+            self.toggle_palette_overlay();
+            return true;
+        }
+        if self.help_open {
+            // Read-only modal: only its close/toggle verbs act above.
+            return true;
+        }
+        // Command palette: `j`/`k` (and the arrows) move the cursor, `Enter`
+        // jumps, and everything else stays inside the palette.
+        if is_plain(key) {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down | KeyCode::Char(' ') => {
+                    self.move_palette_selection(true);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.move_palette_selection(false);
+                }
+                KeyCode::Enter => {
+                    self.jump_palette_selection();
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
+    /// Move the command-palette cursor one row (`down` toward the last target),
+    /// clamped to the list and anchored to the visible targets.
+    fn move_palette_selection(&mut self, down: bool) {
+        let len = self.palette_targets().len();
+        if len == 0 {
+            self.palette_state.select(None);
+            return;
+        }
+        let idx = self.palette_state.selected().unwrap_or(0).min(len - 1);
+        let next = if down {
+            (idx + 1).min(len - 1)
+        } else {
+            idx.saturating_sub(1)
+        };
+        self.palette_state.select(Some(next));
+    }
+
+    /// Jump to the highlighted palette target: reset the view stack to it and
+    /// dismiss the palette. Only the screens and the current repo/branch are
+    /// wired here; full §6.11 fuzzy search and branch/context switching is the
+    /// documented residual.
+    fn jump_palette_selection(&mut self) {
+        let targets = self.palette_targets();
+        let Some(idx) = self.palette_state.selected() else {
+            return;
+        };
+        let Some(target) = targets.get(idx) else {
+            return;
+        };
+        match target {
+            PaletteTarget::View(view) => self.jump_to_view(*view),
+            PaletteTarget::Repo(_) => self.view = View::Repo,
+            PaletteTarget::Branch(_) => self.view = View::Branches,
+        }
+        self.palette_open = false;
+        self.help_open = false;
+    }
+
+    /// Reset the view stack to `view` and its row cursor to the first row
+    /// (DESIGN §6.11 "directly reset the stack"). Every panel tolerates an
+    /// empty load, so landing on a screen with no data shows its empty state.
+    fn jump_to_view(&mut self, view: View) {
+        self.view = view;
+        self.clear_error();
+        match view {
+            View::Dashboard => {
+                self.dashboard_state
+                    .select(if self.repos.is_empty() { None } else { Some(0) });
+            }
+            View::Repo => {
+                self.file_state.select(if self.file_entries.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                });
+            }
+            View::Branches => {
+                self.branch_state.select(if self.branches.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                });
+            }
+            View::Config => self
+                .config_state
+                .select(if self.config.scan_dirs.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                }),
+            View::History => self.history.select(0),
+            View::Tags => self.tags_state.select(0),
+            View::Pulls | View::Checks | View::Issues | View::Notifications => {
+                self.github_state.selected = 0;
+            }
+            // Drill-down states reached by Enter inside a screen, not a jump.
+            View::Diff | View::Commit | View::PullDetail | View::IssueDetail => {}
+        }
+    }
+
     /// Key handler for the dashboard: list navigation and view entry points.
     fn handle_dashboard_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => false,
             KeyCode::Char('j') | KeyCode::Down => {
                 move_selection(&mut self.dashboard_state, self.repos.len(), true);
                 true
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 move_selection(&mut self.dashboard_state, self.repos.len(), false);
-                true
-            }
-            KeyCode::Char('r') => {
-                self.refresh_repos();
                 true
             }
             KeyCode::Char('l') => {
@@ -2168,84 +2604,77 @@ impl App {
         }
     }
 
-    /// Key handler for the single-repo view. Entered from the dashboard by
-    /// later subtasks; Esc steps back one level.
+    /// Key handler for the single-repo view's own verbs. The global layer
+    /// owns `Esc` (back to the dashboard), `q` (quit), `r` (refresh) and the
+    /// `g`/`G`/`Home`/`End` jumps — except `g`, which still opens the
+    /// receipts hub until the 远端 context tab takes over; the discard
+    /// confirmation is caught by the focus trap before this runs.
     fn handle_repo_key(&mut self, key: KeyEvent) -> bool {
-        if self.show_discard_confirm {
-            match confirm_modal_key(key) {
-                ConfirmOutcome::Yes => self.confirm_discard(),
-                ConfirmOutcome::No => self.cancel_discard(),
-                ConfirmOutcome::Ignored => {}
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                move_selection(&mut self.file_state, self.file_entries.len(), true);
+                true
             }
-            true
-        } else {
-            match key.code {
-                KeyCode::Esc => {
-                    self.view = View::Dashboard;
-                    true
-                }
-                KeyCode::Char('q') => false,
-                KeyCode::Char('j') | KeyCode::Down => {
-                    move_selection(&mut self.file_state, self.file_entries.len(), true);
-                    true
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    move_selection(&mut self.file_state, self.file_entries.len(), false);
-                    true
-                }
-                KeyCode::Char('d') => {
-                    self.view_file_diff();
-                    true
-                }
-                KeyCode::Char('s') => {
-                    self.stage_current();
-                    true
-                }
-                KeyCode::Char('u') => {
-                    self.unstage_current();
-                    true
-                }
-                KeyCode::Char('x') => {
-                    self.start_discard();
-                    true
-                }
-                KeyCode::Char('c') => {
-                    self.open_commit();
-                    true
-                }
-                // Enter the GitHub receipts hub from the repo view (M1.2: `g` is
-                // the only receipts entry key in the repo view).
-                KeyCode::Char('g') => {
-                    self.enter_github();
-                    true
-                }
-                // The five entry keys are the same shape — run one action,
-                // keep looping — so they share a single arm instead of five
-                // copies (G15): push / pull, then the branch, history and
-                // tag panels.
-                KeyCode::Char(c) => {
-                    match c {
-                        'p' => self.start_remote("push"),
-                        'l' => self.start_remote("pull"),
-                        'b' => self.enter_branches(),
-                        'h' => self.enter_history(),
-                        't' => self.enter_tags(),
-                        _ => {}
-                    }
-                    true
-                }
-                _ => true,
+            KeyCode::Char('k') | KeyCode::Up => {
+                move_selection(&mut self.file_state, self.file_entries.len(), false);
+                true
             }
+            // `Enter` = 打开 (§0): open the highlighted file's diff sub-screen
+            // (`d` is the pre-redesign alias kept until task 7 remaps it).
+            KeyCode::Enter => {
+                self.view_file_diff();
+                true
+            }
+            KeyCode::Char('d') => {
+                self.view_file_diff();
+                true
+            }
+            KeyCode::Char('s') => {
+                self.stage_current();
+                true
+            }
+            KeyCode::Char('u') => {
+                self.unstage_current();
+                true
+            }
+            KeyCode::Char('x') => {
+                self.start_discard();
+                true
+            }
+            KeyCode::Char('c') => {
+                self.open_commit();
+                true
+            }
+            // Enter the GitHub receipts hub from the repo view (M1.2: `g` is
+            // the only receipts entry key in the repo view).
+            KeyCode::Char('g') => {
+                self.enter_github();
+                true
+            }
+            // The five entry keys are the same shape — run one action,
+            // keep looping — so they share a single arm instead of five
+            // copies (G15): push / pull, then the branch, history and
+            // tag panels.
+            KeyCode::Char(c) => {
+                match c {
+                    'p' => self.start_remote("push"),
+                    'l' => self.start_remote("pull"),
+                    'b' => self.enter_branches(),
+                    'h' => self.enter_history(),
+                    't' => self.enter_tags(),
+                    _ => {}
+                }
+                true
+            }
+            _ => true,
         }
     }
 
-    /// Key handler for the diff viewer: vertical scroll and exit.
+    /// Key handler for the diff viewer: vertical scroll only — `Esc` (back to
+    /// the repo view), `q` (quit) and the `g`/`Home` jump to the top belong
+    /// to [`App::dispatch_key`].
     fn handle_diff_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Esc => {
-                self.view = View::Repo;
-                true
-            }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.diff_scroll = self.diff_scroll.saturating_add(1);
                 true
@@ -2254,85 +2683,44 @@ impl App {
                 self.diff_scroll = self.diff_scroll.saturating_sub(1);
                 true
             }
-            KeyCode::Char('q') => false,
             _ => true,
         }
     }
 
-    /// Key handler for the single-line commit input (convention 9): Enter
-    /// submits, Esc cancels.
-    fn handle_commit_key(&mut self, key: KeyEvent) -> bool {
-        match input_modal_key(key, &mut self.commit_message) {
-            InputOutcome::Cancel => self.cancel_commit(),
-            InputOutcome::Submit => self.submit_commit(),
-            InputOutcome::Consumed => {}
-        }
-        true
-    }
-
-    /// Key handler for the branch panel: modal input / delete-confirm take
-    /// precedence over list navigation; Esc returns to the view it was
-    /// opened from.
+    /// Key handler for the branch panel: list navigation and its two overlay
+    /// openers. The open overlays and the global verbs (`Esc` back, `q` quit,
+    /// `r` reload) are handled before this runs.
     fn handle_branches_key(&mut self, key: KeyEvent) -> bool {
-        // The input overlay and the delete confirm are mutually exclusive
-        // (`start_branch_*` always clears the other flag); the input is
-        // checked first, matching the config panel.
-        if self.show_branch_input {
-            match input_modal_key(key, &mut self.branch_input) {
-                InputOutcome::Cancel => self.cancel_branch_create(),
-                InputOutcome::Submit => self.submit_branch_create(),
-                InputOutcome::Consumed => {}
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                move_selection(&mut self.branch_state, self.branches.len(), true);
+                true
             }
-            true
-        } else if self.show_branch_delete_confirm {
-            match confirm_modal_key(key) {
-                ConfirmOutcome::Yes => self.confirm_branch_delete(),
-                ConfirmOutcome::No => self.cancel_branch_delete(),
-                ConfirmOutcome::Ignored => {}
+            KeyCode::Char('k') | KeyCode::Up => {
+                move_selection(&mut self.branch_state, self.branches.len(), false);
+                true
             }
-            true
-        } else {
-            match key.code {
-                KeyCode::Esc => {
-                    self.leave_branches();
-                    true
-                }
-                KeyCode::Char('q') => false,
-                KeyCode::Char('j') | KeyCode::Down => {
-                    move_selection(&mut self.branch_state, self.branches.len(), true);
-                    true
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    move_selection(&mut self.branch_state, self.branches.len(), false);
-                    true
-                }
-                KeyCode::Enter => {
-                    self.switch_to_selected_branch();
-                    true
-                }
-                KeyCode::Char('n') => {
-                    self.start_branch_create();
-                    true
-                }
-                KeyCode::Char('d') => {
-                    self.start_branch_delete();
-                    true
-                }
-                KeyCode::Char('r') => {
-                    self.load_branches();
-                    true
-                }
-                _ => true,
+            KeyCode::Enter => {
+                self.switch_to_selected_branch();
+                true
             }
+            KeyCode::Char('n') => {
+                self.start_branch_create();
+                true
+            }
+            KeyCode::Char('d') => {
+                self.start_branch_delete();
+                true
+            }
+            _ => true,
         }
     }
 
-    /// Key handler for the commit history view: `j/k` and the arrow keys
-    /// move the selection and reload the highlighted commit's detail, while
-    /// `q` / `Esc` return to the repo view (the view it is entered from).
+    /// Key handler for the commit history view: `j/k` and the arrow keys move
+    /// the selection and reload the highlighted commit's detail. `Esc` (back
+    /// to the repo view) and `q` (quit) belong to [`App::dispatch_key`].
     fn handle_history_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.leave_history(),
             KeyCode::Char('j') | KeyCode::Down => self.move_history_selection(true),
             KeyCode::Char('k') | KeyCode::Up => self.move_history_selection(false),
             _ => {}
@@ -2357,133 +2745,56 @@ impl App {
         }
     }
 
-    /// Key handler for the tag panel: the create input and the delete
-    /// confirmation take precedence over list navigation, while `q` / `Esc`
-    /// on the list return to the repo view.
-    ///
-    /// A press never leaves the panel from under an open overlay: `Esc`
-    /// dismisses it first (and `q` dismisses the confirmation as well, so
-    /// the "close the modal first" rule holds for both keys). Only the
-    /// create input treats `q` as text, otherwise tag names could not
-    /// contain the letter.
+    /// Key handler for the tag panel's list. Both overlays (create input,
+    /// delete confirmation) are caught by the modal focus trap before this
+    /// runs, as are `Esc` (back to the repo view) and `q` (quit).
     fn handle_tags_key(&mut self, key: KeyEvent) -> bool {
-        // The routing match resolves the open overlay — or the list — into
-        // exactly one action, so the borrow of `tags_state.modal` ends
-        // before this single flat match acts on the app (G14).
-        match self.route_tags_key(key) {
-            TagsOverlayOutcome::CancelCreate => self.cancel_tag_create(),
-            TagsOverlayOutcome::SubmitCreate => self.submit_tag_create(),
-            TagsOverlayOutcome::ConfirmDelete => self.confirm_tag_delete(),
-            TagsOverlayOutcome::CancelDelete => self.cancel_tag_delete(),
-            TagsOverlayOutcome::Leave => self.leave_tags(),
-            TagsOverlayOutcome::Move(down) => self.tags_state.move_selection(down),
-            TagsOverlayOutcome::OpenCreate => self.start_tag_create(),
-            TagsOverlayOutcome::OpenDelete => self.start_tag_delete(),
-            TagsOverlayOutcome::Push(all) => self.start_tag_push(all),
-            TagsOverlayOutcome::Ignored => {}
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.tags_state.move_selection(true),
+            KeyCode::Char('k') | KeyCode::Up => self.tags_state.move_selection(false),
+            KeyCode::Char('c') => self.start_tag_create(),
+            KeyCode::Char('d') => self.start_tag_delete(),
+            KeyCode::Char('p') => self.start_tag_push(false),
+            KeyCode::Char('a') => self.start_tag_push(true),
+            _ => {}
         }
         true
     }
 
-    /// Turn one press into the single action it asks for: routed through the
-    /// create input or the delete confirmation while one of them is open,
-    /// through the list keys otherwise. Nothing on the app is touched, so
-    /// the caller can act after the modal borrow has ended.
-    fn route_tags_key(&mut self, key: KeyEvent) -> TagsOverlayOutcome {
-        match self.tags_state.modal.as_mut() {
-            Some(TagsModal::Input { buffer }) => match input_modal_key(key, buffer) {
-                InputOutcome::Cancel => TagsOverlayOutcome::CancelCreate,
-                InputOutcome::Submit => TagsOverlayOutcome::SubmitCreate,
-                InputOutcome::Consumed => TagsOverlayOutcome::Ignored,
-            },
-            Some(TagsModal::Confirm { .. }) => {
-                // `q` dismisses the confirmation like `n` (and every other
-                // press), so the "close the modal first" rule holds for
-                // both keys.
-                let confirm = if key.code == KeyCode::Char('q') {
-                    ConfirmOutcome::No
-                } else {
-                    confirm_modal_key(key)
-                };
-                match confirm {
-                    ConfirmOutcome::Yes => TagsOverlayOutcome::ConfirmDelete,
-                    ConfirmOutcome::No => TagsOverlayOutcome::CancelDelete,
-                    ConfirmOutcome::Ignored => TagsOverlayOutcome::Ignored,
-                }
-            }
-            None => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => TagsOverlayOutcome::Leave,
-                KeyCode::Char('j') | KeyCode::Down => TagsOverlayOutcome::Move(true),
-                KeyCode::Char('k') | KeyCode::Up => TagsOverlayOutcome::Move(false),
-                KeyCode::Char('c') => TagsOverlayOutcome::OpenCreate,
-                KeyCode::Char('d') => TagsOverlayOutcome::OpenDelete,
-                KeyCode::Char('p') => TagsOverlayOutcome::Push(false),
-                KeyCode::Char('a') => TagsOverlayOutcome::Push(true),
-                _ => TagsOverlayOutcome::Ignored,
-            },
-        }
-    }
-
-    /// Key handler for the config panel: modal input / delete-confirm take
-    /// precedence over list navigation; Esc returns to the dashboard, q
-    /// exits the program.
+    /// Key handler for the config panel's list. The picker, the path input
+    /// and the delete confirmation are caught by the modal focus trap before
+    /// this runs, as are `Esc` (back to the dashboard), `q` (quit) and `r`
+    /// (rescan).
     fn handle_config_key(&mut self, key: KeyEvent) -> bool {
-        // The picker / input overlay / delete confirm are mutually exclusive
-        // (`start_config_*` always clears the other flags); the picker is
-        // checked first, then the input, matching the branch panel.
-        if self.show_config_picker {
-            self.handle_config_picker_key(key);
-            true
-        } else if self.show_config_input {
-            match input_modal_key(key, &mut self.config_input) {
-                InputOutcome::Cancel => self.cancel_config_add(),
-                InputOutcome::Submit => self.submit_config_add(),
-                InputOutcome::Consumed => {}
+        match key.code {
+            KeyCode::Char('a') => {
+                self.start_config_add();
+                true
             }
-            true
-        } else if self.show_config_delete_confirm {
-            match confirm_modal_key(key) {
-                ConfirmOutcome::Yes => self.confirm_config_delete(),
-                ConfirmOutcome::No => self.cancel_config_delete(),
-                ConfirmOutcome::Ignored => {}
+            KeyCode::Char('i') => {
+                self.start_config_manual();
+                true
             }
-            true
-        } else {
-            match key.code {
-                KeyCode::Esc => {
-                    self.leave_config();
-                    true
-                }
-                KeyCode::Char('q') => false,
-                KeyCode::Char('a') => {
-                    self.start_config_add();
-                    true
-                }
-                KeyCode::Char('i') => {
-                    self.start_config_manual();
-                    true
-                }
-                KeyCode::Char('d') => {
-                    self.start_config_delete();
-                    true
-                }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    move_selection(&mut self.config_state, self.config.scan_dirs.len(), true);
-                    true
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    move_selection(&mut self.config_state, self.config.scan_dirs.len(), false);
-                    true
-                }
-                _ => true,
+            KeyCode::Char('d') => {
+                self.start_config_delete();
+                true
             }
+            KeyCode::Char('j') | KeyCode::Down => {
+                move_selection(&mut self.config_state, self.config.scan_dirs.len(), true);
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                move_selection(&mut self.config_state, self.config.scan_dirs.len(), false);
+                true
+            }
+            _ => true,
         }
     }
 
     /// Key handler for the directory picker overlay: list navigation,
     /// descend/ascend, selection routed through `add_scan_dir`, and a
-    /// switch to the manual input. `Esc` cancels; `q` is swallowed (quitting
-    /// stays one Esc away on the list, not mid-browse).
+    /// switch to the manual input. `Esc` cancels; every other global verb
+    /// (`q`, `r`, `?`, …) is swallowed by the focus trap before it gets here.
     fn handle_config_picker_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.cancel_config_add(),
@@ -2572,35 +2883,55 @@ fn clamp_selection(state: &mut ListState, len: usize) {
     state.select(Some(idx));
 }
 
-/// What one key press in the tag panel asks the app to do.
-///
-/// [`App::route_tags_key`] resolves the press — through the open overlay, or
-/// through the list when none is open — into exactly one of these actions;
-/// [`App::handle_tags_key`] then runs it in a single flat match. Both the
-/// routing and the action happen after the borrow of `tags_state.modal` has
-/// ended (G14: the previous shape nested four matches deep).
-enum TagsOverlayOutcome {
-    /// Esc on the create input: close it, keeping the list as it was.
-    CancelCreate,
-    /// Enter on the create input: create the typed tag.
-    SubmitCreate,
-    /// y on the delete confirmation: delete the named tag.
-    ConfirmDelete,
-    /// n / Esc / q on the delete confirmation: dismiss it.
-    CancelDelete,
-    /// `q` / `Esc` on the list: return to the repo view.
-    Leave,
-    /// j / k (or the arrows) on the list: move the highlight down / up.
-    Move(bool),
-    /// `c` on the list: open the create input.
-    OpenCreate,
-    /// `d` on the list: open the delete confirmation.
-    OpenDelete,
-    /// `p` / `a` on the list: push the highlighted tag / every local tag.
-    Push(bool),
-    /// A key the overlay consumed without asking the caller to act, or a
-    /// list key the panel does not bind.
-    Ignored,
+/// One jump target of the `Ctrl-P` command palette (DESIGN §6.11): a screen,
+/// or the current repository / branch when one is open. The palette lists these
+/// and resets the view stack onto the highlighted one on `Enter`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaletteTarget {
+    /// A top-level screen, selected by its [`View`].
+    View(View),
+    /// The currently opened repository, landed on its workspace.
+    Repo(String),
+    /// The current branch of the open repository, landed on its panel.
+    Branch(String),
+}
+
+/// Which overlay owns the keyboard, resolved by [`App::active_modal`] — the
+/// single source behind the focus trap (§2.4: 同时只允许一个模态).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModalKind {
+    /// Single-line text input; the slot names the buffer it edits.
+    Input(InputSlot),
+    /// y/n (+`Enter`) confirmation; the slot names the action it guards.
+    Confirm(ConfirmSlot),
+    /// Interactive directory picker (list-type overlay).
+    Picker,
+}
+
+/// The text input behind [`ModalKind::Input`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputSlot {
+    /// The commit-message input (`View::Commit`).
+    Commit,
+    /// The branch-create input.
+    BranchCreate,
+    /// The add-scan-dir input.
+    ConfigAdd,
+    /// The tag-create input.
+    TagCreate,
+}
+
+/// The confirmation dialog behind [`ModalKind::Confirm`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfirmSlot {
+    /// Discarding the highlighted worktree file.
+    Discard,
+    /// Deleting the highlighted branch.
+    BranchDelete,
+    /// Deleting the highlighted scan dir.
+    ConfigDelete,
+    /// Deleting the highlighted tag.
+    TagDelete,
 }
 
 /// Outcome of routing one key press through [`input_modal_key`].
@@ -2640,7 +2971,7 @@ fn input_modal_key(key: KeyEvent, buf: &mut String) -> InputOutcome {
 
 /// Outcome of routing one key press through [`confirm_modal_key`].
 enum ConfirmOutcome {
-    /// y/Y: the caller runs the confirmed action.
+    /// y/Y/Enter: the caller runs the confirmed action.
     Yes,
     /// n/N/Esc: the caller dismisses the dialog.
     No,
@@ -2649,14 +2980,51 @@ enum ConfirmOutcome {
 }
 
 /// Route one key press through the shared y/n confirmation modal
-/// (discard-style, convention 8): y/Y confirms, n/N/Esc cancels, and every
-/// other key is swallowed while the dialog is open.
+/// (discard-style, convention 8): `Enter` confirms the dialog's action
+/// (§0: Enter = 确认模态框中的按钮), y/Y confirms, n/N/Esc cancels, and every
+/// other key — `q`, `r`, navigation — is swallowed while it is open.
 fn confirm_modal_key(key: KeyEvent) -> ConfirmOutcome {
     match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => ConfirmOutcome::Yes,
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => ConfirmOutcome::Yes,
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => ConfirmOutcome::No,
         _ => ConfirmOutcome::Ignored,
     }
+}
+
+/// `true` for a key press carrying no `Ctrl`/`Alt` chord — the shape every
+/// "plain character" global verb (`q`, `r`, `<`, `>`, `?`, `g`, `G`, `/`)
+/// must match, so the chords stay free for their own meanings (`Ctrl-C`,
+/// `Ctrl-P`).
+fn is_plain(key: KeyEvent) -> bool {
+    !key.modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+/// `true` for the plain (unchorded) character `c`.
+fn is_plain_char(key: KeyEvent, c: char) -> bool {
+    key.code == KeyCode::Char(c) && is_plain(key)
+}
+
+/// `true` for the `Ctrl-P` command-palette chord (DESIGN §6.11).
+fn is_ctrl(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// `true` for `Ctrl-C`, the force-quit chord that applies in every state
+/// (DESIGN §0: 终端惯例，任何时刻生效) — modals included, which is why the
+/// dispatch checks it before the focus trap.
+fn is_ctrl_c(key: KeyEvent) -> bool {
+    is_ctrl(key) && key.code == KeyCode::Char('c')
+}
+
+/// Move the `g`/`G`/`Home`/`End` target: `head` selects the first row, tail
+/// the last one of a `len`-row list. An empty list clears the cursor.
+fn jump_selection(state: &mut ListState, len: usize, head: bool) {
+    if len == 0 {
+        state.select(None);
+        return;
+    }
+    state.select(Some(if head { 0 } else { len - 1 }));
 }
 
 /// Status-line text for a stale repository index (G20): one template for
@@ -2666,7 +3034,7 @@ fn invalid_repo_msg(op: &str) -> String {
     format!("{op}: 仓库索引失效")
 }
 
-/// Run the TUI until the user quits (`q` / `Esc` on the dashboard).
+/// Run the TUI until the user quits (`q` / `Ctrl-C`).
 pub async fn run() -> Result<()> {
     install_panic_hook();
     let mut terminal = init_terminal()?;
@@ -2693,7 +3061,7 @@ fn event_loop(terminal: &mut Tui, app: &mut App) -> Result<()> {
         terminal.draw(|f| crate::ui::render(f, app))?;
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
-                if !app.handle_key(key) {
+                if !app.dispatch_key(key) {
                     return Ok(());
                 }
             }
@@ -2767,13 +3135,13 @@ mod tests {
         let mut app = app_with_repos(3);
         assert_eq!(app.dashboard_state.selected(), None);
 
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.dashboard_state.selected(), Some(0));
 
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.dashboard_state.selected(), Some(1));
 
-        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('k'))));
         assert_eq!(app.dashboard_state.selected(), Some(0));
     }
 
@@ -2781,7 +3149,7 @@ mod tests {
     fn dashboard_j_stops_at_last_repo() {
         let mut app = app_with_repos(2);
         app.dashboard_state.select(Some(1));
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.dashboard_state.selected(), Some(1));
     }
 
@@ -2789,25 +3157,361 @@ mod tests {
     fn dashboard_enter_opens_selected_repo() {
         let mut app = app_with_repos(1);
         // Nothing selected: Enter is a no-op.
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         assert_eq!(app.view, View::Dashboard);
 
         app.dashboard_state.select(Some(0));
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         assert_eq!(app.view, View::Repo);
     }
 
     #[test]
     fn dashboard_q_quits() {
         let mut app = app_with_repos(1);
-        assert!(!app.handle_key(key(KeyCode::Char('q'))));
+        assert!(!app.dispatch_key(key(KeyCode::Char('q'))));
+    }
+
+    /// DESIGN §0/§1.3: `q` quits the application from every non-modal screen.
+    /// It never pops the stack, so the view is untouched when the app stops.
+    #[test]
+    fn q_exits_from_every_non_modal_screen() {
+        for view in [
+            View::Dashboard,
+            View::Repo,
+            View::Diff,
+            View::Branches,
+            View::Config,
+            View::History,
+            View::Tags,
+            View::Pulls,
+            View::PullDetail,
+            View::Checks,
+            View::Issues,
+            View::IssueDetail,
+            View::Notifications,
+        ] {
+            let mut app = App::new(Config::default());
+            app.view = view;
+            assert!(
+                !app.dispatch_key(key(KeyCode::Char('q'))),
+                "q must exit from {view:?}"
+            );
+            assert_eq!(app.view, view, "q must not move the stack in {view:?}");
+        }
+    }
+
+    /// `Ctrl-C` force-quits in every state — root screen, open input and open
+    /// confirmation alike (§0: 任何时刻生效).
+    #[test]
+    fn ctrl_c_quits_in_any_state_including_modals() {
+        let ctrl_c = || KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        let mut app = App::new(Config::default());
+        assert!(!app.dispatch_key(ctrl_c()));
+
+        // Input modal open: the chord beats the focus trap.
+        app.view = View::Commit;
+        app.commit_message = "draft".to_string();
+        assert!(!app.dispatch_key(ctrl_c()));
+
+        // Confirmation modal open: same rule.
+        let mut app = App::new(Config::default());
+        app.start_discard();
+        assert!(!app.dispatch_key(ctrl_c()));
+        assert!(
+            app.show_discard_confirm,
+            "quit happens without unwinding UI"
+        );
+    }
+
+    /// §2.4 focus trap: while an input owns the keyboard every global verb is
+    /// literal text — `q` types instead of quitting, `Esc` cancels the overlay
+    /// instead of popping the screen behind it.
+    #[test]
+    fn input_modal_traps_global_keys_as_literal_input() {
+        let dir = temp_dir("dispatch-input-trap");
+        init_repo_with_commit(&dir);
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert!(app.dispatch_key(key(KeyCode::Char('c'))));
+        assert_eq!(app.view, View::Commit);
+
+        for c in ['q', 'r', 'j', '?', '/', 'g', 'G'] {
+            assert!(app.dispatch_key(key(KeyCode::Char(c))));
+            assert_eq!(app.view, View::Commit, "{c} must stay inside the input");
+        }
+        assert_eq!(app.commit_message, "qrj?/gG");
+
+        // Chords and panel keys are swallowed, never acted on.
+        let ctrl_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert!(app.dispatch_key(ctrl_p));
+        assert!(!app.palette_open, "the palette never opens over an input");
+        assert!(app.dispatch_key(key(KeyCode::Tab)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
+        // Enter submits, returning to the view behind the overlay.
+        assert_eq!(app.view, View::Repo);
+
+        // Esc cancels instead: reopen and cancel out.
+        assert!(app.dispatch_key(key(KeyCode::Char('c'))));
+        assert_eq!(app.view, View::Commit);
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Repo);
+        assert!(app.commit_message.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §2.4 focus trap for confirmations: only y/Enter/n/Esc act, `q` and the
+    /// navigation/refresh verbs are swallowed, `Enter` confirms the button (§0).
+    #[test]
+    fn confirm_modal_swallows_global_keys_and_enter_confirms() {
+        let mut app = App::new(Config::default());
+        app.start_discard();
+
+        for code in [
+            KeyCode::Char('q'),
+            KeyCode::Char('r'),
+            KeyCode::Char('j'),
+            KeyCode::Char('g'),
+            KeyCode::Tab,
+            KeyCode::Char('?'),
+        ] {
+            assert!(app.dispatch_key(key(code)));
+            assert!(app.show_discard_confirm, "{code:?} must not dismiss it");
+        }
+
+        // Enter presses the highlighted button and closes the dialog.
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
+        assert!(!app.show_discard_confirm);
+        assert_eq!(app.view, View::Dashboard);
+    }
+
+    /// §6.11 prepared overlays: `?` and `Ctrl-P` toggle one at a time and Esc
+    /// closes them before it pops a screen.
+    #[test]
+    fn help_and_palette_toggles_are_mutually_exclusive_and_esc_closes_them_first() {
+        let mut app = App::new(Config::default());
+
+        assert!(app.dispatch_key(key(KeyCode::Char('?'))));
+        assert!(app.help_open);
+
+        let ctrl_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert!(app.dispatch_key(ctrl_p));
+        assert!(app.palette_open);
+        assert!(
+            !app.help_open,
+            "opening the palette closes the help overlay"
+        );
+
+        // Esc closes the overlay only; the stack and status line stay put.
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
+        assert!(!app.help_open);
+        assert!(!app.palette_open);
+        assert_eq!(app.view, View::Dashboard);
+        assert!(app.status.is_none());
+
+        // `?` toggles the help overlay back off.
+        assert!(app.dispatch_key(key(KeyCode::Char('?'))));
+        assert!(app.help_open);
+        assert!(app.dispatch_key(key(KeyCode::Char('?'))));
+        assert!(!app.help_open);
+
+        // With no overlay open, Esc at the root still toasts 「已在顶层」.
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
+        assert_eq!(app.status.as_ref().unwrap().message, "已在顶层");
+    }
+
+    /// §6.11 `q` inside the help overlay closes it instead of quitting the
+    /// application (the bug this wave fixes; `q` still quits from a plain view).
+    #[test]
+    fn q_closes_help_overlay_instead_of_quitting() {
+        let mut app = App::new(Config::default());
+        app.toggle_help_overlay();
+        assert!(app.help_open);
+
+        // The `q` inside help is a close verb, not the app-exit verb.
+        assert!(app.dispatch_key(key(KeyCode::Char('q'))), "must not quit");
+        assert!(!app.help_open, "help must close");
+        assert!(!app.palette_open, "palette must stay closed");
+        assert_eq!(app.view, View::Dashboard);
+    }
+
+    /// §6.11 `q` inside the command palette closes it instead of quitting.
+    #[test]
+    fn q_closes_command_palette_instead_of_quitting() {
+        let mut app = App::new(Config::default());
+        app.toggle_palette_overlay();
+        assert!(app.palette_open);
+
+        assert!(app.dispatch_key(key(KeyCode::Char('q'))), "must not quit");
+        assert!(!app.palette_open, "palette must close");
+        assert!(!app.help_open);
+    }
+
+    /// §6.11 command palette: `j`/`k` move the cursor (clamped) and `Enter`
+    /// resets the view stack onto the highlighted screen, then dismisses.
+    #[test]
+    fn palette_j_k_moves_and_enter_jumps_to_screen() {
+        let mut app = App::new(Config::default());
+        app.toggle_palette_overlay();
+
+        // `k` clamps at the top; `j`/`Down` advance to the next target.
+        app.dispatch_key(key(KeyCode::Char('k')));
+        assert_eq!(app.palette_state.selected(), Some(0));
+        app.dispatch_key(key(KeyCode::Char('j')));
+        assert_eq!(app.palette_state.selected(), Some(1));
+
+        // Jumping to the Dashboard target resets the stack to the dashboard and
+        // dismisses the palette — not a quit.
+        app.palette_state.select(Some(0));
+        assert!(app.dispatch_key(key(KeyCode::Enter)), "jump must not quit");
+        assert!(!app.palette_open, "palette must dismiss on Enter");
+        assert_eq!(app.view, View::Dashboard);
+    }
+
+    /// §0 辅动词: `g`/`Home` jump to the first row, `G`/`End` to the last of
+    /// the focused list — never into the stack.
+    #[test]
+    fn g_and_g_jump_the_focused_list() {
+        let mut app = app_with_repos(3);
+        app.dashboard_state.select(Some(1));
+
+        assert!(app.dispatch_key(key(KeyCode::Char('G'))));
+        assert_eq!(app.dashboard_state.selected(), Some(2));
+        assert!(app.dispatch_key(key(KeyCode::Char('g'))));
+        assert_eq!(app.dashboard_state.selected(), Some(0));
+        assert!(app.dispatch_key(key(KeyCode::End)));
+        assert_eq!(app.dashboard_state.selected(), Some(2));
+        assert!(app.dispatch_key(key(KeyCode::Home)));
+        assert_eq!(app.dashboard_state.selected(), Some(0));
+        assert_eq!(app.view, View::Dashboard, "a jump never enters the stack");
+    }
+
+    /// Transitional exception to §2.1: the repo view keeps `g` as the receipts
+    /// hub entry (`g 进入` hint) until the 远端 context tab replaces it, while
+    /// `G` already behaves as the "jump to the last row" verb on that screen.
+    #[test]
+    fn repo_g_still_enters_the_receipts_hub_and_g_jumps_the_file_list() {
+        let dir = temp_dir("dispatch-repo-g");
+        init_repo_with_commit(&dir);
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+
+        assert!(app.dispatch_key(key(KeyCode::Char('G'))));
+        assert_eq!(
+            app.view,
+            View::Repo,
+            "G jumps the file list, no stack entry"
+        );
+
+        assert!(app.dispatch_key(key(KeyCode::Char('g'))));
+        assert_eq!(app.view, View::Pulls, "g is still the receipts entry key");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §1.1: panel focus (`Tab`/`BackTab`), context tags (`<`/`>`) and search
+    /// (`/`) are reserved for the upcoming subtasks and act as no-ops today.
+    #[test]
+    fn tab_context_and_search_keys_are_reserved_no_ops() {
+        let dir = temp_dir("dispatch-reserved");
+        init_repo_with_commit(&dir);
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+
+        for code in [
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Char('<'),
+            KeyCode::Char('>'),
+            KeyCode::Char('/'),
+        ] {
+            assert!(app.dispatch_key(key(code)));
+            assert_eq!(app.view, View::Repo, "{code:?} must be a reserved no-op");
+            assert!(app.status.is_none());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §0/§1.3: `r` reloads the open view wherever the dispatch lands it —
+    /// local git views and the GitHub hub share one rule.
+    #[test]
+    fn global_r_refreshes_the_open_view() {
+        let dir = temp_dir("dispatch-refresh");
+        init_repo_with_commit(&dir);
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert!(app.dispatch_key(key(KeyCode::Char('r'))));
+        assert_eq!(app.view, View::Repo);
+
+        enter_history(&mut app);
+        assert!(app.dispatch_key(key(KeyCode::Char('r'))));
+        assert_eq!(app.view, View::History);
+        assert!(!app.history.commits.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §0: `Enter` = 打开 — in the repo view it opens the highlighted file's
+    /// diff sub-screen (the `d` alias stays until task 7 remaps it).
+    #[test]
+    fn enter_opens_the_selected_file_diff() {
+        let dir = temp_dir("dispatch-enter-diff");
+        init_repo_with_commit(&dir);
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert_eq!(app.file_entries.len(), 1);
+
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
+        assert_eq!(app.view, View::Diff);
+        assert!(!app.diff_content.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §1.1 stack discipline: one Esc per level, and the root screen toasts
+    /// 「已在顶层」 instead of exiting (quitting is `q`'s job, §1.2).
+    #[test]
+    fn esc_pops_one_level_per_press_and_toasts_at_the_root() {
+        let dir = temp_dir("dispatch-esc-stack");
+        init_repo_with_commit(&dir);
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
+        assert_eq!(app.view, View::Repo);
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
+        assert_eq!(app.view, View::Diff);
+
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Repo);
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Dashboard);
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Dashboard);
+        assert_eq!(app.status.as_ref().unwrap().message, "已在顶层");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn dashboard_r_refreshes_and_clears_error() {
         let mut app = app_with_repos(1);
         app.set_error("boom".to_string());
-        assert!(app.handle_key(key(KeyCode::Char('r'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('r'))));
         assert_eq!(app.status, None);
         // Default config has empty scan_dirs, so a refresh yields no repos.
         assert!(app.repos.is_empty());
@@ -3082,28 +3786,33 @@ mod tests {
     #[test]
     fn dashboard_keys_with_empty_repo_list_do_not_panic() {
         let mut app = App::new(Config::default());
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.dashboard_state.selected(), None);
-        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('k'))));
         assert_eq!(app.dashboard_state.selected(), None);
-        assert!(app.handle_key(key(KeyCode::Down)));
-        assert!(app.handle_key(key(KeyCode::Up)));
+        assert!(app.dispatch_key(key(KeyCode::Down)));
+        assert!(app.dispatch_key(key(KeyCode::Up)));
         assert_eq!(app.dashboard_state.selected(), None);
 
         // Enter and b are no-ops without a selection.
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         assert_eq!(app.view, View::Dashboard);
-        assert!(app.handle_key(key(KeyCode::Char('b'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('b'))));
         assert_eq!(app.view, View::Dashboard);
 
         // l with no repos reports info and never starts a batch.
-        assert!(app.handle_key(key(KeyCode::Char('l'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('l'))));
         let st = app.status.as_ref().unwrap();
         assert!(!st.is_error);
         assert!(st.message.contains("没有仓库"), "{}", st.message);
         assert!(!app.batch_running());
 
-        assert!(!app.handle_key(key(KeyCode::Esc)));
+        // Esc at the root screen never quits: it toasts 「已在顶层」 (§1.2).
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Dashboard);
+        let st = app.status.as_ref().unwrap();
+        assert!(!st.is_error);
+        assert_eq!(st.message, "已在顶层");
     }
 
     #[test]
@@ -3116,47 +3825,47 @@ mod tests {
         assert_eq!(app.view, View::Repo);
 
         // c opens the commit input; Esc cancels back to the repo view.
-        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('c'))));
         assert_eq!(app.view, View::Commit);
         app.commit_message = "draft".to_string();
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert_eq!(app.view, View::Repo);
         assert!(app.commit_message.is_empty());
 
         // x opens the discard dialog, n cancels it.
-        assert!(app.handle_key(key(KeyCode::Char('x'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('x'))));
         assert!(app.show_discard_confirm);
-        assert!(app.handle_key(key(KeyCode::Char('n'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('n'))));
         assert!(!app.show_discard_confirm);
 
         // File-list keys on an empty list are safe no-ops.
         assert!(app.file_entries.is_empty());
         let sel = app.file_state.selected();
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.file_state.selected(), sel);
-        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('k'))));
         assert_eq!(app.file_state.selected(), sel);
 
         // b opens the branch panel with the repo view as origin; Esc returns.
-        assert!(app.handle_key(key(KeyCode::Char('b'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('b'))));
         assert_eq!(app.view, View::Branches);
         assert!(!app.branches.is_empty());
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert_eq!(app.view, View::Repo);
 
         // p / l are no-ops without a current repo (nothing is spawned).
         app.current_repo = None;
-        assert!(app.handle_key(key(KeyCode::Char('p'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('p'))));
         assert!(app.remote_rx.is_none());
-        assert!(app.handle_key(key(KeyCode::Char('l'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('l'))));
         assert!(app.remote_rx.is_none());
         app.current_repo = Some(0);
 
         // Esc steps back to the dashboard; q exits from the repo view.
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert_eq!(app.view, View::Dashboard);
         app.view = View::Repo;
-        assert!(!app.handle_key(key(KeyCode::Char('q'))));
+        assert!(!app.dispatch_key(key(KeyCode::Char('q'))));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3172,24 +3881,24 @@ mod tests {
         app.enter_repo();
 
         // d opens the diff of the modified tracked file.
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
         assert_eq!(app.view, View::Diff);
         assert!(!app.diff_content.is_empty());
         assert_eq!(app.diff_scroll, 0);
 
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.diff_scroll, 1);
-        assert!(app.handle_key(key(KeyCode::Down)));
+        assert!(app.dispatch_key(key(KeyCode::Down)));
         assert_eq!(app.diff_scroll, 2);
-        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('k'))));
         assert_eq!(app.diff_scroll, 1);
-        assert!(app.handle_key(key(KeyCode::Up)));
+        assert!(app.dispatch_key(key(KeyCode::Up)));
         assert_eq!(app.diff_scroll, 0);
-        assert!(app.handle_key(key(KeyCode::Char('k')))); // saturates at 0
+        assert!(app.dispatch_key(key(KeyCode::Char('k')))); // saturates at 0
         assert_eq!(app.diff_scroll, 0);
 
-        assert!(!app.handle_key(key(KeyCode::Char('q'))));
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(!app.dispatch_key(key(KeyCode::Char('q'))));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert_eq!(app.view, View::Repo);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -3207,7 +3916,7 @@ mod tests {
         assert_eq!(app.file_entries.len(), 1);
 
         // Untracked files produce no HEAD→workdir diff: error, stay in Repo.
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
         assert_eq!(app.view, View::Repo);
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
@@ -3221,27 +3930,27 @@ mod tests {
         let mut app = App::new(Config::default());
         app.view = View::Commit;
 
-        assert!(app.handle_key(key(KeyCode::Char('h'))));
-        assert!(app.handle_key(key(KeyCode::Char('i'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('h'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('i'))));
         assert_eq!(app.commit_message, "hi");
 
         // Ctrl+char does not type into the input.
         let ctrl = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
-        assert!(app.handle_key(ctrl));
+        assert!(app.dispatch_key(ctrl));
         assert_eq!(app.commit_message, "hi");
 
-        assert!(app.handle_key(key(KeyCode::Backspace)));
+        assert!(app.dispatch_key(key(KeyCode::Backspace)));
         assert_eq!(app.commit_message, "h");
 
         // Esc cancels: back to the repo view with a cleared input.
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert_eq!(app.view, View::Repo);
         assert!(app.commit_message.is_empty());
 
         // Enter submits (no repo here → error, returns to the repo view).
         app.view = View::Commit;
         app.commit_message = "msg".to_string();
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         assert_eq!(app.view, View::Repo);
         assert!(app.status.as_ref().unwrap().is_error);
     }
@@ -3258,11 +3967,11 @@ mod tests {
         assert_eq!(app.file_entries.len(), 1);
         assert!(!index_has_staged(&dir, "a.txt"));
 
-        assert!(app.handle_key(key(KeyCode::Char('s'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('s'))));
         assert!(index_has_staged(&dir, "a.txt"));
         assert!(app.status.is_none());
 
-        assert!(app.handle_key(key(KeyCode::Char('u'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('u'))));
         assert!(!index_has_staged(&dir, "a.txt"));
         assert!(app.status.is_none());
 
@@ -3328,11 +4037,11 @@ mod tests {
     }
 
     #[test]
-    fn handle_key_ignores_release_events() {
+    fn dispatch_key_ignores_release_events() {
         let mut app = app_with_repos(2);
         let mut k = key(KeyCode::Char('j'));
         k.kind = KeyEventKind::Release;
-        assert!(app.handle_key(k));
+        assert!(app.dispatch_key(k));
         assert_eq!(app.dashboard_state.selected(), None);
     }
 
@@ -3343,11 +4052,11 @@ mod tests {
         let mut app = App::new(Config::default());
         app.set_error("stale".to_string());
 
-        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('c'))));
         assert_eq!(app.view, View::Config);
         assert!(app.status.is_none()); // entering clears the stale status
 
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert_eq!(app.view, View::Dashboard);
     }
 
@@ -3361,19 +4070,19 @@ mod tests {
         app.enter_config();
         assert_eq!(app.config_state.selected(), Some(0));
 
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.config_state.selected(), Some(1));
-        assert!(app.handle_key(key(KeyCode::Char('j')))); // clamps at the end
+        assert!(app.dispatch_key(key(KeyCode::Char('j')))); // clamps at the end
         assert_eq!(app.config_state.selected(), Some(1));
-        assert!(app.handle_key(key(KeyCode::Down)));
+        assert!(app.dispatch_key(key(KeyCode::Down)));
         assert_eq!(app.config_state.selected(), Some(1));
-        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('k'))));
         assert_eq!(app.config_state.selected(), Some(0));
-        assert!(app.handle_key(key(KeyCode::Char('k')))); // clamps at the start
+        assert!(app.dispatch_key(key(KeyCode::Char('k')))); // clamps at the start
         assert_eq!(app.config_state.selected(), Some(0));
 
         // q exits the program from the config panel.
-        assert!(!app.handle_key(key(KeyCode::Char('q'))));
+        assert!(!app.dispatch_key(key(KeyCode::Char('q'))));
     }
 
     #[test]
@@ -3384,7 +4093,7 @@ mod tests {
         app.enter_config();
         assert_eq!(app.view, View::Config);
         assert_eq!(app.config_state.selected(), None);
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.config_state.selected(), None);
         app.leave_config();
         assert_eq!(app.view, View::Dashboard);
@@ -3409,22 +4118,22 @@ mod tests {
 
         // a opens a clean picker; i switches to the manual input, where
         // keys type and edit the path.
-        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('a'))));
         assert!(app.show_config_picker);
         assert!(!app.show_config_input);
-        assert!(app.handle_key(key(KeyCode::Char('i'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('i'))));
         assert!(!app.show_config_picker);
         assert!(app.show_config_input);
         assert!(app.config_input.is_empty());
         for c in "ab".chars() {
-            assert!(app.handle_key(key(KeyCode::Char(c))));
+            assert!(app.dispatch_key(key(KeyCode::Char(c))));
         }
         assert_eq!(app.config_input, "ab");
-        assert!(app.handle_key(key(KeyCode::Backspace)));
+        assert!(app.dispatch_key(key(KeyCode::Backspace)));
         assert_eq!(app.config_input, "a");
         // Ctrl+char does not type into the input.
         let ctrl = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
-        assert!(app.handle_key(ctrl));
+        assert!(app.dispatch_key(ctrl));
         assert_eq!(app.config_input, "a");
 
         // Empty path: error, input stays open.
@@ -3469,7 +4178,7 @@ mod tests {
         assert_eq!(app.config.scan_dirs, vec![dup.clone()]);
 
         // Esc cancels the input but stays in the config panel.
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert!(!app.show_config_input);
         assert!(app.config_input.is_empty());
         assert_eq!(app.view, View::Config);
@@ -3488,12 +4197,12 @@ mod tests {
 
         let mut app = App::new(Config::default());
         app.enter_config();
-        app.handle_key(key(KeyCode::Char('a')));
-        app.handle_key(key(KeyCode::Char('i')));
+        app.dispatch_key(key(KeyCode::Char('a')));
+        app.dispatch_key(key(KeyCode::Char('i')));
         for c in dir.display().to_string().chars() {
-            app.handle_key(key(KeyCode::Char(c)));
+            app.dispatch_key(key(KeyCode::Char(c)));
         }
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
 
         // Input closed and cleared, list updated, new entry selected.
         assert!(!app.show_config_input);
@@ -3650,7 +4359,7 @@ mod tests {
 
         // a opens the picker (not the manual input) at the parent of the
         // first scan dir, listing its subdirectories.
-        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('a'))));
         assert!(app.show_config_picker);
         assert!(!app.show_config_input);
         assert_eq!(app.picker_dir, base);
@@ -3662,33 +4371,33 @@ mod tests {
 
         // j/k/方向键 move across the virtual row + entries, clamping at
         // both ends.
-        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('k'))));
         assert_eq!(app.picker_state.selected(), Some(0));
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.picker_state.selected(), Some(1));
-        assert!(app.handle_key(key(KeyCode::Down)));
+        assert!(app.dispatch_key(key(KeyCode::Down)));
         assert_eq!(app.picker_state.selected(), Some(2));
-        assert!(app.handle_key(key(KeyCode::Down)));
+        assert!(app.dispatch_key(key(KeyCode::Down)));
         assert_eq!(app.picker_state.selected(), Some(2));
-        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('k'))));
         assert_eq!(app.picker_state.selected(), Some(1));
 
         // l descends into the highlighted subdirectory; selection resets
         // to the virtual row of the new listing.
-        assert!(app.handle_key(key(KeyCode::Char('l'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('l'))));
         assert_eq!(app.picker_dir, scan);
         assert!(app.picker_entries.is_empty());
         assert_eq!(app.picker_state.selected(), Some(0));
 
         // h / 方向左 return to the parent directory.
-        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('h'))));
         assert_eq!(app.picker_dir, base);
-        assert!(app.handle_key(key(KeyCode::Backspace)));
+        assert!(app.dispatch_key(key(KeyCode::Backspace)));
         assert_eq!(app.picker_dir, std::env::temp_dir());
         // (Up-at-root is covered by config_picker_at_root_reports_no_parent.)
 
         // Esc cancels: overlay closed, browse state cleared, still in panel.
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert!(!app.show_config_picker);
         assert!(app.picker_entries.is_empty());
         assert!(app.config_input.is_empty());
@@ -3703,7 +4412,7 @@ mod tests {
 
         let mut app = App::new(Config::default());
         app.enter_config();
-        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('a'))));
         let home = crate::config::home_dir();
         let expected = if std::fs::read_dir(&home).is_ok() {
             home
@@ -3725,7 +4434,7 @@ mod tests {
 
         // Up keys at the root stay put and report why (info, not error).
         for code in [KeyCode::Char('h'), KeyCode::Left, KeyCode::Backspace] {
-            assert!(app.handle_key(key(code)));
+            assert!(app.dispatch_key(key(code)));
             assert_eq!(app.picker_dir, std::path::PathBuf::from("/"));
             let st = app.status.as_ref().unwrap();
             assert!(!st.is_error, "{code:?}: {}", st.message);
@@ -3748,7 +4457,7 @@ mod tests {
         // The child disappears between listing and descend: read fails.
         std::fs::remove_dir_all(&child).unwrap();
 
-        assert!(app.handle_key(key(KeyCode::Char('l'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('l'))));
         assert_eq!(
             app.picker_dir, base,
             "failed descend must keep the previous listing"
@@ -3770,14 +4479,14 @@ mod tests {
         let mut app = App::new(Config::default());
         app.config.scan_dirs = vec![taken.clone()];
         app.enter_config();
-        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('a'))));
         assert_eq!(app.picker_dir, base);
 
         // Highlight `alpha` (row 1) and submit: duplicate is rejected by
         // the existing validation, without writing to the list.
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.picker_state.selected(), Some(1));
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
         assert_eq!(st.message, "目录已在列表中");
@@ -3785,7 +4494,7 @@ mod tests {
         assert_eq!(app.config.scan_dirs, vec![taken]);
 
         // Esc cancels the picker and clears any residual typed path.
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert!(!app.show_config_picker);
         assert!(app.config_input.is_empty());
         assert_eq!(app.view, View::Config);
@@ -3808,7 +4517,7 @@ mod tests {
 
         // Enter on a subdirectory row adds that directory through the
         // shared submit path (save + rescan + success message).
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         assert!(!app.show_config_picker, "success closes the picker");
         assert!(app.config_input.is_empty());
         assert_eq!(app.config.scan_dirs, vec![canon(&base.join("beta"))]);
@@ -3827,7 +4536,7 @@ mod tests {
         app.picker_dir = base.clone();
         app.picker_entries.clear();
         app.picker_state.select(Some(0));
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         assert!(!app.show_config_picker);
         assert_eq!(
             app.config.scan_dirs,
@@ -3872,7 +4581,7 @@ mod tests {
 
         // A mangled spelling can never equal the real path: hitting the
         // duplicate branch proves the PathBuf arrived intact.
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         let st = app.status.as_ref().unwrap();
         assert_eq!(st.message, "目录已在列表中");
         assert!(
@@ -3903,19 +4612,19 @@ mod tests {
         app.enter_config();
 
         // From the list, i opens the manual input directly.
-        assert!(app.handle_key(key(KeyCode::Char('i'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('i'))));
         assert!(app.show_config_input);
         assert!(!app.show_config_picker);
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert!(!app.show_config_input);
 
         // From the picker, i switches over to manual entry.
-        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('a'))));
         assert!(app.show_config_picker);
-        assert!(app.handle_key(key(KeyCode::Char('i'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('i'))));
         assert!(!app.show_config_picker);
         assert!(app.show_config_input);
-        assert!(app.handle_key(key(KeyCode::Char('/'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('/'))));
         assert_eq!(app.config_input, "/");
 
         let _ = std::fs::remove_dir_all(&base);
@@ -4031,7 +4740,7 @@ mod tests {
 
         let mut app = app_with_repo_at(&dir);
         app.dashboard_state.select(Some(0));
-        assert!(app.handle_key(key(KeyCode::Char('b'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('b'))));
         assert_eq!(app.view, View::Branches);
         assert_eq!(app.branches.len(), 2);
         let sel = app.branch_state.selected().unwrap();
@@ -4039,7 +4748,7 @@ mod tests {
         assert_eq!(app.branch_repo, Some(0));
         assert_eq!(app.branches_from, View::Dashboard);
 
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert_eq!(app.view, View::Dashboard);
         assert!(app.status.is_none());
 
@@ -4086,21 +4795,21 @@ mod tests {
         assert!(app.branches[head_idx].is_head);
 
         // j / k move within the list.
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.branch_state.selected(), Some(head_idx + 1));
-        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('k'))));
         assert_eq!(app.branch_state.selected(), Some(head_idx));
 
         // n opens the create input; Esc closes it but stays in the panel.
-        assert!(app.handle_key(key(KeyCode::Char('n'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('n'))));
         assert!(app.show_branch_input);
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert!(!app.show_branch_input);
         assert_eq!(app.view, View::Branches);
 
         // q exits from the list; Esc leaves the panel back to the dashboard.
-        assert!(!app.handle_key(key(KeyCode::Char('q'))));
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(!app.dispatch_key(key(KeyCode::Char('q'))));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert_eq!(app.view, View::Dashboard);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -4167,15 +4876,15 @@ mod tests {
         assert!(app.branch_input.is_empty());
 
         // Create via keys: n, type, backspace, Enter.
-        assert!(app.handle_key(key(KeyCode::Char('n'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('n'))));
         for c in "feature".chars() {
-            assert!(app.handle_key(key(KeyCode::Char(c))));
+            assert!(app.dispatch_key(key(KeyCode::Char(c))));
         }
         assert_eq!(app.branch_input, "feature");
-        assert!(app.handle_key(key(KeyCode::Backspace)));
+        assert!(app.dispatch_key(key(KeyCode::Backspace)));
         assert_eq!(app.branch_input, "featur");
-        assert!(app.handle_key(key(KeyCode::Char('e'))));
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Char('e'))));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
 
         assert!(!app.show_branch_input);
         assert_eq!(app.branches.len(), initial + 1);
@@ -4217,20 +4926,20 @@ mod tests {
         // Head branch: d opens, Esc cancels...
         let head_idx = app.branches.iter().position(|b| b.is_head).unwrap();
         app.branch_state.select(Some(head_idx));
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
         assert!(app.show_branch_delete_confirm);
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert!(!app.show_branch_delete_confirm);
         assert_eq!(app.view, View::Branches);
 
         // ...d + n cancels as well...
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
-        assert!(app.handle_key(key(KeyCode::Char('n'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('n'))));
         assert!(!app.show_branch_delete_confirm);
 
         // ...and d + Y on the head branch is refused: branch kept, error shown.
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
-        assert!(app.handle_key(key(KeyCode::Char('Y'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('Y'))));
         assert!(!app.show_branch_delete_confirm);
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
@@ -4597,26 +5306,26 @@ mod tests {
         app.config_state.select(Some(1));
 
         // d opens the confirmation on the selected entry.
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
         assert!(app.show_config_delete_confirm);
         assert!(!app.show_config_input);
         assert_eq!(app.config_state.selected(), Some(1));
 
         // Other keys are swallowed while the dialog is open.
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert!(app.show_config_delete_confirm);
         assert_eq!(app.config_state.selected(), Some(1));
 
         // Esc (before y) cancels: nothing removed, still in the panel.
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert!(!app.show_config_delete_confirm);
         assert_eq!(app.config.scan_dirs.len(), 2);
         assert_eq!(app.view, View::Config);
 
         // n also cancels.
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
         assert!(app.show_config_delete_confirm);
-        assert!(app.handle_key(key(KeyCode::Char('n'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('n'))));
         assert!(!app.show_config_delete_confirm);
         assert_eq!(app.config.scan_dirs.len(), 2);
     }
@@ -4626,7 +5335,7 @@ mod tests {
         let mut app = App::new(Config::default());
         app.enter_config();
 
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
         assert!(!app.show_config_delete_confirm);
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
@@ -4648,8 +5357,8 @@ mod tests {
         app.config_state.select(Some(1));
 
         // y removes the selected dir, persists, and rescans.
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
-        assert!(app.handle_key(key(KeyCode::Char('y'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('y'))));
         assert!(!app.show_config_delete_confirm);
         assert_eq!(app.config.scan_dirs, vec![keep.clone()]);
         // Selection clamps to the surviving entry.
@@ -4731,7 +5440,7 @@ mod tests {
     fn enter_history(app: &mut App) {
         app.dashboard_state.select(Some(0));
         app.enter_repo();
-        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('h'))));
     }
 
     #[test]
@@ -4756,7 +5465,7 @@ mod tests {
         // h without an open repository never leaves the repo view.
         app.current_repo = None;
         app.view = View::Repo;
-        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('h'))));
         assert_eq!(app.view, View::Repo);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -4775,20 +5484,20 @@ mod tests {
         assert_eq!(app.history.detail.as_ref().unwrap().message, newest);
 
         // j / Down move one row and reload the detail for that row.
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.history.selected, 1);
         assert_eq!(app.history.list_state.selected(), Some(1));
         assert_eq!(app.history.detail.as_ref().unwrap().message, older);
-        assert!(app.handle_key(key(KeyCode::Down)));
+        assert!(app.dispatch_key(key(KeyCode::Down)));
         assert_eq!(app.history.selected, 1, "j stops at the last row");
         assert_eq!(app.history.detail.as_ref().unwrap().message, older);
 
         // k / Up move back and stop at the first row.
-        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('k'))));
         assert_eq!(app.history.selected, 0);
         assert_eq!(app.history.list_state.selected(), Some(0));
         assert_eq!(app.history.detail.as_ref().unwrap().message, newest);
-        assert!(app.handle_key(key(KeyCode::Up)));
+        assert!(app.dispatch_key(key(KeyCode::Up)));
         assert_eq!(app.history.selected, 0, "k stops at the first row");
         assert_eq!(app.history.detail.as_ref().unwrap().message, newest);
         assert!(app.status.is_none());
@@ -4807,12 +5516,12 @@ mod tests {
         assert_eq!(app.history.commits.len(), 2);
 
         // Move to the last row, then plant a stale error on the status line.
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.history.selected, 1);
         app.set_error("stale".to_string());
 
         // `j` clamps there: no reload runs, so the error survives.
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.history.selected, 1, "j stops at the last row");
         assert_eq!(
             app.status.as_ref().map(|s| s.message.as_str()),
@@ -4821,13 +5530,13 @@ mod tests {
         );
 
         // `k` really moves, so the reload runs and clears the status line.
-        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('k'))));
         assert_eq!(app.history.selected, 0);
         assert!(app.status.is_none());
 
         // Same at the top edge: `k` clamps and keeps the planted error.
         app.set_error("stale".to_string());
-        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('k'))));
         assert_eq!(app.history.selected, 0, "k stops at the first row");
         assert_eq!(
             app.status.as_ref().map(|s| s.message.as_str()),
@@ -4839,7 +5548,7 @@ mod tests {
     }
 
     #[test]
-    fn history_q_and_esc_return_to_repo_view() {
+    fn history_esc_returns_to_repo_and_q_exits_app() {
         let dir = temp_dir("history-exit");
         init_repo_with_commit(&dir);
 
@@ -4847,12 +5556,12 @@ mod tests {
         enter_history(&mut app);
         assert_eq!(app.view, View::History);
 
-        assert!(app.handle_key(key(KeyCode::Char('q'))));
-        assert_eq!(app.view, View::Repo);
+        // `q` is the app-wide exit key and never pops the view stack.
+        assert!(!app.dispatch_key(key(KeyCode::Char('q'))));
 
-        assert!(app.handle_key(key(KeyCode::Char('h'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('h'))));
         assert_eq!(app.view, View::History);
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert_eq!(app.view, View::Repo);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -4873,8 +5582,8 @@ mod tests {
         assert_eq!(app.history.list_state.selected(), None);
 
         // Navigation on an empty list is a no-op and never errors.
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
-        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('k'))));
         assert!(app.status.is_none());
 
         let text = render_text(&mut app);
@@ -4899,7 +5608,7 @@ mod tests {
         assert!(app.history.detail.is_some());
 
         std::fs::remove_dir_all(&dir).unwrap();
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.view, View::History);
         assert!(app.history.detail.is_none());
         let st = app.status.as_ref().unwrap();
@@ -4928,7 +5637,7 @@ mod tests {
     fn enter_tags(app: &mut App) {
         app.dashboard_state.select(Some(0));
         app.enter_repo();
-        assert!(app.handle_key(key(KeyCode::Char('t'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('t'))));
         assert_eq!(app.view, View::Tags);
     }
 
@@ -4942,7 +5651,7 @@ mod tests {
         // Stale push feedback from the repo view must not outrank the panel.
         app.remote_status = Some(RemoteStatus::Success);
 
-        assert!(app.handle_key(key(KeyCode::Char('t'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('t'))));
         assert_eq!(app.view, View::Tags);
         assert_eq!(app.tags_state.tags.len(), 1);
         assert_eq!(app.tags_state.tags[0].name, "v1.0");
@@ -4955,7 +5664,7 @@ mod tests {
         // t without an open repository never leaves the repo view.
         app.current_repo = None;
         app.view = View::Repo;
-        assert!(app.handle_key(key(KeyCode::Char('t'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('t'))));
         assert_eq!(app.view, View::Repo);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -4968,16 +5677,16 @@ mod tests {
         assert_eq!(app.tags_state.tags.len(), 2);
 
         // j / Down move one row and clamp at the last tag.
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.tags_state.selected, 1);
         assert_eq!(app.tags_state.list_state.selected(), Some(1));
-        assert!(app.handle_key(key(KeyCode::Down)));
+        assert!(app.dispatch_key(key(KeyCode::Down)));
         assert_eq!(app.tags_state.selected, 1, "j stops at the last tag");
 
         // k / Up move back and clamp at the first tag.
-        assert!(app.handle_key(key(KeyCode::Char('k'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('k'))));
         assert_eq!(app.tags_state.selected, 0);
-        assert!(app.handle_key(key(KeyCode::Up)));
+        assert!(app.dispatch_key(key(KeyCode::Up)));
         assert_eq!(app.tags_state.selected, 0, "k stops at the first tag");
         assert!(app.status.is_none());
 
@@ -4991,14 +5700,14 @@ mod tests {
         assert!(app.tags_state.tags.is_empty());
 
         // c opens a clean input overlay.
-        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('c'))));
         assert!(
             matches!(app.tags_state.modal, Some(TagsModal::Input { .. })),
             "create input must open"
         );
 
         // Empty name: red status, overlay kept open (convention 9).
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
         assert!(st.message.contains("标签名不能为空"), "{}", st.message);
@@ -5007,9 +5716,9 @@ mod tests {
         // Type the name and submit: list refreshed, overlay closed, the new
         // tag selected, success on the status line.
         for c in "v1.0".chars() {
-            assert!(app.handle_key(key(KeyCode::Char(c))));
+            assert!(app.dispatch_key(key(KeyCode::Char(c))));
         }
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         assert!(app.tags_state.modal.is_none());
         assert!(app.tags_state.tags.iter().any(|t| t.name == "v1.0"));
         let sel = app.tags_state.selected;
@@ -5020,11 +5729,11 @@ mod tests {
 
         // Duplicate name: red status with the git-side reason, the overlay
         // stays open carrying the typed text for a correction.
-        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('c'))));
         for c in "v1.0".chars() {
-            assert!(app.handle_key(key(KeyCode::Char(c))));
+            assert!(app.dispatch_key(key(KeyCode::Char(c))));
         }
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
         assert!(st.message.contains("创建标签失败"), "{}", st.message);
@@ -5036,16 +5745,16 @@ mod tests {
         assert_eq!(app.tags_state.tags.len(), 1, "no tag was created twice");
 
         // Esc closes the stale overlay, a fresh `c` opens a clean one.
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert!(app.tags_state.modal.is_none());
 
         // Invalid name: the status line carries the full git error chain,
         // including the underlying `invalid reference name` (H2).
-        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('c'))));
         for c in "v1.0 beta".chars() {
-            assert!(app.handle_key(key(KeyCode::Char(c))));
+            assert!(app.dispatch_key(key(KeyCode::Char(c))));
         }
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
         assert!(st.message.contains("创建标签失败"), "{}", st.message);
@@ -5059,7 +5768,7 @@ mod tests {
         assert_eq!(app.tags_state.tags.len(), 1, "no tag was created");
 
         // Esc cancels the overlay but stays in the panel.
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert!(app.tags_state.modal.is_none());
         assert_eq!(app.view, View::Tags);
 
@@ -5076,26 +5785,26 @@ mod tests {
         assert_eq!(app.tags_state.selected_tag().unwrap().name, "drop");
 
         // d opens the confirmation naming the tag; n cancels it.
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
         assert_eq!(
             app.tags_state.modal,
             Some(TagsModal::Confirm {
                 tag_to_delete: "drop".to_string()
             })
         );
-        assert!(app.handle_key(key(KeyCode::Char('n'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('n'))));
         assert!(app.tags_state.modal.is_none());
         assert_eq!(app.tags_state.tags.len(), 2, "n must not delete");
 
         // d + Esc cancels the same way.
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert!(app.tags_state.modal.is_none());
         assert_eq!(app.tags_state.tags.len(), 2);
 
         // d + y deletes and refreshes the list, reporting success.
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
-        assert!(app.handle_key(key(KeyCode::Char('y'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('y'))));
         assert!(app.tags_state.modal.is_none());
         assert_eq!(app.tags_state.tags.len(), 1);
         assert_eq!(app.tags_state.tags[0].name, "keep");
@@ -5105,11 +5814,11 @@ mod tests {
         assert!(st.message.contains("已删除标签 drop"), "{}", st.message);
 
         // Deleting the last tag empties the panel; `d` then reports why.
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
-        assert!(app.handle_key(key(KeyCode::Char('y'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('y'))));
         assert!(app.tags_state.tags.is_empty());
         assert_eq!(app.tags_state.list_state.selected(), None);
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
         assert!(app.tags_state.modal.is_none());
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
@@ -5159,7 +5868,7 @@ mod tests {
 
         // d refuses before the confirmation: explicit error, no overlay,
         // and nothing deleted.
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
         assert!(app.tags_state.modal.is_none(), "confirmation must not open");
         assert_eq!(app.tags_state.tags.len(), 2, "no tag was deleted");
         let st = app.status.as_ref().unwrap();
@@ -5172,7 +5881,7 @@ mod tests {
 
         // p refuses the same way and never spawns a push task (a
         // `tokio::spawn` outside a runtime would panic).
-        assert!(app.handle_key(key(KeyCode::Char('p'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('p'))));
         assert!(app.remote_rx.is_none());
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
@@ -5183,9 +5892,9 @@ mod tests {
         );
 
         // The UTF-8 tag beside it still opens the confirmation normally.
-        assert!(app.handle_key(key(KeyCode::Char('j'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.tags_state.selected_tag().unwrap().name, "utf8-tag");
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
         assert_eq!(
             app.tags_state.modal,
             Some(TagsModal::Confirm {
@@ -5197,38 +5906,39 @@ mod tests {
     }
 
     #[test]
-    fn tags_q_and_esc_close_overlay_first_then_return_to_repo() {
+    fn tags_esc_closes_overlay_first_then_returns_to_repo_while_q_exits() {
         let (dir, mut app) = app_with_tagged_repo("tags-exit", &["v1"]);
         enter_tags(&mut app);
 
-        // The create input swallows Esc (cancel) and types `q` as text:
-        // neither leaves the panel from under the overlay.
-        assert!(app.handle_key(key(KeyCode::Char('c'))));
-        assert!(app.handle_key(key(KeyCode::Char('q'))));
+        // The create input is a focus trap: `q` is typed as text and Esc
+        // cancels; neither leaves the panel from under the overlay.
+        assert!(app.dispatch_key(key(KeyCode::Char('c'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('q'))));
         assert!(app.tags_state.modal.is_some(), "q must not leave the panel");
         assert_eq!(app.view, View::Tags);
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert!(app.tags_state.modal.is_none());
         assert_eq!(app.view, View::Tags);
 
-        // The delete confirmation is dismissed by `q` as well as by Esc.
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        // The delete confirmation swallows `q` (focus trap: only Enter/Esc/
+        // Tab act), so Esc is the key that dismisses it.
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
         assert!(app.tags_state.modal.is_some());
-        assert!(app.handle_key(key(KeyCode::Char('q'))));
-        assert!(app.tags_state.modal.is_none());
+        assert!(app.dispatch_key(key(KeyCode::Char('q'))));
+        assert!(
+            app.tags_state.modal.is_some(),
+            "q is literal/no-op inside a modal, it must not dismiss it"
+        );
         assert_eq!(app.view, View::Tags);
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert!(app.tags_state.modal.is_none());
         assert_eq!(app.view, View::Tags);
         assert_eq!(app.tags_state.tags.len(), 1, "no tag was deleted");
 
-        // Without an overlay, both keys return to the repo view.
-        assert!(app.handle_key(key(KeyCode::Char('q'))));
-        assert_eq!(app.view, View::Repo);
-        assert!(app.handle_key(key(KeyCode::Char('t'))));
+        // Without an overlay, `q` exits the app and Esc pops one level.
+        assert!(!app.dispatch_key(key(KeyCode::Char('q'))));
         assert_eq!(app.view, View::Tags);
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
         assert_eq!(app.view, View::Repo);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -5253,14 +5963,14 @@ mod tests {
             KeyCode::Down,
             KeyCode::Up,
         ] {
-            assert!(app.handle_key(key(code)));
+            assert!(app.dispatch_key(key(code)));
         }
         assert_eq!(app.tags_state.list_state.selected(), None);
         assert!(app.status.is_none());
 
         // p reports why there is nothing to push and never spawns a task
         // (a `tokio::spawn` outside a runtime would panic).
-        assert!(app.handle_key(key(KeyCode::Char('p'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('p'))));
         assert!(app.remote_rx.is_none());
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
@@ -5268,7 +5978,7 @@ mod tests {
 
         // a (push all) is guarded the same way: no tag list means no task
         // and no fake success report.
-        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('a'))));
         assert!(app.remote_rx.is_none());
         let st = app.status.as_ref().unwrap();
         assert!(st.is_error);
@@ -5308,17 +6018,17 @@ mod tests {
         assert!(text.contains("a全部推送"), "missing push-all hint: {text}");
 
         // Create input overlay: title plus the typed name after the prompt.
-        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('c'))));
         for c in "v3".chars() {
-            assert!(app.handle_key(key(KeyCode::Char(c))));
+            assert!(app.dispatch_key(key(KeyCode::Char(c))));
         }
         let text = render_text(&mut app);
         assert!(text.contains("新建标签"), "missing input title: {text}");
         assert!(text.contains(">v3"), "missing typed name: {text}");
-        assert!(app.handle_key(key(KeyCode::Esc)));
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
 
         // Delete confirmation copy.
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
         let text = render_text(&mut app);
         assert!(
             text.contains("确认删除标签"),
@@ -5348,7 +6058,7 @@ mod tests {
         enter_tags(&mut app);
 
         // p arms the task with an initial running status line…
-        assert!(app.handle_key(key(KeyCode::Char('p'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('p'))));
         assert!(app.remote_rx.is_some());
         assert!(matches!(app.remote_status, Some(RemoteStatus::Running(_))));
 
@@ -5363,7 +6073,7 @@ mod tests {
         assert!(app.remote_rx.is_none());
 
         // a (push all) takes the same path with the same reason.
-        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('a'))));
         settle_remote(&mut app).await;
         assert!(matches!(app.remote_status, Some(RemoteStatus::Error(_))));
 
@@ -5390,7 +6100,7 @@ mod tests {
         assert_eq!(app.tags_state.tags.len(), 1);
 
         // p pushes the selected tag and reports success.
-        assert!(app.handle_key(key(KeyCode::Char('p'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('p'))));
         settle_remote(&mut app).await;
         assert_eq!(app.remote_status, Some(RemoteStatus::Success));
         let origin = git2::Repository::open(&origin_path).unwrap();
@@ -5400,14 +6110,14 @@ mod tests {
         );
 
         // Create a second tag through the panel, then a pushes them all.
-        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('c'))));
         for c in "v2.0".chars() {
-            assert!(app.handle_key(key(KeyCode::Char(c))));
+            assert!(app.dispatch_key(key(KeyCode::Char(c))));
         }
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         assert_eq!(app.tags_state.tags.len(), 2);
 
-        assert!(app.handle_key(key(KeyCode::Char('a'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('a'))));
         settle_remote(&mut app).await;
         assert_eq!(app.remote_status, Some(RemoteStatus::Success));
         let origin = git2::Repository::open(&origin_path).unwrap();
@@ -5436,7 +6146,7 @@ mod tests {
         app.remote_op = "push";
         app.remote_status = Some(RemoteStatus::Running("正在 push 标签 v1.0…".to_string()));
 
-        assert!(app.handle_key(key(KeyCode::Char('p'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('p'))));
         // The running operation is untouched: no second task, same status.
         assert!(app.remote_rx.is_some());
         assert!(matches!(app.remote_status, Some(RemoteStatus::Running(_))));
@@ -5484,7 +6194,7 @@ mod tests {
         let _tx = arm_remote_running(&mut app);
         let running = app.remote_status.clone();
 
-        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('c'))));
         assert!(
             matches!(app.tags_state.modal, Some(TagsModal::Input { .. })),
             "the input overlay must still open"
@@ -5510,259 +6220,38 @@ mod tests {
         let _tx = arm_remote_running(&mut app);
         let running = app.remote_status.clone();
 
-        assert!(app.handle_key(key(KeyCode::Char('c'))));
+        assert!(app.dispatch_key(key(KeyCode::Char('c'))));
         for c in "v2.0".chars() {
-            assert!(app.handle_key(key(KeyCode::Char(c))));
+            assert!(app.dispatch_key(key(KeyCode::Char(c))));
         }
-        assert!(app.handle_key(key(KeyCode::Enter)));
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
+
+        // Submit still creates the tag — the running overlay closes and the
+        // new tag lands on the list, selected.
+        assert!(
+            app.tags_state.modal.is_none(),
+            "submit must close the input overlay"
+        );
         assert!(
             app.tags_state.tags.iter().any(|t| t.name == "v2.0"),
-            "the create itself must still run"
+            "the tag must still be created while a push is running"
+        );
+        assert_eq!(app.tags_state.tags[app.tags_state.selected].name, "v2.0");
+        let st = app.status.as_ref().expect("success status expected");
+        assert!(!st.is_error, "{}", st.message);
+        assert!(st.message.contains("已创建标签 v2.0"), "{}", st.message);
+
+        // ...but the live running text survives the create entry point (R6):
+        // a finished-pending wipe never clears a still-running operation.
+        assert_eq!(
+            app.remote_status, running,
+            "live running text must survive the tag create submit"
         );
         assert!(
             app.remote_rx.is_some(),
             "the running push keeps its receiver"
         );
-        assert_eq!(
-            app.remote_status, running,
-            "live running status must not be cleared by `submit_tag_create`"
-        );
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// R6: opening the delete confirmation while a push is running must not
-    /// wipe its live running text either.
-    #[test]
-    fn tags_delete_start_keeps_live_progress_while_remote_running() {
-        let (dir, mut app) = app_with_tagged_repo("tags-busy-delete", &["v1.0"]);
-        enter_tags(&mut app);
-        let _tx = arm_remote_running(&mut app);
-        let running = app.remote_status.clone();
-
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
-        assert_eq!(
-            app.tags_state.modal,
-            Some(TagsModal::Confirm {
-                tag_to_delete: "v1.0".to_string()
-            }),
-            "the confirmation must still open"
-        );
-        assert!(
-            app.remote_rx.is_some(),
-            "the running push keeps its receiver"
-        );
-        assert_eq!(
-            app.remote_status, running,
-            "live running status must not be cleared by `start_tag_delete`"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// R6: confirming the tag deletion while a push is running still deletes
-    /// the tag, but the running text survives the entry point.
-    #[test]
-    fn tags_delete_confirm_keeps_live_progress_while_remote_running() {
-        let (dir, mut app) = app_with_tagged_repo("tags-busy-delete-confirm", &["drop", "keep"]);
-        enter_tags(&mut app);
-        let _tx = arm_remote_running(&mut app);
-        let running = app.remote_status.clone();
-
-        assert!(app.handle_key(key(KeyCode::Char('d'))));
-        assert!(app.handle_key(key(KeyCode::Char('y'))));
-        assert_eq!(app.tags_state.tags.len(), 1, "the delete itself must run");
-        assert_eq!(app.tags_state.tags[0].name, "keep");
-        assert!(
-            app.remote_rx.is_some(),
-            "the running push keeps its receiver"
-        );
-        assert_eq!(
-            app.remote_status, running,
-            "live running status must not be cleared by `confirm_tag_delete`"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Pure state-machine tests for the GitHub receipts spine: no network, no
-    /// client (the readiness gate stays `None`), so no `tokio::spawn` runs and
-    /// these assert only `view` / `tab` / `selected` transitions.
-    mod github_receipt_tests {
-        use super::*;
-
-        fn github_app() -> App {
-            let mut app = App::new(Config::default());
-            app.github_state.owner = "owner".to_string();
-            app.github_state.repo = "repo".to_string();
-            // No client: every refresh/entry fetch path stays a no-op here.
-            app.github_state.client = None;
-            app
-        }
-
-        fn sample_pulls(n: usize) -> Vec<crate::github::PrSummary> {
-            (0..n)
-                .map(|i| crate::github::PrSummary {
-                    number: i as u64,
-                    title: format!("pr-{i}"),
-                    state: "open".to_string(),
-                    draft: false,
-                    author: "alice".to_string(),
-                    head_ref: "feature".to_string(),
-                    base_ref: "main".to_string(),
-                    updated_at: String::new(),
-                })
-                .collect()
-        }
-
-        #[test]
-        fn tab_switch_keys_change_view_and_tab() {
-            let mut app = github_app();
-            app.view = View::Pulls;
-
-            assert!(app.handle_key(key(KeyCode::Char('p'))));
-            assert_eq!(app.view, View::Pulls);
-            assert_eq!(app.github_state.tab, GithubTab::Pulls);
-
-            assert!(app.handle_key(key(KeyCode::Char('c'))));
-            assert_eq!(app.view, View::Checks);
-            assert_eq!(app.github_state.tab, GithubTab::Checks);
-
-            assert!(app.handle_key(key(KeyCode::Char('i'))));
-            assert_eq!(app.view, View::Issues);
-            assert_eq!(app.github_state.tab, GithubTab::Issues);
-
-            assert!(app.handle_key(key(KeyCode::Char('n'))));
-            assert_eq!(app.view, View::Notifications);
-            assert_eq!(app.github_state.tab, GithubTab::Notifications);
-        }
-
-        #[test]
-        fn tab_switch_from_checks_to_pulls() {
-            let mut app = github_app();
-            app.view = View::Checks;
-            app.github_state.tab = GithubTab::Checks;
-            assert!(app.handle_key(key(KeyCode::Char('p'))));
-            assert_eq!(app.view, View::Pulls);
-            assert_eq!(app.github_state.tab, GithubTab::Pulls);
-        }
-
-        #[test]
-        fn enter_on_pulls_opens_detail() {
-            let mut app = github_app();
-            app.view = View::Pulls;
-            app.github_state.tab = GithubTab::Pulls;
-            app.github_state.pulls = sample_pulls(1);
-            app.github_state.selected = 0;
-            // client is `None`: sets the view without spawning a fetch task.
-            assert!(app.handle_key(key(KeyCode::Enter)));
-            assert_eq!(app.view, View::PullDetail);
-        }
-
-        #[test]
-        fn detail_esc_pops_back_to_pulls() {
-            let mut app = github_app();
-            app.view = View::PullDetail;
-            assert!(app.handle_key(key(KeyCode::Esc)));
-            assert_eq!(app.view, View::Pulls);
-        }
-
-        #[test]
-        fn detail_q_returns_to_repo() {
-            let mut app = github_app();
-            app.view = View::PullDetail;
-            assert!(app.handle_key(key(KeyCode::Char('q'))));
-            assert_eq!(app.view, View::Repo);
-        }
-
-        #[test]
-        fn pulls_esc_returns_to_repo() {
-            let mut app = github_app();
-            app.view = View::Pulls;
-            assert!(app.handle_key(key(KeyCode::Esc)));
-            assert_eq!(app.view, View::Repo);
-        }
-
-        #[test]
-        fn issues_esc_returns_to_repo() {
-            let mut app = github_app();
-            app.view = View::Issues;
-            assert!(app.handle_key(key(KeyCode::Esc)));
-            assert_eq!(app.view, View::Repo);
-        }
-
-        #[test]
-        fn q_in_pulls_returns_to_repo_not_exit() {
-            let mut app = github_app();
-            app.view = View::Pulls;
-            assert!(app.handle_key(key(KeyCode::Char('q'))));
-            assert_eq!(app.view, View::Repo);
-        }
-
-        #[test]
-        fn refresh_without_client_is_a_no_op() {
-            let mut app = github_app();
-            app.view = View::Pulls;
-            app.github_state.client = None;
-            // No client: refresh never spawns and never panics.
-            assert!(app.handle_key(key(KeyCode::Char('r'))));
-            assert_eq!(app.view, View::Pulls);
-            assert!(app.github_rx.is_none());
-        }
-
-        #[test]
-        fn jk_moves_selection_within_bounds() {
-            let mut app = github_app();
-            app.view = View::Pulls;
-            app.github_state.tab = GithubTab::Pulls;
-            app.github_state.pulls = sample_pulls(5);
-            app.github_state.selected = 0;
-
-            assert!(app.handle_key(key(KeyCode::Char('j'))));
-            assert_eq!(app.github_state.selected, 1);
-            assert!(app.handle_key(key(KeyCode::Char('j'))));
-            assert_eq!(app.github_state.selected, 2);
-            assert!(app.handle_key(key(KeyCode::Char('k'))));
-            assert_eq!(app.github_state.selected, 1);
-
-            // Clamp at the top.
-            app.github_state.selected = 0;
-            assert!(app.handle_key(key(KeyCode::Char('k'))));
-            assert_eq!(app.github_state.selected, 0);
-
-            // Clamp at the bottom.
-            app.github_state.selected = 4;
-            assert!(app.handle_key(key(KeyCode::Char('j'))));
-            assert_eq!(app.github_state.selected, 4);
-        }
-
-        #[test]
-        fn enter_on_issues_opens_issue_detail() {
-            let mut app = github_app();
-            app.view = View::Issues;
-            app.github_state.tab = GithubTab::Issues;
-            app.github_state.issues = vec![crate::github::IssueSummary {
-                number: 7,
-                title: "login".to_string(),
-                state: "open".to_string(),
-                author: "bob".to_string(),
-                assignee: None,
-                updated_at: String::new(),
-                labels: Vec::new(),
-            }];
-            app.github_state.selected = 0;
-            // client is `None`: sets the view without spawning a fetch task.
-            assert!(app.handle_key(key(KeyCode::Enter)));
-            assert_eq!(app.view, View::IssueDetail);
-        }
-
-        #[test]
-        fn issue_detail_esc_pops_back_to_issues() {
-            let mut app = github_app();
-            app.view = View::IssueDetail;
-            app.github_state.tab = GithubTab::Issues;
-            assert!(app.handle_key(key(KeyCode::Esc)));
-            assert_eq!(app.view, View::Issues);
-        }
     }
 }

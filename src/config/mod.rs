@@ -540,7 +540,7 @@ mod tests {
         assert!(!stale_two.exists(), "stale temp must go");
         assert!(path.exists(), "the config itself must stay");
         assert!(unrelated.exists(), "only this config's temps are swept");
-        fs::remove_dir_all(&dir.path().to_path_buf()).expect("cleanup");
+        fs::remove_dir_all(dir.path()).expect("cleanup");
     }
 
     /// A temp path pre-planted as a symlink must never be written through:
@@ -572,6 +572,6 @@ mod tests {
             "the symlink target must stay untouched"
         );
         fs::remove_file(&temp).expect("remove temp");
-        fs::remove_dir_all(&dir.path().to_path_buf()).expect("cleanup");
+        fs::remove_dir_all(dir.path()).expect("cleanup");
     }
 }

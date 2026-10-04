@@ -99,9 +99,7 @@ mod tests {
             .unwrap()
             .to_path_buf();
         let repos = discover_repos(&[scan_dir]).unwrap();
-        assert!(repos
-            .iter()
-            .any(|r| r.path == PathBuf::from(env!("CARGO_MANIFEST_DIR"))));
+        assert!(repos.iter().any(|r| r.path == *env!("CARGO_MANIFEST_DIR")));
     }
 
     #[test]

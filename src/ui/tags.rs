@@ -10,6 +10,7 @@ use ratatui::{
 
 use crate::app::TagsModal;
 use crate::git::TagInfo;
+use crate::ui::components::footer::HintRow;
 use crate::ui::status::{RemoteStatus, StatusLine};
 
 use super::{hint, pulls};
@@ -49,8 +50,8 @@ pub struct TagsRender<'a> {
 /// recorded while that operation runs — `已有远端操作进行中` on a rejected
 /// second push — is not dropped: it shares the row on the feedback's right,
 /// see [`super::remote::render_remote_status`].
-pub fn render_tags(f: &mut Frame, mut state: TagsRender<'_>) {
-    let area = f.area();
+pub fn render_tags(f: &mut Frame, content: Rect, mut state: TagsRender<'_>) {
+    let area = content;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -112,6 +113,13 @@ fn key_hints(modal: Option<&TagsModal>) -> Line<'static> {
         .flatten()
         .collect(),
     }
+}
+
+/// Footer hint row for the tag panel (§2.3): re-uses the same [`key_hints`]
+/// the panel draws inline, so the picker/input/confirm wording never drifts
+/// between the two rows.
+pub(crate) fn tags_hints(modal: Option<&crate::app::TagsModal>) -> HintRow {
+    HintRow::new(key_hints(modal))
 }
 
 /// Tag list, or the empty-state copy for a repository without tags.
@@ -191,7 +199,7 @@ mod tests {
     fn render_to_text(state: TagsRender<'_>) -> String {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_tags(f, state)).unwrap();
+        terminal.draw(|f| render_tags(f, f.area(), state)).unwrap();
         let raw: String = terminal
             .backend()
             .buffer()

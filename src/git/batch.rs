@@ -179,8 +179,10 @@ mod tests {
         })
         .await;
         assert!(results[0].1.is_ok(), "{:?}", results[0].1);
-        let messages = pull_messages.lock().unwrap();
-        assert_eq!(messages.as_slice(), ["进行中", "成功"], "{messages:?}");
+        {
+            let messages = pull_messages.lock().unwrap();
+            assert_eq!(messages.as_slice(), ["进行中", "成功"], "{messages:?}");
+        }
 
         let fetch_messages: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = fetch_messages.clone();

@@ -8,6 +8,7 @@ use ratatui::{
 
 use super::{hint, pulls, render_confirm_overlay};
 use crate::git::FileEntry;
+use crate::ui::components::footer::HintRow;
 use crate::ui::status::{RemoteStatus, StatusLine};
 
 /// State for rendering the single-repo view.
@@ -27,8 +28,8 @@ pub struct RepoState<'a> {
 }
 
 /// Render the single-repo file status list with a bottom status line and key hints.
-pub fn render_repo(f: &mut Frame, mut state: RepoState<'_>) {
-    let area = f.area();
+pub fn render_repo(f: &mut Frame, content: Rect, mut state: RepoState<'_>) {
+    let area = content;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -104,6 +105,14 @@ fn key_hints(discard_confirm_open: bool, commit_input_open: bool) -> Line<'stati
     }
 }
 
+/// Footer hint row for the single-repo view (§2.3): the list actions, or the
+/// y/n/Esc / Enter submit row while a modal owns focus — re-using the same
+/// [`key_hints`] the panel draws inline so the two never drift.
+pub(crate) fn repo_hints(show_discard_confirm: bool, show_commit_input: bool) -> HintRow {
+    HintRow::new(key_hints(show_discard_confirm, show_commit_input))
+}
+
+/// Render file list
 fn render_file_list(f: &mut Frame, area: Rect, state: &mut RepoState<'_>) {
     let width = pulls::row_width(area);
     let items: Vec<ListItem> = state
@@ -199,7 +208,7 @@ mod tests {
     fn render_to_terminal(state: RepoState<'_>) -> Terminal<TestBackend> {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_repo(f, state)).unwrap();
+        terminal.draw(|f| render_repo(f, f.area(), state)).unwrap();
         terminal
     }
 

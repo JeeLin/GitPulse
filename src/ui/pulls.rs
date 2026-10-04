@@ -14,6 +14,7 @@ use ratatui::{
 use super::{hint, list_highlight, HIGHLIGHT_SYMBOL};
 use crate::app::App;
 use crate::github::{CheckSummary, PrDetail, PrSummary};
+use crate::ui::components::footer::HintRow;
 
 /// Empty-state copy of the pull list: zero open pulls is a valid state, not
 /// a failure — the status row below covers failed loads.
@@ -196,7 +197,7 @@ fn column(value: &str) -> String {
 /// `Enter 详情` is only useful on the Pulls and Issues *lists* (where it opens
 /// the selected item's detail); pass `show_enter = true` there and `false` for
 /// the Checks / Notifications / detail views, where Enter is a no-op.
-pub(crate) fn receipt_hints(show_enter: bool) -> Line<'static> {
+pub(crate) fn receipt_hints(show_enter: bool) -> HintRow {
     let mut hints: Vec<Line<'static>> = vec![
         hint("g", "进入"),
         hint("p", "PR"),
@@ -209,7 +210,19 @@ pub(crate) fn receipt_hints(show_enter: bool) -> Line<'static> {
     if show_enter {
         hints.push(hint("Enter", "详情"));
     }
-    hints.into_iter().flatten().collect()
+    HintRow::new(hints.into_iter().flatten().collect())
+}
+
+/// Footer hint row for the pull-detail panel (§2.3): the receipt hub keys
+/// minus `Enter 详情`, which is a no-op once a detail is open.
+pub(crate) fn pull_detail_hints() -> HintRow {
+    receipt_hints(false)
+}
+
+/// Footer hint row for the issue-detail panel (§2.3): the same keys as the
+/// pull detail — the hub keys without the `Enter` no-op.
+pub(crate) fn issue_detail_hints() -> HintRow {
+    receipt_hints(false)
 }
 
 /// Readiness-gate client for the panel tests.
@@ -265,7 +278,7 @@ pub(crate) fn render_footer(
             app.status.as_ref(),
         );
     }
-    f.render_widget(Paragraph::new(receipt_hints(show_enter)), hints_area);
+    f.render_widget(Paragraph::new(receipt_hints(show_enter).view), hints_area);
 }
 
 /// Panel body shown while the GitHub client is not ready: the status or
@@ -305,9 +318,8 @@ pub(crate) fn render_disconnected(f: &mut Frame, area: Rect, label: &str, app: &
 }
 
 /// Render the open-pull list (the receipts hub entry point).
-pub fn render_pulls(f: &mut Frame, app: &App) {
-    let area = f.area();
-    let chunks = panel_chunks(area);
+pub fn render_pulls(f: &mut Frame, content: Rect, app: &App) {
+    let chunks = panel_chunks(content);
     if app.github_state.client.is_none() {
         render_disconnected(f, chunks[0], "PR 列表", app);
         render_footer(f, chunks[1], chunks[2], app, true);
@@ -377,9 +389,8 @@ fn pull_item(pr: &PrSummary, width: usize) -> ListItem<'static> {
 
 /// Render the detail of the highlighted pull request: the bordered shell,
 /// the placeholder while its payload has not arrived, and the three panes.
-pub fn render_pull_detail(f: &mut Frame, app: &App) {
-    let area = f.area();
-    let chunks = panel_chunks(area);
+pub fn render_pull_detail(f: &mut Frame, content: Rect, app: &App) {
+    let chunks = panel_chunks(content);
     if app.github_state.client.is_none() {
         render_disconnected(f, chunks[0], "PR 详情", app);
         render_footer(f, chunks[1], chunks[2], app, false);
@@ -552,10 +563,10 @@ mod tests {
     }
 
     /// Whitespace-stripped frame text (wide CJK glyphs leave padding cells).
-    fn render_text(app: &App, draw: fn(&mut Frame, &App)) -> String {
+    fn render_text(app: &App, draw: fn(&mut Frame, Rect, &App)) -> String {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| draw(f, app)).unwrap();
+        terminal.draw(|f| draw(f, f.area(), app)).unwrap();
         let raw: String = terminal
             .backend()
             .buffer()

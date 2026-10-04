@@ -3,9 +3,11 @@
 pub mod branches;
 pub mod checks;
 pub mod commit;
+pub mod components;
 pub mod config;
 pub mod dashboard;
 pub mod diff;
+pub mod help;
 pub mod history;
 pub mod issues;
 pub mod notifications;
@@ -25,8 +27,14 @@ use ratatui::{
 
 use crate::app::{App, View};
 use crate::git::{FileState, RepoInfo};
+use crate::ui::components::footer::hints as join_hints;
+use crate::ui::components::footer::{self, HintRow, StatusRow};
 use crate::ui::dashboard::DashboardState;
 use crate::ui::status::{RemoteStatus, StatusLine};
+
+/// Key/desc fragment of every hint row, re-exported from the footer so the
+/// views keep building their segments through `super::hint`.
+pub(crate) use crate::ui::components::footer::hint;
 
 /// Shared selection style for every list: dark background + bold keeps the
 /// cursor row readable on any block style.
@@ -39,33 +47,18 @@ pub(crate) fn list_highlight() -> Style {
 /// Marker rendered before the selected list row.
 pub(crate) const HIGHLIGHT_SYMBOL: &str = "► ";
 
-/// Key-hint fragment shared by every bottom hint row: the `k` key in cyan,
-/// then `desc` in the default color, then the single-space separator, so a
-/// full row composes from `[hint(..), hint(..), ..]` without hand-written
-/// [`Span::raw(" ")`] separators between pairs.
-pub(crate) fn hint(k: &str, desc: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(k.to_string(), Style::default().fg(Color::Cyan)),
-        Span::raw(" "),
-        Span::raw(desc.to_string()),
-        Span::raw(" "),
-    ])
-}
-
 /// Bottom hint row of every y/n confirmation overlay (convention 8): the
 /// `y` / `n` wording of the overlay itself plus the dismiss key. Every panel
 /// — repo discard, branch delete, tag delete, config remove — advertises the
 /// exact same three keys while the dialog swallows every other press, so the
-/// row lives here instead of being re-typed per panel (G5).
+/// row lives here instead of being re-typed per panel (G5). It feeds the
+/// footer's view segment while the dialog is open, see [`footer::HintRow`].
 pub(crate) fn confirm_hints() -> Line<'static> {
-    [
+    join_hints([
         hint("y", "确认"),
         hint("n", "取消"),
         hint("Esc", "取消对话框"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
+    ])
 }
 
 /// Bottom hint row of the single-line input overlays (convention 9): `Enter`
@@ -74,15 +67,15 @@ pub(crate) fn confirm_hints() -> Line<'static> {
 /// for create/branch/tag inputs, `提交` for the commit message, `确认` for
 /// the manual config input), while the row shape is shared (G5).
 pub(crate) fn submit_hints(submit: &str) -> Line<'static> {
-    [hint("Enter", submit), hint("Esc", "取消")]
-        .into_iter()
-        .flatten()
-        .collect()
+    join_hints([hint("Enter", submit), hint("Esc", "取消")])
 }
 
-/// Draw the bottom status line shared by every view (convention 3): errors
-/// render red and persist until the next operation, anything else keeps the
-/// default style. `None` leaves the row blank.
+/// Draw the status row of the footer (§4.2): errors render red and persist
+/// until the next operation, anything else keeps the default style. `None`
+/// leaves the row blank.
+///
+/// Called through [`footer::render_footer`] — views never draw the row
+/// themselves.
 pub fn render_status_line(f: &mut Frame, area: Rect, status: Option<&StatusLine>) {
     if let Some(status) = status {
         let style = if status.is_error {
@@ -255,25 +248,111 @@ fn tail_scroll(line: &Line, inner_width: usize) -> u16 {
 
 /// Dispatch rendering to the active view.
 ///
-/// The current [`App`] fields are borrowed directly into the view state
-/// (checkpoint 2: no separate mock data source). Every arm is a thin
-/// `render_*_view` wrapper so this function only dispatches (G12).
+/// The frame is split once here into the content area and the two-line footer
+/// (§4.1): every view paints the content, then the single canonical footer —
+/// the status row plus the hint row — is drawn over the bottom two rows, so no
+/// view carries its own status/hint rows any more (des-9). The current [`App`]
+/// fields are borrowed directly into the view state (checkpoint 2: no separate
+/// mock data source). Every arm is a thin `render_*_view` wrapper so this
+/// function only dispatches (G12).
 pub fn render(f: &mut Frame, app: &mut App) {
+    let (content, footer_area) = footer::split_area(f.area());
+
     match app.view {
-        View::Dashboard => render_dashboard_view(f, app),
-        View::Repo => render_repo_view(f, app),
-        View::Diff => diff::render_diff(f, app),
-        View::Commit => render_commit_view(f, app),
-        View::Branches => render_branches_view(f, app),
-        View::Config => render_config_view(f, app),
-        View::History => render_history_view(f, app),
-        View::Tags => render_tags_view(f, app),
-        View::Pulls => pulls::render_pulls(f, app),
-        View::PullDetail => pulls::render_pull_detail(f, app),
-        View::Checks => checks::render_checks(f, app),
-        View::Issues => issues::render_issues(f, app),
-        View::IssueDetail => issues::render_issue_detail(f, app),
-        View::Notifications => notifications::render_notifications(f, app),
+        View::Dashboard => render_dashboard_view(f, content, app),
+        View::Repo => render_repo_view(f, content, app),
+        View::Diff => diff::render_diff(f, content, app),
+        View::Commit => render_commit_view(f, content, app),
+        View::Branches => render_branches_view(f, content, app),
+        View::Config => render_config_view(f, content, app),
+        View::History => render_history_view(f, content, app),
+        View::Tags => render_tags_view(f, content, app),
+        View::Pulls => pulls::render_pulls(f, content, app),
+        View::PullDetail => pulls::render_pull_detail(f, content, app),
+        View::Checks => checks::render_checks(f, content, app),
+        View::Issues => issues::render_issues(f, content, app),
+        View::IssueDetail => issues::render_issue_detail(f, content, app),
+        View::Notifications => notifications::render_notifications(f, content, app),
+    }
+
+    let status = view_status(app);
+    let hints = view_hints(app);
+    footer::render_footer(f, footer_area, status, &hints);
+
+    // Wave-2 float overlays (`?` help / Ctrl-P palette) draw last, on top of
+    // the footer (§6.11 / §127). The dispatch in `app.rs` owns their keys and
+    // only the open bool is read here — an overlay is never rendered over
+    // another (§2.4: 同时只允许一个模态).
+    if app.help_open {
+        help::render_help(f, app);
+    } else if app.palette_open {
+        help::render_palette(f, app);
+    }
+}
+
+/// Footer status row for the current view (§4.2).
+///
+/// Receipt views without a GitHub client omit the local status from the row
+/// because their body — [`pulls::render_disconnected`] — already promotes it
+/// into the content area; every other receipt paints the full status plus any
+/// in-flight remote feedback. `Repo` / `Tags` are local-git views that own
+/// remote feedback, so they always carry the remote triple. Everything else
+/// (dashboard / branches / history / config / diffs / commit) takes the plain
+/// status line.
+pub(crate) fn view_status(app: &App) -> StatusRow<'_> {
+    match app.view {
+        View::Pulls
+        | View::PullDetail
+        | View::Issues
+        | View::IssueDetail
+        | View::Checks
+        | View::Notifications => {
+            if app.github_state.client.is_some() {
+                StatusRow::new(
+                    app.status.as_ref(),
+                    app.remote_status.as_ref(),
+                    app.remote_op,
+                )
+            } else {
+                StatusRow::plain(None)
+            }
+        }
+        View::Repo | View::Tags | View::Commit => StatusRow::new(
+            app.status.as_ref(),
+            app.remote_status.as_ref(),
+            app.remote_op,
+        ),
+        _ => StatusRow::plain(app.status.as_ref()),
+    }
+}
+
+/// Footer hint row for the current view (§2.3).
+///
+/// Views build one through their exported `{view}_hints(..)` exporter via this
+/// helper; receipt views reuse the shared one from `pulls` (G3). The hint row
+/// itself is a `pub(crate)` helper so receipt-view tests can reuse it.
+pub(crate) fn view_hints(app: &App) -> HintRow {
+    match app.view {
+        View::Dashboard => dashboard::dashboard_hints(),
+        View::Repo => repo::repo_hints(app.show_discard_confirm, false),
+        View::Diff => diff::diff_hints(),
+        View::Commit => commit::commit_hints(),
+        View::Branches => {
+            branches::branches_hints(app.show_branch_input, app.show_branch_delete_confirm)
+        }
+        View::Config => config::config_hints(
+            app.show_config_picker,
+            app.show_config_input,
+            app.show_config_delete_confirm,
+        ),
+        View::History => history::history_hints(),
+        View::Tags => tags::tags_hints(app.tags_state.modal.as_ref()),
+        View::Pulls => pulls::receipt_hints(true),
+        View::PullDetail => pulls::pull_detail_hints(),
+        View::Checks => pulls::receipt_hints(false),
+        View::Issues => pulls::receipt_hints(true),
+        View::IssueDetail => pulls::issue_detail_hints(),
+        View::Notifications => pulls::receipt_hints(false),
     }
 }
 
@@ -292,7 +371,7 @@ fn repo_name_of(repos: &[RepoInfo], index: Option<usize>) -> &str {
 }
 
 /// Dashboard arm of [`render`].
-fn render_dashboard_view(f: &mut Frame, app: &mut App) {
+fn render_dashboard_view(f: &mut Frame, content: Rect, app: &mut App) {
     let batch_running = app.batch_running();
     let mut state = DashboardState {
         repos: &app.repos,
@@ -302,11 +381,11 @@ fn render_dashboard_view(f: &mut Frame, app: &mut App) {
         batch_op: app.batch_op,
         batch_running,
     };
-    dashboard::render_dashboard(f, &mut state);
+    dashboard::render_dashboard(f, content, &mut state);
 }
 
 /// Repo arm of [`render`]: the file list plus the discard confirmation.
-fn render_repo_view(f: &mut Frame, app: &mut App) {
+fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
     let sel = app.file_state.selected();
     let confirm_file = if app.show_discard_confirm {
         sel.and_then(|i| app.file_entries.get(i))
@@ -323,12 +402,12 @@ fn render_repo_view(f: &mut Frame, app: &mut App) {
         remote_op: app.remote_op,
         show_commit_input: false,
     };
-    repo::render_repo(f, state);
+    repo::render_repo(f, content, state);
 }
 
 /// Commit arm of [`render`]: repo view as background, commit input popup on
 /// top.
-fn render_commit_view(f: &mut Frame, app: &mut App) {
+fn render_commit_view(f: &mut Frame, content: Rect, app: &mut App) {
     let state = repo::RepoState {
         entries: &app.file_entries,
         status: app.status.as_ref(),
@@ -339,12 +418,12 @@ fn render_commit_view(f: &mut Frame, app: &mut App) {
         remote_op: app.remote_op,
         show_commit_input: true,
     };
-    repo::render_repo(f, state);
+    repo::render_repo(f, content, state);
     commit::render_commit_popup(f, &app.commit_message);
 }
 
 /// Branch panel arm of [`render`].
-fn render_branches_view(f: &mut Frame, app: &mut App) {
+fn render_branches_view(f: &mut Frame, content: Rect, app: &mut App) {
     let confirm = if app.show_branch_delete_confirm {
         app.branch_state
             .selected()
@@ -367,11 +446,11 @@ fn render_branches_view(f: &mut Frame, app: &mut App) {
         show_delete_confirm: app.show_branch_delete_confirm,
         confirm_branch: confirm,
     };
-    branches::render_branches(f, state);
+    branches::render_branches(f, content, state);
 }
 
 /// Config panel arm of [`render`].
-fn render_config_view(f: &mut Frame, app: &mut App) {
+fn render_config_view(f: &mut Frame, content: Rect, app: &mut App) {
     // Field-level borrow of `app.config` coexists with the
     // `&mut app.config_state` below (disjoint fields).
     let state = config::ConfigState {
@@ -386,14 +465,14 @@ fn render_config_view(f: &mut Frame, app: &mut App) {
         picker_entries: &app.picker_entries,
         picker_state: &mut app.picker_state,
     };
-    config::render_config(f, state);
+    config::render_config(f, content, state);
 }
 
 /// History arm of [`render`].
 ///
 /// Field-level borrows of `app.history` (data vs. cursor), `app.repos` (the
 /// title) and the status line coexist (disjoint fields of `App`).
-fn render_history_view(f: &mut Frame, app: &mut App) {
+fn render_history_view(f: &mut Frame, content: Rect, app: &mut App) {
     let repo_name = repo_name_of(&app.repos, app.current_repo);
     let state = history::HistoryRender {
         commits: &app.history.commits,
@@ -404,14 +483,14 @@ fn render_history_view(f: &mut Frame, app: &mut App) {
         repo_name,
         status: app.status.as_ref(),
     };
-    history::render_history(f, state);
+    history::render_history(f, content, state);
 }
 
 /// Tags arm of [`render`].
 ///
 /// Field-level borrows of `app.tags_state` (cursor vs. list), `app.repos`
 /// (the title) and the status fields coexist (disjoint fields of `App`).
-fn render_tags_view(f: &mut Frame, app: &mut App) {
+fn render_tags_view(f: &mut Frame, content: Rect, app: &mut App) {
     let repo_name = repo_name_of(&app.repos, app.current_repo);
     let state = tags::TagsRender {
         tags: &app.tags_state.tags,
@@ -422,7 +501,7 @@ fn render_tags_view(f: &mut Frame, app: &mut App) {
         remote_op: app.remote_op,
         repo_name,
     };
-    tags::render_tags(f, state);
+    tags::render_tags(f, content, state);
 }
 
 #[cfg(test)]
@@ -694,20 +773,31 @@ mod tests {
         assert!(text.contains("n取消"), "missing cancel key: {text}");
     }
 
+    /// §6.11 help overlay (Wave 2): renders the centered modal titled `帮助`
+    /// carrying the footer's global key hints plus the current view's segment.
     #[test]
-    fn config_view_picker_overlay_renders_via_dispatch() {
-        let mut app = base_app();
-        app.view = View::Config;
-        app.show_config_picker = true;
-        app.picker_dir = std::path::PathBuf::from("/home/user");
-        app.picker_entries = vec![std::path::PathBuf::from("/home/user/code")];
-        app.picker_state.select(Some(1));
+    fn help_overlay_renders_title_and_hints_via_dispatch() {
+        let mut app = base_app(); // Dashboard view
+        app.help_open = true;
         let text = render_compact(&mut app);
-        assert!(text.contains("选择扫描目录"), "missing title: {text}");
-        assert!(text.contains("↳选择当前目录"), "missing select row: {text}");
-        assert!(text.contains("code/"), "missing subdir row: {text}");
-        assert!(text.contains("/home/user"), "missing path line: {text}");
-        assert!(text.contains("Enter选择"), "missing select hint: {text}");
-        assert!(text.contains("Esc取消"), "missing cancel hint: {text}");
+        assert!(text.contains("帮助"), "missing help title: {text}");
+        assert!(
+            text.contains("q退出") || text.contains("Esc返回"),
+            "missing global key hint: {text}"
+        );
+        assert!(text.contains("Enter进入"), "missing view hint: {text}");
+    }
+
+    /// §6.11 command palette (Wave 2): renders the centered modal titled
+    /// `命令面板` with its jump-target list.
+    #[test]
+    fn palette_overlay_renders_jump_targets_via_dispatch() {
+        let mut app = base_app();
+        app.palette_open = true;
+        app.palette_state.select(Some(0));
+        let text = render_compact(&mut app);
+        assert!(text.contains("命令面板"), "missing palette title: {text}");
+        assert!(text.contains("仪表盘"), "missing dashboard target: {text}");
+        assert!(text.contains("分支"), "missing branch target: {text}");
     }
 }

@@ -21,8 +21,8 @@ use super::pulls::{
 const EMPTY_ISSUES: &str = "—（暂无 Issues）";
 
 /// Render the open-issues list (excluding pull requests).
-pub fn render_issues(f: &mut Frame, app: &App) {
-    let area = f.area();
+pub fn render_issues(f: &mut Frame, content: Rect, app: &App) {
+    let area = content;
     let chunks = panel_chunks(area);
     if app.github_state.client.is_none() {
         render_disconnected(f, chunks[0], "Issues", app);
@@ -75,8 +75,8 @@ const ISSUE_DETAIL_PLACEHOLDER: &str = "—（暂无 Issue 详情）";
 /// payload has not landed, then a bordered shell split into a summary head
 /// (identification + metadata) and a soft-wrapped body. Issues carry no
 /// check sub-list, so there is no third pane.
-pub fn render_issue_detail(f: &mut Frame, app: &App) {
-    let area = f.area();
+pub fn render_issue_detail(f: &mut Frame, content: Rect, app: &App) {
+    let area = content;
     let chunks = panel_chunks(area);
     if app.github_state.client.is_none() {
         render_disconnected(f, chunks[0], "Issue 详情", app);
@@ -272,7 +272,7 @@ mod tests {
     fn render_text(app: &App) -> String {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_issues(f, app)).unwrap();
+        terminal.draw(|f| render_issues(f, f.area(), app)).unwrap();
         let raw: String = terminal
             .backend()
             .buffer()
@@ -355,7 +355,9 @@ mod tests {
     fn render_detail_text(app: &App) -> String {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_issue_detail(f, app)).unwrap();
+        terminal
+            .draw(|f| render_issue_detail(f, f.area(), app))
+            .unwrap();
         let raw: String = terminal
             .backend()
             .buffer()

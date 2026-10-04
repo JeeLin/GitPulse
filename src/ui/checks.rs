@@ -1,6 +1,7 @@
 //! CI checks receipts panel: the head-commit check runs of the selected pull.
 
 use ratatui::{
+    layout::Rect,
     style::{Color, Style},
     text::Span,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
@@ -19,8 +20,8 @@ use super::pulls::{
 const EMPTY_CHECKS: &str = "—（暂无检查记录）";
 
 /// Render the head-commit check runs for the selected pull request.
-pub fn render_checks(f: &mut Frame, app: &App) {
-    let area = f.area();
+pub fn render_checks(f: &mut Frame, content: Rect, app: &App) {
+    let area = content;
     let chunks = panel_chunks(area);
     if app.github_state.client.is_none() {
         render_disconnected(f, chunks[0], "CI 检查", app);
@@ -94,7 +95,7 @@ mod tests {
     fn render_text(app: &App) -> String {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_checks(f, app)).unwrap();
+        terminal.draw(|f| render_checks(f, f.area(), app)).unwrap();
         let raw: String = terminal
             .backend()
             .buffer()
@@ -131,7 +132,7 @@ mod tests {
         app.github_state.checks = vec![check("unit", "completed", "failure")];
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_checks(f, &app)).unwrap();
+        terminal.draw(|f| render_checks(f, f.area(), &app)).unwrap();
         let buffer = terminal.backend().buffer();
         // Row 1 is the first item row (row 0 is the block's top border).
         let mut status_fg = None;

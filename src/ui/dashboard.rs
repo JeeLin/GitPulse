@@ -13,6 +13,7 @@ use crate::git::RepoInfo;
 use crate::ui::status::StatusLine;
 
 use super::{hint, pulls, render_status_line};
+use crate::ui::components::footer::HintRow;
 
 /// Borrowed render state for the dashboard, referencing `App.repos` directly
 /// so no mock data source exists (checkpoint 2).
@@ -43,7 +44,7 @@ fn dashboard_title(count: usize) -> String {
 /// An error status replaces the repository list so a failed load never
 /// masquerades as an empty list (checkpoint 2); any status also prints on
 /// the bottom status line (convention 3).
-pub fn render_dashboard(f: &mut Frame, state: &mut DashboardState<'_>) {
+pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState<'_>) {
     // Bottom scrolling batch log (convention 6) takes space only while it
     // has content; the list keeps every remaining row otherwise.
     let batch_rows = if state.batch_log.is_empty() {
@@ -60,7 +61,7 @@ pub fn render_dashboard(f: &mut Frame, state: &mut DashboardState<'_>) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
-        .split(f.area());
+        .split(content);
     let list_area = chunks[0];
     let last = chunks.len();
     let batch_area = (batch_rows > 0).then(|| chunks[1]);
@@ -232,6 +233,41 @@ fn render_key_hints(f: &mut Frame, area: Rect) {
     f.render_widget(Paragraph::new(hints), area);
 }
 
+/// Footer hint row for the dashboard (§2.3): the same eight verbs
+/// [`render_key_hints`] advertises, but with Cyan key caps and a default
+/// (unstyled) description — the dashboard's own accent/muted pair is reserved
+/// for its inline row; the footer keeps its distinct look (G4).
+pub(crate) fn dashboard_hints() -> HintRow {
+    HintRow::new(dashboard_hint_line())
+}
+
+/// Same set as [`render_key_hints`] but Cyan key caps + default descriptions.
+fn dashboard_hint_line() -> Line<'static> {
+    [
+        cyan_hint("j/k", "选择"),
+        cyan_hint("Enter", "进入"),
+        cyan_hint("r", "刷新"),
+        cyan_hint("l", "pull"),
+        cyan_hint("f", "fetch"),
+        cyan_hint("b", "分支"),
+        cyan_hint("c", "配置"),
+        cyan_hint("q", "退出"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Key cap in Cyan with a default (Reset) description — the footer dialect the
+/// dashboard advertises (G4), versus the accent/muted `super::hint`.
+fn cyan_hint(k: &str, desc: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(k.to_string(), Style::default().fg(Color::Cyan)),
+        Span::raw(" "),
+        Span::raw(desc.to_string()),
+    ])
+}
+
 /// Pad `text` to exactly `width` terminal cells by appending spaces, counting
 /// CJK glyphs as two cells (ratatui's display-width model) so the fixed columns
 /// of the dashboard row stay aligned when a repo/branch name mixes scripts —
@@ -296,7 +332,7 @@ mod tests {
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|f| render_dashboard(f, state))
+            .draw(|f| render_dashboard(f, f.area(), state))
             .expect("draw frame");
         terminal
             .backend()
