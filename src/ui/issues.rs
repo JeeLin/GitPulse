@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::github::{IssueDetail, IssueSummary};
+use crate::platform::{IssueDetail, IssueSummary};
 
 use super::pulls::{
     cells, ellipsize, list_cursor, meta_budget, panel_chunks, panel_title, render_disconnected,

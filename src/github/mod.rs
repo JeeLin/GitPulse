@@ -18,7 +18,9 @@ pub mod error;
 pub mod models;
 
 pub use client::GithubClient;
+#[allow(unused_imports)]
 pub use error::{render_error, GithubError};
+#[allow(unused_imports)]
 pub use models::{
     CheckSummary, IssueDetail, IssueSummary, NotificationSummary, PrDetail, PrSummary,
 };
@@ -28,6 +30,7 @@ pub use models::{
 /// Supports `https://`, `http://`, `ssh://`, `git://`, and the scp-like
 /// `git@github.com:owner/repo` forms. Non-github.com remotes (or malformed
 /// ones) return [`GithubError::NotGitHub`].
+#[allow(dead_code)]
 pub fn parse_remote_owner_repo(url: &str) -> Result<(String, String), GithubError> {
     let trimmed = url.trim().trim_end_matches(".git").trim();
     let path = if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
@@ -50,6 +53,7 @@ pub fn parse_remote_owner_repo(url: &str) -> Result<(String, String), GithubErro
 }
 
 /// Split `"owner/repo[/...extra...]"` → `("owner", "repo")`.
+#[allow(dead_code)]
 fn split_owner_repo(path: &str) -> Result<(String, String), GithubError> {
     let path = path.trim_start_matches('/');
     let mut parts = path.splitn(2, '/');

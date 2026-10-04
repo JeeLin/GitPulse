@@ -89,8 +89,8 @@ next 分支为孤儿分支重写，旧版 v0.1-v0.7 实现归档于 master，因
 - **核心**：把 v0.4.0 现有实现逐视图对齐规范：`Esc`=返回 / `q`=退出 / `Enter`=打开 / `<>`切上下文标签 / `Tab`切面板；五态（loading/empty/error/ready/success）强制于每一列表面板；页脚 2 行（状态行+提示行）；视觉 Token + CJK 2 格 + 省略号裁剪；覆盖 dashboard/repo/diff/history/branches/tags/config/Hub 及 PR/checks/issues/通知详情；吸收 des-10 暂持的 🔒 文案（g 提示 / 空态 / b/h/t 标签 / 详情占位 / diff 文件名）并更新对应测试。
 - **端到端验收**：任意视图间 Esc/q/Enter/<>/Tab 语义无歧义；空/加载/错误态一致；80 列下无 CJK 错位/截断；提示行统一含 `⏎ 打开  Esc 返回  q 退出  …  < > 切换  Tab 面板`。
 - **依赖**：M2（v0.4.0 现有实现为改造基线）、`docs/DESIGN.md`
-- **状态**：⬜ 未开始
-- **版本**：待定
+- **状态**：✅ 完成
+- **版本**：0.5.0
 
 ### M4 多平台与收尾
 

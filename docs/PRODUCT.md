@@ -54,7 +54,12 @@
 - 通知
 - 全部使用真实 API，禁止 mock（GitHub 先行）
 
-**M3 多平台与收尾**
+**M3 交互改版落地 (Adopt Interaction Design)**
+
+- 完成从头的交互设计规范 `docs/DESIGN.md`（统一 q/Esc/Enter 文法、五态面板、2 行页脚、视觉 Token、≤80 列 CJK 裁剪）
+- 把 v0.4.0 现有实现逐视图对齐规范；覆盖 dashboard/repo/diff/history/branches/tags/config/Hub 及 PR/checks/issues/通知详情
+
+**M4 多平台与收尾**
 
 - Gitea / GitLab 适配层
 - token 按 remote URL 自动匹配
@@ -78,4 +83,5 @@
 | M1.1 | 配置管理面板 | 0.2.0 | 程序内管理扫描目录，补齐首启动空态引导 |
 | M1.2 | 本地历史与标签 | 0.3.0 | 提交 DAG 历史视图与 tag 管理，补全本地仓库能力 |
 | M2 | 单平台远端回付 | 0.4.0 | 打通「远端回付层」，GitHub 先行 |
-| M3 | 多平台与收尾 | 待定 | 远端回执扩展至 Gitea / GitLab，并完成收尾项 |
+| M3 | 交互改版落地 | 0.5.0 | 统一交互文法（Esc=返回/q=退出/Enter=打开/<>/Tab）、五态面板、2 行页脚、视觉 Token + CJK 裁剪 |
+| M4 | 多平台与收尾 | 待定 | 远端回执扩展至 Gitea / GitLab，并完成收尾项 |

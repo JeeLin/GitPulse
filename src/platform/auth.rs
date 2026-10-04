@@ -119,7 +119,7 @@ fn env_families(kind: PlatformKind) -> &'static [&'static str] {
 
 /// `git.example.com` → `GIT_EXAMPLE_COM` (upper-snake, port-safe).
 fn host_env_var(host: &str) -> String {
-    host.to_uppercase().replace('.', "_").replace(':', "_")
+    host.to_uppercase().replace(['.', ':'], "_")
 }
 
 /// Run the platform CLI to fetch a token (`gh`/`glab` for SaaS only).

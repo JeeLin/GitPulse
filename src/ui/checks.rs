@@ -69,7 +69,7 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::config::Config;
-    use crate::github::CheckSummary;
+    use crate::platform::CheckSummary;
     use crate::ui::pulls::offline_client;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;

@@ -96,9 +96,9 @@ pub enum GithubTab {
 /// no separate mock data source).
 ///
 /// `client` is the readiness gate built once by [`App::enter_github`]; the
-/// per-fetch tasks reconstruct a client from `owner`/`repo` (the token is
+/// per-fetch tasks reconstruct a client from `remote` (the token is
 /// cached in `resolve_token`, so that is cheap), keeping the field as an
-/// `Option<crate::github::GithubClient>` per the Lane B contract.
+/// `Option<Box<dyn crate::platform::PlatformClient>>`.
 #[derive(Default)]
 pub struct GithubState {
     /// Active receipts tab.
@@ -107,23 +107,26 @@ pub struct GithubState {
     pub owner: String,
     /// Repository name parsed from the current repo's remote URL.
     pub repo: String,
+    /// Parsed remote URL (owner + repo + platform family), set alongside
+    /// `client` in [`App::enter_github`]; `None` until a remote is resolved.
+    pub remote: Option<crate::platform::PlatformRemote>,
     /// Cached client used as a credential-validity gate; `None` until
     /// `enter_github` succeeds in building one.
-    pub client: Option<crate::github::GithubClient>,
+    pub client: Option<Box<dyn crate::platform::PlatformClient>>,
     /// Index of the highlighted row in the active list.
     pub selected: usize,
     /// Latest open-PR list.
-    pub pulls: Vec<crate::github::PrSummary>,
+    pub pulls: Vec<crate::platform::PrSummary>,
     /// Detail payload of the highlighted pull request.
-    pub detail: Option<crate::github::PrDetail>,
+    pub detail: Option<crate::platform::PrDetail>,
     /// Latest check-run list for the selected pull's head commit.
-    pub checks: Vec<crate::github::CheckSummary>,
+    pub checks: Vec<crate::platform::CheckSummary>,
     /// Latest issue list.
-    pub issues: Vec<crate::github::IssueSummary>,
+    pub issues: Vec<crate::platform::IssueSummary>,
     /// Latest notification list.
-    pub notifications: Vec<crate::github::NotificationSummary>,
+    pub notifications: Vec<crate::platform::NotificationSummary>,
     /// Detail of the selected issue (opened from the Issues panel).
-    pub issue_detail: Option<crate::github::IssueDetail>,
+    pub issue_detail: Option<crate::platform::IssueDetail>,
 }
 
 /// Message sent from a background GitHub fetch task over its channel.
@@ -133,18 +136,18 @@ pub struct GithubState {
 #[derive(Debug)]
 enum GithubMsg {
     /// Open pull-request list result.
-    Pulls(Vec<crate::github::PrSummary>),
+    Pulls(Vec<crate::platform::PrSummary>),
     /// Selected pull-request detail result.
-    Detail(crate::github::PrDetail),
+    Detail(crate::platform::PrDetail),
     /// Head-commit check-run list result.
-    Checks(Vec<crate::github::CheckSummary>),
+    Checks(Vec<crate::platform::CheckSummary>),
     /// Open issue list result.
-    Issues(Vec<crate::github::IssueSummary>),
+    Issues(Vec<crate::platform::IssueSummary>),
     /// Selected issue detail result.
-    IssueDetail(crate::github::IssueDetail),
+    IssueDetail(crate::platform::IssueDetail),
     /// Repository notification list result.
-    Notifications(Vec<crate::github::NotificationSummary>),
-    /// User-facing failure rendered via `github::render_error`.
+    Notifications(Vec<crate::platform::NotificationSummary>),
+    /// User-facing failure rendered via `platform::render_platform_error`.
     Error(String),
 }
 
@@ -839,11 +842,11 @@ impl App {
         }
     }
 
-    /// Enter the GitHub receipts hub from the repo view (`g`).
+    /// Enter the receipts hub from the repo view (`g`).
     ///
-    /// Resolves the current repo's remote URL to `(owner, repo)`, builds a
-    /// `GithubClient` once (cached as a credential-validity gate) and lands on
-    /// the pulls list. On a missing/non-GitHub remote or a missing token the
+    /// Resolves the current repo's remote URL to a [`PlatformRemote`], builds a
+    /// platform client once (cached as a credential-validity gate) and lands on
+    /// the pulls list. On a missing remote or a missing token the
     /// view still becomes [`View::Pulls`] so the panel can surface the error
     /// and the user can retry with `r`.
     pub fn enter_github(&mut self) {
@@ -865,24 +868,24 @@ impl App {
                 return;
             }
         };
-        let (owner, repo_name) = match crate::github::parse_remote_owner_repo(&url) {
-            Ok(parts) => parts,
+        let remote = match crate::platform::parse_remote(&url) {
+            Ok(r) => r,
             Err(e) => {
-                self.set_error(crate::github::render_error(&e));
+                self.set_error(crate::platform::render_platform_error(&e));
                 return;
             }
         };
-        self.github_state.owner = owner;
-        self.github_state.repo = repo_name;
+        self.github_state.owner = remote.owner.clone();
+        self.github_state.repo = remote.repo.clone();
+        self.github_state.remote = Some(remote.clone());
 
         if self.github_state.client.is_none() {
-            match crate::github::GithubClient::new(
-                &self.github_state.owner,
-                &self.github_state.repo,
-            ) {
-                Ok(client) => self.github_state.client = Some(client),
+            match crate::platform::build_client(&remote) {
+                Ok(client) => {
+                    self.github_state.client = Some(client);
+                }
                 Err(e) => {
-                    self.set_error(crate::github::render_error(&e));
+                    self.set_error(crate::platform::render_platform_error(&e));
                     return;
                 }
             }
@@ -955,24 +958,24 @@ impl App {
         if self.github_state.client.is_none() || self.github_rx.is_some() {
             return;
         }
-        let owner = self.github_state.owner.clone();
-        let repo = self.github_state.repo.clone();
+        let remote = self.github_state.remote.clone().unwrap();
         self.remote_status = Some(RemoteStatus::Running("加载 PR…".to_string()));
         self.remote_op = "github";
         let (tx, rx) = mpsc::unbounded_channel();
         self.github_rx = Some(rx);
         tokio::spawn(async move {
-            match crate::github::GithubClient::new(&owner, &repo) {
+            match crate::platform::build_client(&remote) {
                 Ok(client) => match client.get_pull(number).await {
                     Ok(detail) => {
                         let _ = tx.send(GithubMsg::Detail(detail));
                     }
                     Err(e) => {
-                        let _ = tx.send(GithubMsg::Error(crate::github::render_error(&e)));
+                        let _ =
+                            tx.send(GithubMsg::Error(crate::platform::render_platform_error(&e)));
                     }
                 },
                 Err(e) => {
-                    let _ = tx.send(GithubMsg::Error(crate::github::render_error(&e)));
+                    let _ = tx.send(GithubMsg::Error(crate::platform::render_platform_error(&e)));
                 }
             }
         });
@@ -994,36 +997,36 @@ impl App {
         if self.github_state.client.is_none() || self.github_rx.is_some() {
             return;
         }
-        let owner = self.github_state.owner.clone();
-        let repo = self.github_state.repo.clone();
+        let remote = self.github_state.remote.clone().unwrap();
         self.remote_status = Some(RemoteStatus::Running("加载 Issue…".to_string()));
         self.remote_op = "github";
         let (tx, rx) = mpsc::unbounded_channel();
         self.github_rx = Some(rx);
         tokio::spawn(async move {
-            match crate::github::GithubClient::new(&owner, &repo) {
+            match crate::platform::build_client(&remote) {
                 Ok(client) => match client.get_issue(number).await {
                     Ok(detail) => {
                         let _ = tx.send(GithubMsg::IssueDetail(detail));
                     }
                     Err(e) => {
-                        let _ = tx.send(GithubMsg::Error(crate::github::render_error(&e)));
+                        let _ =
+                            tx.send(GithubMsg::Error(crate::platform::render_platform_error(&e)));
                     }
                 },
                 Err(e) => {
-                    let _ = tx.send(GithubMsg::Error(crate::github::render_error(&e)));
+                    let _ = tx.send(GithubMsg::Error(crate::platform::render_platform_error(&e)));
                 }
             }
         });
     }
 
-    /// Refresh the active receipts list from GitHub (convention 1: background
+    /// Refresh the active receipts list (convention 1: background
     /// task, per-frame drain by [`App::poll_github`]).
     ///
     /// The cached `client` is the readiness gate; each fetch task rebuilds a
-    /// client from `owner`/`repo` because `GithubClient` is not `Clone` and
-    /// the Lane A github module must stay untouched. The token itself is
-    /// cached in `resolve_token` (a `OnceLock`), so the rebuild is cheap.
+    /// client from `remote` via [`build_client`] because concrete clients are
+    /// not `Clone`. The token itself is cached in `resolve_token`
+    /// (a `OnceLock`), so the rebuild is cheap.
     fn refresh_github(&mut self) {
         if self.github_state.client.is_none() {
             return;
@@ -1031,10 +1034,9 @@ impl App {
         if self.remote_rx.is_some() || self.batch_rx.is_some() || self.github_rx.is_some() {
             return;
         }
-        self.remote_status = Some(RemoteStatus::Running("加载 GitHub 回执…".to_string()));
+        self.remote_status = Some(RemoteStatus::Running("加载回执…".to_string()));
         self.remote_op = "github";
-        let owner = self.github_state.owner.clone();
-        let repo = self.github_state.repo.clone();
+        let remote = self.github_state.remote.clone().unwrap();
         let tab = self.github_state.tab;
         let repo_path = self.current_repo_path().map(|p| p.to_path_buf());
         self.github_state.detail = None;
@@ -1042,10 +1044,10 @@ impl App {
         let (tx, rx) = mpsc::unbounded_channel();
         self.github_rx = Some(rx);
         tokio::spawn(async move {
-            let client = match crate::github::GithubClient::new(&owner, &repo) {
+            let client = match crate::platform::build_client(&remote) {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = tx.send(GithubMsg::Error(crate::github::render_error(&e)));
+                    let _ = tx.send(GithubMsg::Error(crate::platform::render_platform_error(&e)));
                     return;
                 }
             };
@@ -1055,21 +1057,23 @@ impl App {
             match tab {
                 GithubTab::Pulls => match client.list_pulls().await {
                     Ok(v) => send(GithubMsg::Pulls(v)),
-                    Err(e) => send(GithubMsg::Error(crate::github::render_error(&e))),
+                    Err(e) => send(GithubMsg::Error(crate::platform::render_platform_error(&e))),
                 },
                 GithubTab::Issues => match client.list_issues().await {
                     Ok(v) => send(GithubMsg::Issues(v)),
-                    Err(e) => send(GithubMsg::Error(crate::github::render_error(&e))),
+                    Err(e) => send(GithubMsg::Error(crate::platform::render_platform_error(&e))),
                 },
                 GithubTab::Notifications => match client.list_notifications().await {
                     Ok(v) => send(GithubMsg::Notifications(v)),
-                    Err(e) => send(GithubMsg::Error(crate::github::render_error(&e))),
+                    Err(e) => send(GithubMsg::Error(crate::platform::render_platform_error(&e))),
                 },
                 GithubTab::Checks => match repo_path {
                     Some(path) => match crate::git::head_sha(&path) {
                         Ok(sha) => match client.list_checks(&sha).await {
                             Ok(v) => send(GithubMsg::Checks(v)),
-                            Err(e) => send(GithubMsg::Error(crate::github::render_error(&e))),
+                            Err(e) => {
+                                send(GithubMsg::Error(crate::platform::render_platform_error(&e)))
+                            }
                         },
                         Err(e) => send(GithubMsg::Error(e.to_string())),
                     },

@@ -15,6 +15,7 @@ pub enum GithubError {
 
     /// The repository's remote URL does not point at `github.com`.
     #[error("{0}")]
+    #[allow(dead_code)]
     NotGitHub(String),
 
     /// The GitHub API answered with an HTTP error status.
@@ -57,6 +58,7 @@ impl From<octocrab::Error> for GithubError {
 ///
 /// M2's single text channel: the caller passes the result to `App::set_error`.
 /// Status-aware mapping per design step2 (401/404/403/rate-limit/5xx/network).
+#[allow(dead_code)]
 pub fn render_error(e: &GithubError) -> String {
     match e {
         GithubError::Token(m) | GithubError::NotGitHub(m) => m.clone(),

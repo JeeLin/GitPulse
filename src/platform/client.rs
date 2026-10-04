@@ -33,3 +33,19 @@ pub trait PlatformClient: Send + Sync {
     /// Repo-scoped notifications.
     async fn list_notifications(&self) -> Result<Vec<NotificationSummary>, PlatformError>;
 }
+
+use crate::platform::gitea::GiteaClient;
+use crate::platform::gitlab::GitLabClient;
+use crate::platform::remote::{PlatformKind, PlatformRemote};
+
+/// Build the platform-specific [`PlatformClient`] for a parsed remote URL.
+pub fn build_client(remote: &PlatformRemote) -> Result<Box<dyn PlatformClient>, PlatformError> {
+    match remote.kind {
+        PlatformKind::GitHub | PlatformKind::SelfHosted => {
+            let client = crate::github::GithubClient::new(&remote.owner, &remote.repo)?;
+            Ok(Box::new(client))
+        }
+        PlatformKind::Gitea => Ok(Box::new(GiteaClient::new(remote)?)),
+        PlatformKind::GitLab => Ok(Box::new(GitLabClient::new(remote)?)),
+    }
+}

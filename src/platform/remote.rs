@@ -31,6 +31,7 @@ impl PlatformKind {
     }
 
     /// Human-readable platform label (used in errors / UI).
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             PlatformKind::GitHub => "GitHub",

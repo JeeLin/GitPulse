@@ -13,7 +13,7 @@ use ratatui::{
 
 use super::{hint, list_highlight, HIGHLIGHT_SYMBOL};
 use crate::app::App;
-use crate::github::{CheckSummary, PrDetail, PrSummary};
+use crate::platform::{CheckSummary, PrDetail, PrSummary};
 use crate::ui::components::footer::HintRow;
 
 /// Empty-state copy of the pull list: zero open pulls is a valid state, not
@@ -233,7 +233,7 @@ pub(crate) fn issue_detail_hints() -> HintRow {
 /// runtime. That task is never driven: these tests only render a frame, they
 /// never issue a request.
 #[cfg(test)]
-pub(crate) fn offline_client() -> crate::github::GithubClient {
+pub(crate) fn offline_client() -> Box<dyn crate::platform::PlatformClient> {
     if std::env::var("GITHUB_TOKEN").is_err() {
         std::env::set_var("GITHUB_TOKEN", "test-token");
     }
@@ -242,7 +242,7 @@ pub(crate) fn offline_client() -> crate::github::GithubClient {
         .build()
         .expect("tokio runtime");
     let _guard = runtime.enter();
-    crate::github::GithubClient::new("octo", "demo").expect("offline client")
+    Box::new(crate::github::GithubClient::new("octo", "demo").expect("offline client"))
 }
 
 /// Vertical split every receipt panel uses: body, status row, hint row.

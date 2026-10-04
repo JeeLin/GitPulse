@@ -9,10 +9,13 @@
 pub mod auth;
 pub mod client;
 pub mod error;
+pub mod gitea;
+pub mod gitlab;
 pub mod models;
 pub mod remote;
 
-pub use client::PlatformClient;
+pub use client::{build_client, PlatformClient};
 pub use error::{render_platform_error, PlatformError};
 pub use models::*;
-pub use remote::{PlatformKind, PlatformRemote};
+#[allow(unused_imports)]
+pub use remote::{parse_remote, PlatformKind, PlatformRemote};
