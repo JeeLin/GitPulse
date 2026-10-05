@@ -171,14 +171,13 @@ impl PlatformClient for GiteaClient {
     async fn list_notifications(&self) -> Result<Vec<NotificationSummary>, PlatformError> {
         let path = notifications_path(&self.remote.owner, &self.remote.repo);
         let json = self.fetch(&path).await?;
-        let items: Vec<NotificationSummary> = json
+        // The repo-scoped endpoint already narrows to this repository upstream,
+        // so no client-side filter: a `full_name` that differs in case from the
+        // remote path would otherwise drop every row.
+        Ok(json
             .as_array()
             .map(|arr| arr.iter().map(notification_to_summary).collect())
-            .unwrap_or_default();
-        // Already repo-scoped upstream; the client-side filter keeps a future
-        // switch to the global list from leaking other repositories' rows.
-        let full_name = self.remote.path.clone();
-        Ok(items.into_iter().filter(|n| n.repo == full_name).collect())
+            .unwrap_or_default())
     }
 }
 
@@ -224,11 +223,13 @@ fn pr_to_summary(v: &Value) -> PrSummary {
 
 fn check_to_summary(v: &Value) -> CheckSummary {
     let state = v["state"].as_str().unwrap_or("");
+    // RESEARCH §1.7: `state` ∈ pending/running/success/failure/error. The two
+    // in-flight states share GitHub's `in_progress` shape so the renderer keeps
+    // painting them as work in flight instead of DarkGray `unknown`.
     let (status, conclusion) = match state {
-        "pending" => ("in_progress".to_string(), "unknown".to_string()),
+        "pending" | "running" => ("in_progress".to_string(), "unknown".to_string()),
         "success" => ("completed".to_string(), "success".to_string()),
         "failure" | "error" => ("completed".to_string(), "failure".to_string()),
-        "warning" => ("completed".to_string(), "neutral".to_string()),
         _ => ("unknown".to_string(), "unknown".to_string()),
     };
     CheckSummary {
@@ -377,8 +378,44 @@ mod tests {
     }
 
     #[test]
+    fn check_to_summary_running_is_in_progress_not_unknown() {
+        let c = check_to_summary(&json!({ "state": "running", "context": "ci/x" }));
+        assert_eq!(c.status, "in_progress");
+        assert_eq!(c.conclusion, "unknown");
+    }
+
+    /// Every `state` Gitea documents (RESEARCH §1.7) must reach a real
+    /// status/conclusion pair — a new one would silently render as `unknown`.
+    #[test]
+    fn check_to_summary_covers_every_documented_state() {
+        for state in ["pending", "running", "success", "failure", "error"] {
+            let c = check_to_summary(&json!({ "state": state, "context": "ci/x" }));
+            assert!(
+                !(c.status == "unknown" && c.conclusion == "unknown"),
+                "{state} fell through to unknown/unknown"
+            );
+        }
+        // Undocumented / missing values stay on the defensive fallback.
+        let c = check_to_summary(&json!({ "state": "wat", "context": "ci/x" }));
+        assert_eq!(
+            (c.status.as_str(), c.conclusion.as_str()),
+            ("unknown", "unknown")
+        );
+        let c = check_to_summary(&json!({ "context": "ci/x" }));
+        assert_eq!(
+            (c.status.as_str(), c.conclusion.as_str()),
+            ("unknown", "unknown")
+        );
+    }
+
+    #[test]
     fn check_to_summary_failure() {
         let v = json!({ "state": "failure", "context": "ci/x" });
+        let c = check_to_summary(&v);
+        assert_eq!(c.status, "completed");
+        assert_eq!(c.conclusion, "failure");
+        // `error` is the other documented failure state.
+        let v = json!({ "state": "error", "context": "ci/x" });
         let c = check_to_summary(&v);
         assert_eq!(c.status, "completed");
         assert_eq!(c.conclusion, "failure");
@@ -435,6 +472,17 @@ mod tests {
         assert_eq!(
             notifications_path("owner", "repo"),
             "/repos/owner/repo/notifications?limit=100"
+        );
+        // Built from the parsed remote, so the endpoint names this repository:
+        // that upstream narrowing is what replaces the client-side filter.
+        let remote = crate::platform::parse_remote("https://gitea.com/Owner/Repo.git").unwrap();
+        assert_eq!(
+            notifications_path(&remote.owner, &remote.repo),
+            "/repos/Owner/Repo/notifications?limit=100"
+        );
+        assert_eq!(
+            remote.path, "Owner/Repo",
+            "the .git suffix must not reach the repo-scoped path"
         );
     }
 

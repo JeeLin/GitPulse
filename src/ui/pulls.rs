@@ -110,35 +110,53 @@ pub(crate) struct DisconnectedCopy {
     /// Headline: which platform the client is not connected to.
     pub title: &'static str,
     /// How to obtain a credential for that platform, and the retry key.
-    pub hint: &'static str,
+    /// Built from [`PlatformKind::token_var`] / [`PlatformKind::cli_hint`]
+    /// so the variable names live in one place only.
+    pub hint: String,
 }
 
 /// Credential guidance for `kind`, falling back to neutral copy when no
 /// remote has been resolved yet (`None`) — the hint then names no token var,
 /// because there is no platform to own one.
+///
+/// Self-hosted is a dead-end credential path (`build_client` always rejects
+/// such remotes), so its hint states the limitation instead of asking for a
+/// token the app will never read.
 pub(crate) fn disconnected_copy(kind: Option<crate::platform::PlatformKind>) -> DisconnectedCopy {
     use crate::platform::PlatformKind;
     match kind {
         Some(PlatformKind::GitHub) => DisconnectedCopy {
             title: "尚未连接 GitHub",
-            hint: "配置 GITHUB_TOKEN 或 gh 登录后按 r 重试",
+            hint: credential_hint(PlatformKind::GitHub),
         },
         Some(PlatformKind::GitLab) => DisconnectedCopy {
             title: "尚未连接 GitLab",
-            hint: "配置 GITLAB_TOKEN 或 glab 登录后按 r 重试",
+            hint: credential_hint(PlatformKind::GitLab),
         },
         Some(PlatformKind::Gitea) => DisconnectedCopy {
             title: "尚未连接 Gitea",
-            hint: "配置 GITEA_TOKEN 后按 r 重试",
+            hint: credential_hint(PlatformKind::Gitea),
         },
         Some(PlatformKind::SelfHosted) => DisconnectedCopy {
             title: "尚未连接自托管平台",
-            hint: "配置访问令牌后按 r 重试",
+            hint: "该实例暂不支持（当前支持 github.com / gitea.com / gitlab.com）".to_string(),
         },
         None => DisconnectedCopy {
             title: "尚未连接平台",
-            hint: "配置访问令牌后按 r 重试",
+            hint: "配置访问令牌后按 r 重试".to_string(),
         },
+    }
+}
+
+/// Compose the retry hint from the platform's own token variable and CLI
+/// name. An empty `cli_hint()` means the platform has no auth CLI, so the
+/// hint names only the env var.
+fn credential_hint(kind: crate::platform::PlatformKind) -> String {
+    let cli = kind.cli_hint();
+    if cli.is_empty() {
+        format!("配置 {} 后按 r 重试", kind.token_var())
+    } else {
+        format!("配置 {} 或 {} 登录后按 r 重试", kind.token_var(), cli)
     }
 }
 
@@ -310,12 +328,12 @@ pub(crate) fn render_footer(
     app: &App,
     show_enter: bool,
 ) {
-    if app.github_state.client.is_some() {
+    if app.github_state.connected() {
         super::render_status_or_remote(
             f,
             status_area,
             app.remote_status.as_ref(),
-            app.remote_op,
+            app.receipt_op_label(),
             app.status.as_ref(),
         );
     }
@@ -368,7 +386,7 @@ pub(crate) fn render_disconnected(
 /// Render the open-pull list (the receipts hub entry point).
 pub fn render_pulls(f: &mut Frame, content: Rect, app: &App) {
     let chunks = panel_chunks(content);
-    if app.github_state.client.is_none() {
+    if !app.github_state.connected() {
         render_disconnected(f, chunks[0], "PR 列表", app.github_state.kind(), app);
         render_footer(f, chunks[1], chunks[2], app, true);
         return;
@@ -439,7 +457,7 @@ fn pull_item(pr: &PrSummary, width: usize) -> ListItem<'static> {
 /// the placeholder while its payload has not arrived, and the three panes.
 pub fn render_pull_detail(f: &mut Frame, content: Rect, app: &App) {
     let chunks = panel_chunks(content);
-    if app.github_state.client.is_none() {
+    if !app.github_state.connected() {
         render_disconnected(f, chunks[0], "PR 详情", app.github_state.kind(), app);
         render_footer(f, chunks[1], chunks[2], app, false);
         return;
@@ -827,6 +845,19 @@ mod tests {
         assert_eq!(
             disconnected_copy(Some(PlatformKind::SelfHosted)).title,
             "尚未连接自托管平台"
+        );
+        // Self-hosted remotes are rejected by `build_client`, so asking for a
+        // token would send the user down a path that cannot succeed.
+        let self_hosted = disconnected_copy(Some(PlatformKind::SelfHosted));
+        assert!(
+            !self_hosted.hint.contains("令牌"),
+            "no credential is asked for: {}",
+            self_hosted.hint
+        );
+        assert!(
+            self_hosted.hint.contains("暂不支持"),
+            "the limitation is stated: {}",
+            self_hosted.hint
         );
         // No remote resolved: stay neutral instead of guessing a token var.
         let unknown = disconnected_copy(None);

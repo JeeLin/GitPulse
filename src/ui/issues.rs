@@ -24,7 +24,7 @@ const EMPTY_ISSUES: &str = "—（暂无 Issues）";
 pub fn render_issues(f: &mut Frame, content: Rect, app: &App) {
     let area = content;
     let chunks = panel_chunks(area);
-    if app.github_state.client.is_none() {
+    if !app.github_state.connected() {
         render_disconnected(f, chunks[0], "Issues", app.github_state.kind(), app);
         render_footer(f, chunks[1], chunks[2], app, true);
         return;
@@ -78,7 +78,7 @@ const ISSUE_DETAIL_PLACEHOLDER: &str = "—（暂无 Issue 详情）";
 pub fn render_issue_detail(f: &mut Frame, content: Rect, app: &App) {
     let area = content;
     let chunks = panel_chunks(area);
-    if app.github_state.client.is_none() {
+    if !app.github_state.connected() {
         render_disconnected(f, chunks[0], "Issue 详情", app.github_state.kind(), app);
         render_footer(f, chunks[1], chunks[2], app, false);
         return;

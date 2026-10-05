@@ -152,6 +152,36 @@ impl GithubState {
     pub fn kind(&self) -> Option<crate::platform::PlatformKind> {
         self.remote.as_ref().map(|r| r.kind)
     }
+
+    /// The single readiness gate every receipt panel and every fetch spawner
+    /// asks before it renders a live list or arms a request (U1).
+    ///
+    /// Both halves are required: a client without a remote cannot say which
+    /// repository its data belongs to, and a remote without a client has no
+    /// credential to fetch with. [`App::enter_github`] resets the two
+    /// together, so `client.is_some() && remote.is_none()` is not a state the
+    /// app can reach — this predicate is what keeps it that way.
+    pub fn connected(&self) -> bool {
+        self.client.is_some() && self.remote.is_some()
+    }
+
+    /// Drop everything the previous repository left behind: the six receipt
+    /// lists, both details, the cached client and the resolved remote.
+    ///
+    /// [`App::enter_github`] calls this before it resolves the new remote, so
+    /// a repository whose remote cannot be parsed renders an empty gate
+    /// instead of the previous repository's receipts (U1).
+    pub fn reset(&mut self) {
+        self.pulls.clear();
+        self.checks.clear();
+        self.issues.clear();
+        self.notifications.clear();
+        self.detail = None;
+        self.issue_detail = None;
+        self.client = None;
+        self.remote = None;
+        self.selected = 0;
+    }
 }
 
 /// Message sent from a background GitHub fetch task over its channel.
@@ -180,12 +210,13 @@ enum GithubMsg {
     Other(String),
 }
 
-/// Op slug for a receipt fetch, stored in `remote_op` and rendered by
-/// `ui::remote::render_remote_status` as `{op} 成功`.
+/// Op slug for a receipt fetch, stored in `receipt_op` and rendered by
+/// `ui::remote::render_remote_status` as `{op} 成功` inside the receipt views
+/// only — the push/pull views read [`App::remote_op`] instead (U3).
 ///
-/// `remote_op` is an op identifier (`push` / `pull`), not display copy, so it
-/// stays lowercase — GitHub keeps its v0.5.0 `github` spelling and the other
-/// families get their own slug instead of sharing a hardcoded `github`.
+/// A platform slug, not display copy, so it stays lowercase — GitHub keeps its
+/// v0.5.0 `github` spelling and the other families get their own slug instead
+/// of sharing a hardcoded `github`.
 fn platform_op_slug(kind: crate::platform::PlatformKind) -> &'static str {
     use crate::platform::PlatformKind;
     match kind {
@@ -432,8 +463,15 @@ pub struct App {
     pub commit_message: String,
     /// Push/pull feedback; takes precedence over the normal status line.
     pub remote_status: Option<RemoteStatus>,
-    /// Label of the running/last remote operation (`push` / `pull`).
+    /// Label of the running/last push or pull (`push` / `pull`).
+    ///
+    /// Receipt fetches label themselves in [`App::receipt_op`] instead (U3):
+    /// one field holding both vocabularies let a `gitlab` receipt slug be
+    /// rendered as `gitlab 成功` on the repo view's push/pull status row.
     pub remote_op: &'static str,
+    /// Label of the running/last receipt fetch — the remote's platform slug
+    /// (see `platform_op_slug`). Only the receipt views render it.
+    pub receipt_op: &'static str,
     /// Receiver for background push/pull completion events.
     remote_rx: Option<mpsc::UnboundedReceiver<Result<(), String>>>,
     /// Rolling per-repository batch progress log (convention 6).
@@ -511,6 +549,7 @@ impl App {
             commit_message: String::new(),
             remote_status: None,
             remote_op: "",
+            receipt_op: "",
             remote_rx: None,
             batch_log: Vec::new(),
             batch_op: "",
@@ -553,8 +592,8 @@ impl App {
         self.status = None;
     }
 
-    /// Drop the settled push/pull feedback so the next status message is not
-    /// outranked by it (G3).
+    /// Drop the settled push/pull (or receipt) feedback so the next status
+    /// message is not outranked by it (G3).
     ///
     /// The panels that render `remote_status` above the plain status line
     /// would otherwise keep showing a stale `Success` / `Error` under (or
@@ -563,6 +602,26 @@ impl App {
     /// deliberately left alone — this is the one guard the tag panel, its
     /// overlays and the history/config entry points (G19) share instead of
     /// re-typing `if self.remote_rx.is_none()`.
+    ///
+    /// It is also the guard that keeps a settled receipt fetch out of the
+    /// repo view (U3): leaving the receipt hub clears its feedback the same
+    /// way, so the repo status row never renders `github 成功` / `gitlab 成功`
+    /// for an operation it did not run.
+    /// Op label for a receipt view's status row: the platform slug of the
+    /// fetch that settled here, falling back to [`App::remote_op`] while no
+    /// receipt has run in this visit.
+    ///
+    /// The fallback keeps a push or pull that succeeded before the hub was
+    /// entered readable (`push 成功`) instead of degrading to the op-less
+    /// `操作完成`, which is what an empty slug would render (U3).
+    pub fn receipt_op_label(&self) -> &str {
+        if self.receipt_op.is_empty() {
+            self.remote_op
+        } else {
+            self.receipt_op
+        }
+    }
+
     fn clear_finished_push_feedback(&mut self) {
         if self.remote_rx.is_none() {
             self.remote_status = None;
@@ -895,20 +954,19 @@ impl App {
     /// view still becomes [`View::Pulls`] so the panel can surface the error
     /// and the user can retry with `r`.
     ///
-    /// `remote` is cleared on entry: a repository whose remote fails to
-    /// resolve must never keep the previous repository's remote alive (the
-    /// receipt copy and the `r` refresh both key off it).
+    /// The whole previous-repository state is dropped up front (U1): the six
+    /// receipt lists, both details, the cached client, the resolved remote and
+    /// the receiver of a fetch still in flight. So a repository whose remote
+    /// fails to resolve presents an empty gate rather than the previous
+    /// repository's receipts, and a response that arrives after the switch is
+    /// dropped instead of landing on the new repository's panel — see
+    /// [`App::reset_github_state`] for why dropping the receiver is enough.
     pub fn enter_github(&mut self) {
         self.github_state.tab = GithubTab::Pulls;
-        self.github_state.selected = 0;
         // The label is read before the reset so this failure can still name
         // the platform; a GitHub remote keeps its v0.5.0 wording.
         let platform = self.github_state.kind();
-        // `remote` is the single source of truth, so it is dropped up front:
-        // a repository whose remote cannot be resolved must never leave the
-        // previous repository's remote alive (the receipt copy and the `r`
-        // refresh both key off it).
-        self.github_state.remote = None;
+        self.reset_github_state();
         self.view = View::Pulls;
         self.clear_error();
 
@@ -940,18 +998,33 @@ impl App {
         };
         self.github_state.remote = Some(remote.clone());
 
-        if self.github_state.client.is_none() {
-            match crate::platform::build_client(&remote) {
-                Ok(client) => {
-                    self.github_state.client = Some(client);
-                }
-                Err(e) => {
-                    self.set_error(crate::platform::render_platform_error(&e));
-                    return;
-                }
+        // The gate is built for the remote that was just resolved, never
+        // reused across repositories: the reset above dropped the previous
+        // one, so a client can no longer certify credentials it never asked
+        // for (U1).
+        match crate::platform::build_client(&remote) {
+            Ok(client) => self.github_state.client = Some(client),
+            Err(e) => {
+                self.set_error(crate::platform::render_platform_error(&e));
+                return;
             }
         }
         self.refresh_github();
+    }
+
+    /// Reset the receipts hub to the empty gate, dropping the receiver of a
+    /// fetch that is still in flight (U1).
+    ///
+    /// `github_rx` holds the *only* sender of that fetch, so dropping the
+    /// receiver disarms the task for good: its late result is handed to a
+    /// channel nobody reads, and `poll_github` finds no receiver and returns.
+    /// Each fetch gets a fresh channel and the slot holds at most one, so
+    /// there is no other live receiver its result could land in — the reset
+    /// is what keeps a previous repository's response off the new panel.
+    fn reset_github_state(&mut self) {
+        self.github_state.reset();
+        self.github_rx = None;
+        self.receipt_op = "";
     }
 
     /// Number of rows in the active receipts list (`0` for an empty list).
@@ -997,7 +1070,7 @@ impl App {
             GithubTab::Issues => View::Issues,
             GithubTab::Notifications => View::Notifications,
         };
-        if self.github_state.client.is_some() {
+        if self.github_state.connected() {
             self.refresh_github();
         }
         true
@@ -1014,17 +1087,17 @@ impl App {
         else {
             return;
         };
-        // No client yet, or a fetch already in flight: just show the panel
-        // (which surfaces the error / empty state) without spawning.
-        if self.github_state.client.is_none() || self.github_rx.is_some() {
-            return;
-        }
         let Some(remote) = self.github_state.remote.clone() else {
             self.set_error("未解析到远端，无法加载 PR 详情");
             return;
         };
+        // No client yet, or a fetch already in flight: just show the panel
+        // (which surfaces the error / empty state) without spawning.
+        if !self.github_state.connected() || self.github_rx.is_some() {
+            return;
+        }
         self.remote_status = Some(RemoteStatus::Running("加载 PR…".to_string()));
-        self.remote_op = platform_op_slug(remote.kind);
+        self.receipt_op = platform_op_slug(remote.kind);
         let (tx, rx) = mpsc::unbounded_channel();
         self.github_rx = Some(rx);
         tokio::spawn(async move {
@@ -1055,17 +1128,17 @@ impl App {
         else {
             return;
         };
-        // No client yet, or a fetch already in flight: just show the panel
-        // (which surfaces the error / empty state) without spawning.
-        if self.github_state.client.is_none() || self.github_rx.is_some() {
-            return;
-        }
         let Some(remote) = self.github_state.remote.clone() else {
             self.set_error("未解析到远端，无法加载 Issue 详情");
             return;
         };
+        // No client yet, or a fetch already in flight: just show the panel
+        // (which surfaces the error / empty state) without spawning.
+        if !self.github_state.connected() || self.github_rx.is_some() {
+            return;
+        }
         self.remote_status = Some(RemoteStatus::Running("加载 Issue…".to_string()));
-        self.remote_op = platform_op_slug(remote.kind);
+        self.receipt_op = platform_op_slug(remote.kind);
         let (tx, rx) = mpsc::unbounded_channel();
         self.github_rx = Some(rx);
         tokio::spawn(async move {
@@ -1088,25 +1161,26 @@ impl App {
     /// Refresh the active receipts list (convention 1: background
     /// task, per-frame drain by [`App::poll_github`]).
     ///
-    /// The cached `client` is the readiness gate; each fetch task rebuilds a
-    /// client from `remote` via [`build_client`] because concrete clients are
-    /// not `Clone`. The token itself is cached in `resolve_token`
-    /// (a `OnceLock`), so the rebuild is cheap.
+    /// The cached `client` plus the resolved `remote` are the readiness gate
+    /// ([`GithubState::connected`]); each fetch task rebuilds a client from
+    /// `remote` via [`build_client`] because concrete clients are not `Clone`.
+    /// The token itself is cached per host (`src/platform/auth.rs` for Gitea /
+    /// GitLab, `src/github/auth.rs` for GitHub), so the rebuild is cheap.
     fn refresh_github(&mut self) {
-        if self.github_state.client.is_none() {
-            return;
-        }
-        if self.remote_rx.is_some() || self.batch_rx.is_some() || self.github_rx.is_some() {
-            return;
-        }
         let Some(remote) = self.github_state.remote.clone() else {
             self.remote_status = Some(RemoteStatus::Error(
                 "未解析到远端，请重新进入回执视图".to_string(),
             ));
             return;
         };
+        if !self.github_state.connected() {
+            return;
+        }
+        if self.remote_rx.is_some() || self.batch_rx.is_some() || self.github_rx.is_some() {
+            return;
+        }
         self.remote_status = Some(RemoteStatus::Running("加载回执…".to_string()));
-        self.remote_op = platform_op_slug(remote.kind);
+        self.receipt_op = platform_op_slug(remote.kind);
         let tab = self.github_state.tab;
         let repo_path = self.current_repo_path().map(|p| p.to_path_buf());
         self.github_state.detail = None;
@@ -1154,6 +1228,12 @@ impl App {
     }
 
     /// Drain the single GitHub fetch result per frame (convention 1).
+    ///
+    /// A result can only ever belong to the repository the hub is currently
+    /// on: [`App::enter_github`] drops `github_rx` before it resolves the new
+    /// remote, so a fetch that was still in flight for the previous
+    /// repository has lost its only receiver by the time it answers and never
+    /// reaches this function (U1).
     pub fn poll_github(&mut self) {
         let Some(rx) = self.github_rx.as_mut() else {
             return;
@@ -2397,7 +2477,13 @@ impl App {
             }
             View::IssueDetail => self.view = View::Issues,
             View::Pulls | View::Checks | View::Issues | View::Notifications => {
-                self.view = View::Repo
+                self.view = View::Repo;
+                // The receipt feedback belongs to the hub: `github 成功` /
+                // `gitlab 成功` on the repo view's status row reads as a push
+                // or pull the repo never ran, so a settled fetch is dropped
+                // here (a push still in flight keeps its own feedback, G3).
+                self.clear_finished_push_feedback();
+                self.receipt_op = "";
             }
         }
     }
@@ -3923,12 +4009,128 @@ mod tests {
             app.github_state.remote = Some(remote);
             app.refresh_github();
             assert_eq!(
-                app.remote_op, expected,
+                app.receipt_op, expected,
                 "{url}: wrong op label ({expected} 成功 is what the user reads)"
             );
-            assert_ne!(app.remote_op, "github", "{url}: GitHub op leaked");
+            assert_ne!(app.receipt_op, "github", "{url}: GitHub op leaked");
+            assert_eq!(
+                app.receipt_op_label(),
+                expected,
+                "the receipt status row reads the platform slug"
+            );
+            // The push/pull field stays out of the receipt domain (B2).
+            assert_ne!(app.remote_op, expected, "{url}: receipt wrote remote_op");
             app.github_rx = None;
         }
+    }
+
+    /// B2: leaving the hub drops the settled receipt feedback, so the repo
+    /// status row never renders `gitlab 成功` for an operation it never ran.
+    #[test]
+    fn leaving_the_receipt_hub_clears_the_platform_feedback() {
+        let mut app = App::new(Config::default());
+        app.view = View::Pulls;
+        app.receipt_op = "gitlab";
+        app.remote_status = Some(RemoteStatus::Success);
+        app.dispatch_key(key(KeyCode::Esc));
+        assert_eq!(app.view, View::Repo, "the hub exits to the repo view");
+        assert!(app.remote_status.is_none(), "receipt feedback dropped");
+        assert_eq!(
+            app.receipt_op_label(),
+            app.remote_op,
+            "falls back to push/pull"
+        );
+    }
+
+    /// B1: entering the hub drops every receipt the previous repository left
+    /// behind — no list, no detail, no cached gate and no in-flight receiver —
+    /// so nothing can be rendered under the new repository's title.
+    #[test]
+    fn entering_the_hub_drops_the_previous_receipts() {
+        use crate::platform::{
+            CheckSummary, IssueDetail, IssueSummary, NotificationSummary, PrDetail, PrSummary,
+        };
+        let pr = PrSummary {
+            number: 7,
+            title: "A 的 PR".to_string(),
+            state: "open".to_string(),
+            draft: false,
+            author: "alice".to_string(),
+            head_ref: "feat".to_string(),
+            base_ref: "main".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let issue = IssueSummary {
+            number: 3,
+            title: "A 的 Issue".to_string(),
+            state: "open".to_string(),
+            author: "alice".to_string(),
+            assignee: None,
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            labels: vec![],
+        };
+        let mut app = App::new(Config::default());
+        app.view = View::Pulls;
+        app.github_state.pulls = vec![pr.clone()];
+        app.github_state.checks = vec![CheckSummary {
+            name: "ci".to_string(),
+            status: "completed".to_string(),
+            conclusion: "success".to_string(),
+            html_url: String::new(),
+        }];
+        app.github_state.issues = vec![issue.clone()];
+        app.github_state.notifications = vec![NotificationSummary {
+            id: "1".to_string(),
+            repo: "octo/demo".to_string(),
+            subject_title: "A 的通知".to_string(),
+            subject_type: "Issue".to_string(),
+            reason: "mention".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            unread: true,
+        }];
+        app.github_state.detail = Some(PrDetail {
+            summary: pr,
+            body: String::new(),
+            labels: vec![],
+            mergeable: Some(true),
+            checks: vec![],
+        });
+        app.github_state.issue_detail = Some(IssueDetail {
+            summary: issue,
+            body: String::new(),
+        });
+        app.github_state.client = Some(crate::ui::pulls::offline_client());
+        app.github_state.remote = Some(crate::ui::github_remote());
+        app.receipt_op = "github";
+        let (tx, rx) = mpsc::unbounded_channel();
+        app.github_rx = Some(rx);
+        drop(tx);
+        assert!(app.github_state.connected(), "A is fully connected first");
+
+        app.reset_github_state();
+
+        assert!(
+            !app.github_state.connected(),
+            "the cached gate goes with the remote, so no panel reads a stale one"
+        );
+        assert!(
+            app.github_state.pulls.is_empty(),
+            "A's PRs would render under the new repository's title"
+        );
+        assert!(app.github_state.checks.is_empty());
+        assert!(app.github_state.issues.is_empty());
+        assert!(app.github_state.notifications.is_empty());
+        assert!(app.github_state.detail.is_none());
+        assert!(app.github_state.issue_detail.is_none());
+        assert!(
+            app.github_rx.is_none(),
+            "an in-flight result has no receiver left to land in"
+        );
+        assert_eq!(
+            app.receipt_op_label(),
+            "",
+            "the platform slug is dropped too"
+        );
     }
 
     /// U3: a task that dies is reported by platform, not by a hardcoded name.

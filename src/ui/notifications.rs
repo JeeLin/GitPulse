@@ -1,4 +1,5 @@
-//! Notifications receipts panel: repository-scoped GitHub notifications.
+//! Notifications receipts panel: repository-scoped notifications, whichever
+//! platform serves them (GitHub threads, GitLab To-Dos).
 
 use ratatui::{
     layout::Rect,
@@ -24,12 +25,23 @@ const EMPTY_NOTIFICATIONS: &str = "—（暂无通知）";
 /// yellow and bold; read rows keep a blank marker to stay aligned.
 const UNREAD_MARKER: &str = "● ";
 
+/// Panel label: GitHub serves notification threads while GitLab serves
+/// To-Dos — different objects sharing one receipt slot, so the title names
+/// which one the remote actually has.
+fn panel_label(kind: Option<crate::platform::PlatformKind>) -> &'static str {
+    match kind {
+        Some(crate::platform::PlatformKind::GitLab) => "To-Dos",
+        _ => "通知",
+    }
+}
+
 /// Render the repository-scoped notifications list.
 pub fn render_notifications(f: &mut Frame, content: Rect, app: &App) {
     let area = content;
     let chunks = panel_chunks(area);
-    if app.github_state.client.is_none() {
-        render_disconnected(f, chunks[0], "通知", app.github_state.kind(), app);
+    let label = panel_label(app.github_state.kind());
+    if !app.github_state.connected() {
+        render_disconnected(f, chunks[0], label, app.github_state.kind(), app);
         render_footer(f, chunks[1], chunks[2], app, false);
         return;
     }
@@ -37,7 +49,7 @@ pub fn render_notifications(f: &mut Frame, content: Rect, app: &App) {
     let notifications = &app.github_state.notifications;
     let block = Block::default()
         .title(panel_title(
-            "通知",
+            label,
             app.github_state.owner(),
             app.github_state.repo(),
         ))
@@ -240,5 +252,33 @@ mod tests {
         assert!(text.contains("gh不可用"), "status must show: {text}");
         assert!(!text.contains("ghost"), "no rows without a client: {text}");
         assert!(!text.contains('●'), "no marker without a client: {text}");
+    }
+
+    /// B6: GitLab's `/todos` are a different object from GitHub's
+    /// notification threads, so the panel title names which one is on screen.
+    /// GitHub keeps its v0.5.0 wording.
+    #[test]
+    fn gitlab_receipts_are_labelled_to_dos() {
+        use crate::platform::PlatformKind;
+        assert_eq!(panel_label(Some(PlatformKind::GitLab)), "To-Dos");
+        assert_eq!(panel_label(Some(PlatformKind::GitHub)), "通知");
+        assert_eq!(panel_label(Some(PlatformKind::Gitea)), "通知");
+        assert_eq!(panel_label(None), "通知", "no remote stays neutral");
+    }
+
+    /// B6: the label reaches the rendered title of a connected GitLab repo.
+    #[test]
+    fn gitlab_panel_title_says_to_dos() {
+        let mut app = connected_app();
+        let mut remote = crate::ui::github_remote();
+        remote.kind = crate::platform::PlatformKind::GitLab;
+        app.github_state.remote = Some(remote);
+        app.github_state.notifications = vec![note("todo-1", "Issue", true)];
+        let text = render_text(&app);
+        assert!(text.contains("To-Dos"), "missing To-Dos title: {text}");
+        assert!(
+            !text.contains("通知列表"),
+            "GitHub wording must not leak: {text}"
+        );
     }
 }

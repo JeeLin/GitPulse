@@ -307,11 +307,11 @@ pub(crate) fn view_status(app: &App) -> StatusRow<'_> {
         | View::IssueDetail
         | View::Checks
         | View::Notifications => {
-            if app.github_state.client.is_some() {
+            if app.github_state.connected() {
                 StatusRow::new(
                     app.status.as_ref(),
                     app.remote_status.as_ref(),
-                    app.remote_op,
+                    app.receipt_op_label(),
                 )
             } else {
                 StatusRow::plain(None)

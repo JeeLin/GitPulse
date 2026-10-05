@@ -16,19 +16,26 @@ pub enum PlatformKind {
     SelfHosted,
 }
 
+/// The SaaS hosts and the platform each one owns.
+const SAAS_HOSTS: [(&str, PlatformKind); 3] = [
+    ("github.com", PlatformKind::GitHub),
+    ("gitlab.com", PlatformKind::GitLab),
+    ("gitea.com", PlatformKind::Gitea),
+];
+
 impl PlatformKind {
     /// Classify a bare host into a platform kind.
     ///
     /// `github.com`, `gitlab.com`, `gitea.com` map to their owned variants;
     /// any other host (e.g. `git.example.com`) is [`SelfHosted`]. The host must
-    /// be port-free (see [`parse_remote`]).
+    /// be port-free (see [`parse_remote`]) and is compared case-insensitively
+    /// (DNS is), so a `GitHub.com` remote is not misread as self-hosted — which
+    /// would tell the user their platform is unsupported.
     pub fn from_host(host: &str) -> Self {
-        match host {
-            "github.com" => PlatformKind::GitHub,
-            "gitlab.com" => PlatformKind::GitLab,
-            "gitea.com" => PlatformKind::Gitea,
-            _ => PlatformKind::SelfHosted,
-        }
+        SAAS_HOSTS
+            .iter()
+            .find(|(known, _)| host.eq_ignore_ascii_case(known))
+            .map_or(PlatformKind::SelfHosted, |(_, kind)| *kind)
     }
 
     /// Human-readable platform label (used in errors / UI).
@@ -38,6 +45,30 @@ impl PlatformKind {
             PlatformKind::GitLab => "GitLab",
             PlatformKind::Gitea => "Gitea",
             PlatformKind::SelfHosted => "SelfHosted",
+        }
+    }
+
+    /// The environment variable (or neutral credential name) that carries this
+    /// platform's token — the single source for every user-facing hint.
+    ///
+    /// Self-hosted instances have no registered env var, so the neutral wording
+    /// used by the disconnected copy (`配置访问令牌后按 r 重试`) is returned.
+    pub const fn token_var(self) -> &'static str {
+        match self {
+            PlatformKind::GitHub => "GITHUB_TOKEN",
+            PlatformKind::GitLab => "GITLAB_TOKEN",
+            PlatformKind::Gitea => "GITEA_TOKEN",
+            PlatformKind::SelfHosted => "访问令牌",
+        }
+    }
+
+    /// The CLI whose `auth token` subcommand resolves this platform's token;
+    /// `""` when the platform has no standard token CLI (Gitea, self-hosted).
+    pub const fn cli_hint(self) -> &'static str {
+        match self {
+            PlatformKind::GitHub => "gh",
+            PlatformKind::GitLab => "glab",
+            PlatformKind::Gitea | PlatformKind::SelfHosted => "",
         }
     }
 }
@@ -80,17 +111,20 @@ impl PlatformRemote {
 /// Parse a git remote URL into a [`PlatformRemote`].
 ///
 /// Supports `https://`, `http://`, `ssh://`, `git://`, and the scp-like
-/// `git@host:owner/repo` forms for github.com, gitlab.com, gitea.com, and
+/// `[user@]host:owner/repo` forms for github.com, gitlab.com, gitea.com, and
 /// arbitrary self-hosted hosts. The scheme and port are preserved (the REST
 /// origin is rebuilt via [`PlatformRemote::api_base`]); only `ssh://`, `git://`
 /// and the scp-like form fall back to `https`, since those protocols cannot
 /// carry REST traffic.
 pub fn parse_remote(url: &str) -> Result<PlatformRemote, PlatformError> {
-    let trimmed = url.trim().trim_end_matches(".git").trim();
+    let trimmed = url.trim();
     let (scheme, host_port, path) = strip_scheme(trimmed)
         .ok_or_else(|| PlatformError::NotPlatform(format!("远端地址格式不正确：{url}")))?;
     let (host, port) = split_host_port(host_port);
     let path = path.trim_matches('/');
+    // A trailing slash hides the `.git` suffix from a `trim_end_matches` on the
+    // whole URL (`…/repo.git/`), so it is stripped from the last path segment.
+    let path = path.strip_suffix(".git").unwrap_or(path);
     let (owner, repo) = split_namespace(path)?;
     Ok(PlatformRemote {
         kind: PlatformKind::from_host(host),
@@ -106,12 +140,11 @@ pub fn parse_remote(url: &str) -> Result<PlatformRemote, PlatformError> {
 /// Strip a known scheme prefix, returning `(scheme, host[:port], path)`.
 ///
 /// Handles `ssh://`, `git://`, `https://`, `http://` (with optional `user@`)
-/// and the scp-like `git@host:` form. The three non-HTTP forms report `https`
-/// because the REST API is reached over HTTP(S), never over SSH/git.
+/// and the scp-like `[user@]host:path` form. The three non-HTTP forms report
+/// `https` because the REST API is reached over HTTP(S), never over SSH/git.
 fn strip_scheme(s: &str) -> Option<(&'static str, &str, &str)> {
-    if let Some(rest) = s.strip_prefix("git@") {
-        // scp-like: git@github.com:owner/repo
-        return rest.split_once(':').map(|(h, p)| ("https", h, p));
+    if let Some((host, path)) = split_scp_like(s) {
+        return Some(("https", host, path));
     }
     let (scheme, rest) = if let Some(rest) = s.strip_prefix("https://") {
         ("https", strip_user(rest))
@@ -126,6 +159,24 @@ fn strip_scheme(s: &str) -> Option<(&'static str, &str, &str)> {
         ("https", strip_user(rest))
     };
     rest.split_once('/').map(|(h, p)| (scheme, h, p))
+}
+
+/// Split the scp-like `[user@]host:path` form, or `None` when `s` is not one.
+///
+/// Any username is accepted (`git@`, `jane@`, …) because the clone remote is
+/// not always the platform's canonical one. A URL carrying userinfo
+/// (`https://user@host/…`) keeps its `/` in the user segment and is therefore
+/// rejected here, so it still reaches the scheme arms.
+fn split_scp_like(s: &str) -> Option<(&str, &str)> {
+    let (user, rest) = s.split_once('@')?;
+    if user.is_empty() || user.contains('/') {
+        return None;
+    }
+    let (host, path) = rest.split_once(':')?;
+    if host.is_empty() || host.contains('/') {
+        return None;
+    }
+    Some((host, path))
 }
 
 /// Drop the `user@` userinfo prefix from a `host[/path…]`-style remainder.
@@ -194,6 +245,47 @@ mod tests {
     }
 
     #[test]
+    fn from_host_ignores_host_case() {
+        // DNS is case-insensitive, so a mixed-case remote must not be reported
+        // as an unsupported self-hosted platform.
+        assert_eq!(PlatformKind::from_host("GitHub.com"), PlatformKind::GitHub);
+        assert_eq!(PlatformKind::from_host("GitLab.COM"), PlatformKind::GitLab);
+        assert_eq!(PlatformKind::from_host("GITEA.com"), PlatformKind::Gitea);
+        // Case-insensitivity must not widen the SaaS list.
+        assert_eq!(
+            PlatformKind::from_host("Git.Example.COM"),
+            PlatformKind::SelfHosted
+        );
+    }
+
+    #[test]
+    fn token_var_per_platform() {
+        assert_eq!(PlatformKind::GitHub.token_var(), "GITHUB_TOKEN");
+        assert_eq!(PlatformKind::GitLab.token_var(), "GITLAB_TOKEN");
+        assert_eq!(PlatformKind::Gitea.token_var(), "GITEA_TOKEN");
+        // Self-hosted has no registered env var: the copy stays neutral.
+        assert_eq!(PlatformKind::SelfHosted.token_var(), "访问令牌");
+    }
+
+    #[test]
+    fn cli_hint_per_platform() {
+        assert_eq!(PlatformKind::GitHub.cli_hint(), "gh");
+        assert_eq!(PlatformKind::GitLab.cli_hint(), "glab");
+        // No standard token CLI for Gitea or self-hosted.
+        assert_eq!(PlatformKind::Gitea.cli_hint(), "");
+        assert_eq!(PlatformKind::SelfHosted.cli_hint(), "");
+    }
+
+    #[test]
+    fn credential_hints_are_const_usable() {
+        // `const` usable: callers bind their hints to a `const` per platform.
+        const TOKEN_VAR: &str = PlatformKind::GitLab.token_var();
+        const CLI_HINT: &str = PlatformKind::GitLab.cli_hint();
+        assert_eq!(TOKEN_VAR, "GITLAB_TOKEN");
+        assert_eq!(CLI_HINT, "glab");
+    }
+
+    #[test]
     fn as_str_labels() {
         assert_eq!(PlatformKind::GitHub.as_str(), "GitHub");
         assert_eq!(PlatformKind::GitLab.as_str(), "GitLab");
@@ -228,6 +320,46 @@ mod tests {
         // ssh remotes still talk to the HTTPS REST API.
         assert_eq!(r.scheme, "https");
         assert_eq!(r.api_base("v3"), "https://github.com/api/v3");
+    }
+
+    #[test]
+    fn parses_scp_with_a_non_git_user_and_mixed_case_host() {
+        // The clone remote is not always the platform's canonical one, and a
+        // mixed-case host must still classify as its platform.
+        let r = parse_remote("Git@GitHub.com:o/r").unwrap();
+        assert_eq!(r.kind, PlatformKind::GitHub);
+        assert_eq!(r.host, "GitHub.com");
+        assert_eq!(r.owner, "o");
+        assert_eq!(r.repo, "r");
+        assert_eq!(r.path, "o/r");
+        assert_eq!(r.scheme, "https");
+
+        let r = parse_remote("user@gitlab.com:g/p").unwrap();
+        assert_eq!(r.kind, PlatformKind::GitLab);
+        assert_eq!(r.host, "gitlab.com");
+        assert_eq!(r.owner, "g");
+        assert_eq!(r.repo, "p");
+        assert_eq!(r.path, "g/p");
+    }
+
+    #[test]
+    fn strip_git_suffix_survives_a_trailing_slash() {
+        // `…/repo.git/` hides the suffix from a `trim_end_matches` on the raw
+        // URL; the last path segment must still be normalized.
+        let r = parse_remote("https://github.com/o/r.git/").unwrap();
+        assert_eq!(r.kind, PlatformKind::GitHub);
+        assert_eq!(r.repo, "r");
+        assert_eq!(r.owner, "o");
+        assert_eq!(r.path, "o/r");
+
+        let r = parse_remote("git@github.com:o/r.git/").unwrap();
+        assert_eq!(r.repo, "r");
+        assert_eq!(r.path, "o/r");
+
+        // Without a `.git` suffix the trailing slash is still harmless.
+        let r = parse_remote("https://gitea.com/owner/repo/").unwrap();
+        assert_eq!(r.repo, "repo");
+        assert_eq!(r.path, "owner/repo");
     }
 
     #[test]
@@ -323,6 +455,30 @@ mod tests {
             parse_remote("https://github.com/"),
             Err(PlatformError::NotPlatform(_))
         ));
+    }
+
+    #[test]
+    fn split_scp_like_rejects_urls_that_carry_userinfo() {
+        // `https://user@host/…` is a scheme URL, not an scp-like remote: the
+        // `/` in the user segment keeps it out of the scp arm.
+        assert_eq!(
+            strip_scheme("https://user@github.com/owner/repo"),
+            Some(("https", "github.com", "owner/repo"))
+        );
+        assert_eq!(
+            strip_scheme("ssh://git@github.com/owner/repo"),
+            Some(("https", "github.com", "owner/repo"))
+        );
+        assert_eq!(
+            strip_scheme("git@github.com:owner/repo"),
+            Some(("https", "github.com", "owner/repo"))
+        );
+        // No `@`, or no `:` after it: not an scp-like form.
+        assert_eq!(split_scp_like("github.com:owner/repo"), None);
+        assert_eq!(split_scp_like("user@github.com"), None);
+        // Empty user / empty host.
+        assert_eq!(split_scp_like("@github.com:o/r"), None);
+        assert_eq!(split_scp_like("user@:o/r"), None);
     }
 
     #[test]

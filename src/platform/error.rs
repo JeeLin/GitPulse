@@ -76,18 +76,45 @@ impl From<GithubError> for PlatformError {
 
 /// Actionable 401 message for `platform`.
 ///
-/// Labels come from [`PlatformKind::as_str`], so the hint names the exact token
-/// source the user should check on that platform.
+/// The credential names come from [`PlatformKind::token_var`] /
+/// [`PlatformKind::cli_hint`] — the single source every platform hint shares —
+/// resolved from the platform label ([`PlatformKind::as_str`]). An empty
+/// `cli_hint` means the platform has no token CLI, so only the env var is
+/// named; an unknown label and self-hosted keep the neutral wording (no host
+/// owns a token var there) and never panic.
 fn token_hint(platform: &str) -> String {
-    if platform == PlatformKind::GitHub.as_str() {
-        format!("{platform} 认证失败，请检查 GITHUB_TOKEN 或 gh auth token")
-    } else if platform == PlatformKind::GitLab.as_str() {
-        format!("{platform} 认证失败，请检查 GITLAB_TOKEN 或 glab auth token")
-    } else if platform == PlatformKind::Gitea.as_str() {
-        format!("{platform} 认证失败，请检查 GITEA_TOKEN")
-    } else {
-        format!("{platform} 认证失败，请检查令牌")
+    use crate::platform::PlatformKind;
+    let Some(kind) = kind_from_label(platform) else {
+        return format!("{platform} 认证失败，请检查令牌");
+    };
+    if kind == PlatformKind::SelfHosted {
+        return format!("{platform} 认证失败，请检查令牌");
     }
+    let cli = kind.cli_hint();
+    if cli.is_empty() {
+        format!("{platform} 认证失败，请检查 {}", kind.token_var())
+    } else {
+        format!(
+            "{platform} 认证失败，请检查 {} 或 {cli} auth token",
+            kind.token_var()
+        )
+    }
+}
+
+/// Resolve a platform label back to its [`PlatformKind`].
+///
+/// `PlatformError::Http`/`Other` carry a `&'static str` label, so the reverse
+/// lookup keeps the token hint in step with [`PlatformKind`] instead of
+/// re-deriving the platform from a duplicated literal.
+fn kind_from_label(label: &str) -> Option<PlatformKind> {
+    [
+        PlatformKind::GitHub,
+        PlatformKind::GitLab,
+        PlatformKind::Gitea,
+        PlatformKind::SelfHosted,
+    ]
+    .into_iter()
+    .find(|kind| kind.as_str() == label)
 }
 
 /// Render a platform error as a short, user-facing line.

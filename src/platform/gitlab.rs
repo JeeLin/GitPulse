@@ -207,7 +207,9 @@ impl PlatformClient for GitLabClient {
         // user's todo list. Follow the `x-next-page` cursor for at most
         // MAX_TODO_PAGES hops (so the panel never stalls) and filter to this
         // project client-side, comparing against the remote's full
-        // `group/sub/repo` path.
+        // `group/sub/repo` path. The comparison ignores ASCII case: GitLab
+        // answers `path_with_namespace` in the project's own casing, which need
+        // not match the remote URL's.
         let full = self.remote.path.clone();
         let mut items: Vec<NotificationSummary> = Vec::new();
         let mut page = Some(1u32);
@@ -229,7 +231,10 @@ impl PlatformClient for GitLabClient {
                 .and_then(|v| v.parse::<u32>().ok())
                 .filter(|&next| next > current);
         }
-        Ok(items.into_iter().filter(|n| n.repo == full).collect())
+        Ok(items
+            .into_iter()
+            .filter(|n| n.repo.eq_ignore_ascii_case(&full))
+            .collect())
     }
 }
 
@@ -239,13 +244,23 @@ impl PlatformClient for GitLabClient {
 
 /// Map GitLab `detailed_merge_status` to `Option<bool>`.
 ///
-/// `mergeable` / `ready` → `Some(true)`; `blocked` / `conflict` / `cannot_be_merged`
-/// → `Some(false)`; anything else (e.g. `unchecked`, `checking`) → `None` (not
-/// computed yet).
+/// `mergeable` / `can_be_merged` → `Some(true)`; every documented blocking
+/// state (conflicts, CI, unresolved discussions, rebase needed, draft) →
+/// `Some(false)` so the UI reports "blocked", not "unknown"; anything not yet
+/// documented (e.g. `unchecked`, `checking`, `not_open`, `preparing`) → `None`
+/// (no verdict yet).
 fn map_merge_status(status: Option<&str>) -> Option<bool> {
     match status {
-        Some("mergeable" | "ready" | "can_be_merged") => Some(true),
-        Some("cannot_be_merged" | "blocked" | "conflict" | "not_fast_forward") => Some(false),
+        Some("mergeable" | "can_be_merged") => Some(true),
+        Some(
+            "cannot_be_merged"
+            | "blocked"
+            | "conflict"
+            | "ci_must_pass"
+            | "discussions_not_resolved"
+            | "need_rebase"
+            | "draft_status",
+        ) => Some(false),
         _ => None,
     }
 }
@@ -297,18 +312,21 @@ fn pipeline_name(v: &Value) -> String {
 
 fn pipeline_to_check(v: &Value) -> CheckSummary {
     let raw = v["status"].as_str().unwrap_or("");
+    // RESEARCH §2.8: all 13 documented statuses must map; in-flight work shares
+    // GitHub's `in_progress` shape, `canceling` is the cancelled verdict in
+    // flight, and undocumented values fall back to unknown/unknown.
     let (status, conclusion) = match raw {
-        "pending"
-        | "running"
-        | "created"
-        | "waiting_for_manual"
+        "created"
         | "waiting_for_resource"
+        | "preparing"
+        | "pending"
+        | "running"
         | "manual"
         | "scheduled"
-        | "blocked" => ("in_progress".to_string(), "unknown".to_string()),
+        | "waiting_for_callback" => ("in_progress".to_string(), "unknown".to_string()),
         "success" => ("completed".to_string(), "success".to_string()),
         "failed" => ("completed".to_string(), "failure".to_string()),
-        "canceled" => ("completed".to_string(), "cancelled".to_string()),
+        "canceled" | "canceling" => ("completed".to_string(), "cancelled".to_string()),
         "skipped" => ("completed".to_string(), "skipped".to_string()),
         _ => ("unknown".to_string(), "unknown".to_string()),
     };
@@ -569,7 +587,7 @@ mod tests {
 
     #[test]
     fn list_notifications_follows_the_cursor_up_to_the_page_cap() {
-        let origin = spawn_todo_server();
+        let origin = spawn_todo_server_for("group/repo");
         let mut remote = crate::platform::parse_remote("https://gitlab.com/group/repo").unwrap();
         remote.scheme = "http".to_string();
         remote.host = origin.trim_start_matches("http://").to_string();
@@ -594,11 +612,47 @@ mod tests {
         assert_eq!(notes[1].id, "2");
     }
 
+    /// GitLab answers `path_with_namespace` in the project's own casing, which
+    /// need not match the remote URL — `/todos` has no project-scoped endpoint,
+    /// so the client-side filter must compare case-insensitively or the panel
+    /// shows an empty list.
+    #[test]
+    fn list_notifications_matches_the_project_path_ignoring_case() {
+        let origin = spawn_todo_server_for("group/sub/repo");
+        let mut remote =
+            crate::platform::parse_remote("https://gitlab.com/Group/Sub/Repo").unwrap();
+        remote.scheme = "http".to_string();
+        remote.host = origin.trim_start_matches("http://").to_string();
+        remote.port = None;
+        assert_eq!(remote.path, "Group/Sub/Repo");
+        let client = GitLabClient {
+            http: cached_client(PLATFORM, &remote.host).expect("client"),
+            token: SecretString::new("t".to_string().into_boxed_str()),
+            base_url: origin,
+            project_id: encode_project_id(&remote.path),
+            remote,
+        };
+
+        let notes = block_on(client.list_notifications()).expect("todos");
+        assert_eq!(
+            notes.len(),
+            MAX_TODO_PAGES as usize,
+            "a case-differing project path must not drop every todo"
+        );
+        assert!(
+            notes.iter().all(|n| n.repo == "group/sub/repo"),
+            "the lowercase project path must survive the filter"
+        );
+    }
+
     /// Serves `/todos` pages 1..=8 (each advertising a next page) so the client
-    /// must stop at [`MAX_TODO_PAGES`].
-    fn spawn_todo_server() -> String {
+    /// must stop at [`MAX_TODO_PAGES`]. Every page holds one todo for `project`
+    /// plus one for another project, so a repo leak or a page drop is visible in
+    /// the counts.
+    fn spawn_todo_server_for(project: &str) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind localhost");
         let addr = listener.local_addr().expect("local addr");
+        let project = project.to_string();
         std::thread::spawn(move || {
             for page in 1..=8u32 {
                 let Ok((mut sock, _)) = listener.accept() else {
@@ -609,7 +663,8 @@ mod tests {
                 let body = format!(
                     r#"[{{"id":{page},"project":{{"path_with_namespace":"group/repo"}},"action_name":"assigned","target_type":"Issue","target":{{"title":"t{page}"}},"state":"pending","updated_at":"2024-01-01T00:00:00Z"}},{{"id":{other},"project":{{"path_with_namespace":"other/repo"}},"action_name":"assigned","target_type":"Issue","target":{{"title":"x"}},"state":"pending","updated_at":"2024-01-01T00:00:00Z"}}]"#,
                     other = page * 100
-                );
+                )
+                .replace("group/repo", &project);
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nx-next-page: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     page + 1,
@@ -659,6 +714,68 @@ mod tests {
         assert_eq!(c.conclusion, "unknown");
     }
 
+    /// Every pipeline `status` GitLab documents (RESEARCH §2.8) must reach a
+    /// real status/conclusion pair — a missing one renders as `unknown`.
+    #[test]
+    fn pipeline_to_check_covers_every_documented_status() {
+        for status in [
+            "created",
+            "waiting_for_resource",
+            "preparing",
+            "pending",
+            "running",
+            "success",
+            "failed",
+            "canceled",
+            "canceling",
+            "skipped",
+            "manual",
+            "scheduled",
+            "waiting_for_callback",
+        ] {
+            let c = pipeline_to_check(&json!({ "id": 1u64, "status": status }));
+            assert!(
+                !(c.status == "unknown" && c.conclusion == "unknown"),
+                "{status} fell through to unknown/unknown"
+            );
+        }
+        // Undocumented / missing values stay on the defensive fallback.
+        let c = pipeline_to_check(&json!({ "id": 1u64, "status": "wat" }));
+        assert_eq!(
+            (c.status.as_str(), c.conclusion.as_str()),
+            ("unknown", "unknown")
+        );
+        let c = pipeline_to_check(&json!({ "id": 1u64 }));
+        assert_eq!(
+            (c.status.as_str(), c.conclusion.as_str()),
+            ("unknown", "unknown")
+        );
+    }
+
+    #[test]
+    fn pipeline_to_check_maps_the_remaining_verdicts() {
+        for status in ["preparing", "waiting_for_callback"] {
+            let c = pipeline_to_check(&json!({ "id": 1u64, "status": status }));
+            assert_eq!(c.status, "in_progress", "{status}");
+            assert_eq!(c.conclusion, "unknown", "{status}");
+        }
+        // `canceling` is the cancelled verdict already in flight.
+        let c = pipeline_to_check(&json!({ "id": 1u64, "status": "canceling" }));
+        assert_eq!(c.status, "completed");
+        assert_eq!(c.conclusion, "cancelled");
+        // Same conclusion as the settled `canceled`.
+        assert_eq!(
+            pipeline_to_check(&json!({ "id": 1u64, "status": "canceled" })).conclusion,
+            c.conclusion
+        );
+        let c = pipeline_to_check(&json!({ "id": 1u64, "status": "skipped" }));
+        assert_eq!(c.status, "completed");
+        assert_eq!(c.conclusion, "skipped");
+        let c = pipeline_to_check(&json!({ "id": 1u64, "status": "failed" }));
+        assert_eq!(c.status, "completed");
+        assert_eq!(c.conclusion, "failure");
+    }
+
     #[test]
     fn pipeline_to_check_failed() {
         let v = json!({ "id": 7u64, "status": "failed", "source": "web", "web_url": "" });
@@ -683,14 +800,27 @@ mod tests {
 
     #[test]
     fn map_merge_status_variants() {
-        assert_eq!(map_merge_status(Some("mergeable")), Some(true));
-        assert_eq!(map_merge_status(Some("ready")), Some(true));
-        assert_eq!(map_merge_status(Some("can_be_merged")), Some(true));
-        assert_eq!(map_merge_status(Some("cannot_be_merged")), Some(false));
-        assert_eq!(map_merge_status(Some("blocked")), Some(false));
-        assert_eq!(map_merge_status(Some("conflict")), Some(false));
-        assert_eq!(map_merge_status(Some("unchecked")), None);
-        assert_eq!(map_merge_status(Some("checking")), None);
+        // The mergeable family (RESEARCH §2.4 `merge_status` / §2.4
+        // `detailed_merge_status`).
+        for status in ["mergeable", "can_be_merged"] {
+            assert_eq!(map_merge_status(Some(status)), Some(true), "{status}");
+        }
+        // Every documented blocking state is "cannot merge", not "unknown".
+        for status in [
+            "cannot_be_merged",
+            "blocked",
+            "conflict",
+            "ci_must_pass",
+            "discussions_not_resolved",
+            "need_rebase",
+            "draft_status",
+        ] {
+            assert_eq!(map_merge_status(Some(status)), Some(false), "{status}");
+        }
+        // No verdict computed yet.
+        for status in ["unchecked", "checking", "not_open", "preparing"] {
+            assert_eq!(map_merge_status(Some(status)), None, "{status}");
+        }
         assert_eq!(map_merge_status(None), None);
     }
 

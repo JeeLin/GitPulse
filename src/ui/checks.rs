@@ -23,7 +23,7 @@ const EMPTY_CHECKS: &str = "—（暂无检查记录）";
 pub fn render_checks(f: &mut Frame, content: Rect, app: &App) {
     let area = content;
     let chunks = panel_chunks(area);
-    if app.github_state.client.is_none() {
+    if !app.github_state.connected() {
         render_disconnected(f, chunks[0], "CI 检查", app.github_state.kind(), app);
         render_footer(f, chunks[1], chunks[2], app, false);
         return;

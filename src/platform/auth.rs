@@ -91,13 +91,15 @@ pub(crate) fn pick_token(
 
 /// Resolve the env-var name + label used in user-facing messages.
 ///
-/// `None` marks a kind this module does not own: GitHub is resolved by
-/// [`crate::github::auth`], self-hosted is rejected by
+/// The env-var name comes from [`PlatformKind::token_var`], the single source
+/// the UI hints share. `None` marks a kind this module does not own: GitHub is
+/// resolved by [`crate::github::auth`], self-hosted is rejected by
 /// [`crate::platform::build_client`].
 fn env_info(kind: PlatformKind) -> Option<(String, String)> {
     match kind {
-        PlatformKind::GitLab => Some((PlatformKind::GitLab.as_str().into(), "GITLAB_TOKEN".into())),
-        PlatformKind::Gitea => Some((PlatformKind::Gitea.as_str().into(), "GITEA_TOKEN".into())),
+        PlatformKind::GitLab | PlatformKind::Gitea => {
+            Some((kind.as_str().into(), kind.token_var().into()))
+        }
         PlatformKind::GitHub | PlatformKind::SelfHosted => None,
     }
 }
@@ -114,13 +116,13 @@ fn cli_name(kind: PlatformKind) -> &'static str {
 
 /// Read the env-var token for `kind`.
 ///
-/// Only the platform's own family var is consulted (`GITLAB_TOKEN` /
-/// `GITEA_TOKEN`). Kinds this module does not own yield `None`; [`pick_token`]
-/// turns that into a guided error.
+/// Only the platform's own family var is consulted ([`PlatformKind::token_var`]
+/// — `GITLAB_TOKEN` / `GITEA_TOKEN`); the per-host env families
+/// (`GITLAB_*`, `GITEA_*`) are intentionally not consulted. Kinds this module
+/// does not own yield `None`; [`pick_token`] turns that into a guided error.
 fn env_token(kind: PlatformKind) -> Option<String> {
     let name = match kind {
-        PlatformKind::GitLab => "GITLAB_TOKEN",
-        PlatformKind::Gitea => "GITEA_TOKEN",
+        PlatformKind::GitLab | PlatformKind::Gitea => kind.token_var(),
         PlatformKind::GitHub | PlatformKind::SelfHosted => return None,
     };
     match std::env::var(name) {

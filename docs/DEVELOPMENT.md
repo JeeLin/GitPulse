@@ -110,10 +110,10 @@ next 分支为孤儿分支重写，旧版 v0.1-v0.7 实现归档于 master，因
 - **状态**：🟨 进行中
 - **进展**（v0.6.0，详见 `.mdflow/milestones/v0.6.0-多平台适配.md` 子任务 1–9）：
   - ✅ 子任务 1 平台适配层抽象：`src/platform/` 统一 `PlatformClient` 接口（GitHub / Gitea / GitLab），回执视图（PR / CI / Issue / 通知）按 `remote` 渲染平台标签与凭据提示，不再硬编码 GitHub。
-  - ✅ 子任务 2 token 按 remote URL 匹配：`src/platform/auth.rs` 依据 host 解析 `GITHUB_TOKEN` / `GITLAB_TOKEN` / `GITEA_TOKEN`，GitHub 另有 `gh` 登录兜底、GitLab 有 `glab` 登录兜底。
+  - ✅ 子任务 2 token 按 remote URL 匹配：`src/platform/auth.rs` 依据 host 解析 `GITLAB_TOKEN` / `GITEA_TOKEN`（GitHub 在该模块被显式拒绝，由 `src/github/auth.rs` 解析 `GITHUB_TOKEN` 并有 `gh` 登录兜底，GitLab 有 `glab` 登录兜底）。
   - ✅ 自托管路由与 API 契约缺陷修复（审查项）：`build_client` 拒绝未适配的自托管 host 并返回可读原因，回执面板按平台渲染断连提示。
 - **剩余项**：
   - 🟨 自托管实例（`SelfHosted` host）暂不支持——尚无已知 API family，需先补齐其契约与路由。
   - ⬜ 子任务 3 项目级切换用户（按仓库查看/切换提交身份）。
   - ⬜ 子任务 4 worktree、子任务 5 分组（均待评估）。
-  - 🟨 多平台适配审查修复进行中。
+  - ⬜ UI 文案 i18n：文案层 key 化 + 语言参数预留（先只提供中文），见 `.mdflow/milestones/v0.6.0-多平台适配.md` 沉淀台账。
