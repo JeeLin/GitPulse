@@ -2538,11 +2538,22 @@ impl App {
             View::Config => self.leave_config(),
             View::History => self.leave_history(),
             View::Tags => self.leave_tags(),
+            // Both detail arms drop the in-flight fetch on the way back, the
+            // same way `switch_github_tab` does when a tab key does it: a detail
+            // fetch lands in `github_state.detail` and never refreshes the list
+            // the user just returned to, so keeping it would leave stale rows
+            // under a green 「成功」 that names an abandoned request. `Esc` and
+            // the tab key are two doors onto one intent, so they answer alike.
             View::PullDetail => {
+                self.github_rx = None;
                 self.view = View::Pulls;
                 self.github_state.tab = GithubTab::Pulls;
             }
-            View::IssueDetail => self.view = View::Issues,
+            View::IssueDetail => {
+                self.github_rx = None;
+                self.view = View::Issues;
+                self.github_state.tab = GithubTab::Issues;
+            }
             View::Pulls | View::Checks | View::Issues | View::Notifications => {
                 self.view = View::Repo;
                 self.leave_receipt_domain();
@@ -4224,6 +4235,34 @@ mod tests {
             app.github_rx.is_none(),
             "the detail fetch has no list rows to land"
         );
+    }
+
+    /// `Esc` out of a detail is a second door onto the same intent as the tab
+    /// key, so it drops the detail's in-flight fetch too: keeping it would land
+    /// a `GithubMsg::Detail` result in a field the list never renders, leaving
+    /// stale rows under a green 「成功」 that names an abandoned request.
+    #[test]
+    fn esc_out_of_a_detail_drops_the_details_fetch_too() {
+        for (view, tab, list) in [
+            (View::PullDetail, GithubTab::Pulls, View::Pulls),
+            (View::IssueDetail, GithubTab::Issues, View::Issues),
+        ] {
+            let mut app = App::new(Config::default());
+            app.view = view;
+            app.github_state.tab = tab;
+            let (_tx, rx) = mpsc::unbounded_channel::<GithubMsg>();
+            app.github_rx = Some(rx);
+            assert!(app.dispatch_key(key(KeyCode::Esc)));
+            assert_eq!(app.view, list, "{view:?} returns to its own list");
+            assert_eq!(
+                app.github_state.tab, tab,
+                "{view:?} returns to the tab that owns it"
+            );
+            assert!(
+                app.github_rx.is_none(),
+                "the detail fetch has no list rows to land"
+            );
+        }
     }
 
     /// B1: entering the hub drops every receipt the previous repository left
