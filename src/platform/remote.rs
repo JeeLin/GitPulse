@@ -48,17 +48,19 @@ impl PlatformKind {
         }
     }
 
-    /// The environment variable (or neutral credential name) that carries this
-    /// platform's token — the single source for every user-facing hint.
+    /// The environment variable that carries this platform's token — the single
+    /// source for every user-facing hint.
     ///
-    /// Self-hosted instances have no registered env var, so the neutral wording
-    /// used by the disconnected copy (`配置访问令牌后按 r 重试`) is returned.
+    /// `""` when the platform registers no env var (self-hosted): callers must
+    /// fall back to neutral wording rather than name a variable that does not
+    /// exist. Returning an empty string keeps the absence explicit instead of
+    /// parking a copy-only value here that no reader would ever consume.
     pub const fn token_var(self) -> &'static str {
         match self {
             PlatformKind::GitHub => "GITHUB_TOKEN",
             PlatformKind::GitLab => "GITLAB_TOKEN",
             PlatformKind::Gitea => "GITEA_TOKEN",
-            PlatformKind::SelfHosted => "访问令牌",
+            PlatformKind::SelfHosted => "",
         }
     }
 
@@ -263,8 +265,9 @@ mod tests {
         assert_eq!(PlatformKind::GitHub.token_var(), "GITHUB_TOKEN");
         assert_eq!(PlatformKind::GitLab.token_var(), "GITLAB_TOKEN");
         assert_eq!(PlatformKind::Gitea.token_var(), "GITEA_TOKEN");
-        // Self-hosted has no registered env var: the copy stays neutral.
-        assert_eq!(PlatformKind::SelfHosted.token_var(), "访问令牌");
+        // Self-hosted registers no env var, so the absence is explicit and
+        // callers fall back to neutral wording.
+        assert_eq!(PlatformKind::SelfHosted.token_var(), "");
     }
 
     #[test]

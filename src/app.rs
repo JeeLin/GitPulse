@@ -77,6 +77,25 @@ pub(crate) const SCREENS: [View; 14] = [
     View::Notifications,
 ];
 
+impl View {
+    /// Receipt screens — the platform hub and the two detail screens it opens.
+    ///
+    /// The hub owns feedback ([`App::remote_status`] plus
+    /// [`App::receipt_op`]) that only makes sense there, so every view switch
+    /// out of one has to drop it through [`App::leave_receipt_domain`] (B2).
+    pub(crate) fn is_receipt(self) -> bool {
+        matches!(
+            self,
+            View::Pulls
+                | View::PullDetail
+                | View::Checks
+                | View::Issues
+                | View::IssueDetail
+                | View::Notifications
+        )
+    }
+}
+
 /// Active tab within the GitHub receipts hub (`p`/`c`/`i`/`n`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GithubTab {
@@ -622,6 +641,24 @@ impl App {
         }
     }
 
+    fn leave_receipt_domain(&mut self) {
+        // The receipt feedback belongs to the hub: `github 成功` / `gitlab 成功`
+        // on the repo view's status row reads as a push or pull the repo never
+        // ran, and an empty op would render as `操作完成` — an operation the
+        // user never started. A push still in flight keeps its own feedback
+        // (G3), which `clear_finished_push_feedback` already guards.
+        self.clear_finished_push_feedback();
+        self.receipt_op = "";
+        // A fetch still in flight would settle *after* this point and paint its
+        // verdict onto a view the user already left — `poll_github` keeps
+        // draining the receiver every frame, so the feedback would reappear on
+        // the repo status row with no op to name it. Dropping the receiver
+        // disarms the task: its late result goes to a channel nobody reads.
+        // Re-entering the hub refetches (`enter_github` resets the state), so
+        // nothing is lost that the user could still act on.
+        self.github_rx = None;
+    }
+
     fn clear_finished_push_feedback(&mut self) {
         if self.remote_rx.is_none() {
             self.remote_status = None;
@@ -1062,6 +1099,12 @@ impl App {
 
     /// Switch the active receipts tab and refresh its list.
     fn switch_github_tab(&mut self, tab: GithubTab) -> bool {
+        // A fetch in flight was armed for the *previous* tab, so its result
+        // describes rows the user is no longer looking at. Dropping the
+        // receiver here lets the new tab's fetch start instead of being
+        // refused by the in-flight guard, and stops the old tab's verdict from
+        // landing under the new tab's title.
+        self.github_rx = None;
         self.github_state.tab = tab;
         self.github_state.selected = 0;
         self.view = match tab {
@@ -2478,12 +2521,7 @@ impl App {
             View::IssueDetail => self.view = View::Issues,
             View::Pulls | View::Checks | View::Issues | View::Notifications => {
                 self.view = View::Repo;
-                // The receipt feedback belongs to the hub: `github 成功` /
-                // `gitlab 成功` on the repo view's status row reads as a push
-                // or pull the repo never ran, so a settled fetch is dropped
-                // here (a push still in flight keeps its own feedback, G3).
-                self.clear_finished_push_feedback();
-                self.receipt_op = "";
+                self.leave_receipt_domain();
             }
         }
     }
@@ -2685,10 +2723,14 @@ impl App {
         let Some(target) = targets.get(idx) else {
             return;
         };
+        let leaving_receipts = self.view.is_receipt();
         match target {
             PaletteTarget::View(view) => self.jump_to_view(*view),
             PaletteTarget::Repo(_) => self.view = View::Repo,
             PaletteTarget::Branch(_) => self.view = View::Branches,
+        }
+        if leaving_receipts && !self.view.is_receipt() {
+            self.leave_receipt_domain();
         }
         self.palette_open = false;
         self.help_open = false;
@@ -2698,8 +2740,14 @@ impl App {
     /// (DESIGN §6.11 "directly reset the stack"). Every panel tolerates an
     /// empty load, so landing on a screen with no data shows its empty state.
     fn jump_to_view(&mut self, view: View) {
+        // The palette is a second door out of the hub, so it drops the same
+        // feedback the `Esc` exit does (B2).
+        let leaving_receipts = self.view.is_receipt() && !view.is_receipt();
         self.view = view;
         self.clear_error();
+        if leaving_receipts {
+            self.leave_receipt_domain();
+        }
         match view {
             View::Dashboard => {
                 self.dashboard_state
@@ -4039,6 +4087,64 @@ mod tests {
             app.receipt_op_label(),
             app.remote_op,
             "falls back to push/pull"
+        );
+    }
+
+    /// B2: the command palette is a second door out of the hub, so jumping
+    /// away drops the receipt feedback the same way `Esc` does — otherwise the
+    /// repo status row renders `操作完成` for a fetch that never ran there.
+    #[test]
+    fn palette_jump_out_of_the_hub_drops_the_receipt_feedback() {
+        let mut app = App::new(Config::default());
+        app.view = View::Pulls;
+        app.receipt_op = "gitlab";
+        app.remote_status = Some(RemoteStatus::Success);
+        app.toggle_palette_overlay();
+        let idx = app
+            .palette_targets()
+            .iter()
+            .position(|t| matches!(t, PaletteTarget::View(View::Repo)))
+            .expect("the repo screen is a palette target");
+        app.palette_state.select(Some(idx));
+        assert!(app.dispatch_key(key(KeyCode::Enter)), "jump must not quit");
+        assert_eq!(app.view, View::Repo);
+        assert!(
+            app.remote_status.is_none(),
+            "the settled receipt feedback followed the user out of the hub"
+        );
+        assert_eq!(app.receipt_op_label(), "", "the platform slug leaked too");
+    }
+
+    /// Round-3 🟡1: leaving the hub disarms a fetch still in flight —
+    /// `poll_github` would otherwise drain its result every frame and repaint
+    /// `操作完成` onto a repo status row that never asked for it.
+    #[test]
+    fn leaving_the_hub_disarms_an_in_flight_receipt_fetch() {
+        let mut app = App::new(Config::default());
+        app.view = View::Pulls;
+        let (_tx, rx) = mpsc::unbounded_channel::<GithubMsg>();
+        app.github_rx = Some(rx);
+        app.dispatch_key(key(KeyCode::Esc));
+        assert_eq!(app.view, View::Repo, "the hub exits to the repo view");
+        assert!(
+            app.github_rx.is_none(),
+            "the in-flight fetch must not outlive the hub it was started for"
+        );
+    }
+
+    /// Round-3 🟡1: a tab switch arms a fetch for the *new* tab, so the old
+    /// tab's receiver must go first instead of refusing the new fetch or
+    /// landing its rows under the new tab's title.
+    #[test]
+    fn switching_tabs_disarms_the_previous_tabs_fetch() {
+        let mut app = App::new(Config::default());
+        let (_tx, rx) = mpsc::unbounded_channel::<GithubMsg>();
+        app.github_rx = Some(rx);
+        assert!(app.switch_github_tab(GithubTab::Checks), "switch succeeds");
+        assert_eq!(app.view, View::Checks);
+        assert!(
+            app.github_rx.is_none(),
+            "the old tab's fetch has nowhere to land now"
         );
     }
 

@@ -285,8 +285,8 @@ Query: `state` (`all`/`opened`/`closed`/`locked`/`merged`, default `all`),
 | `assignee` (deprecated) / `assignees[]` / `reviewers[]` | user | |
 | `source_branch` / `target_branch` | string | ✓ (`source`→head, `target`→base) |
 | `draft` (bool) | boolean | `work_in_progress` is the deprecated alias |
-| `merge_status` | string | `can_be_merged`/`cannot_be_merged`/`unchecked`/`checking` |
-| `detailed_merge_status` | string | `not_open`/`mergeable`/`conflict`/`preparing`/… |
+| `merge_status` | string | `unchecked`/`checking`/`can_be_merged`/`cannot_be_merged`/`cannot_be_merged_recheck`（**GitLab 15.6 起 deprecated**，改用 `detailed_merge_status`）|
+| `detailed_merge_status` | string | 全 24 值（官方 Merge requests API §Merge status 逐条列出）：`mergeable`（唯一可合并）·阻塞态 `not_open`/`conflict`/`ci_must_pass`/`ci_still_running`/`discussions_not_resolved`/`need_rebase`/`draft_status`/`not_approved`/`merge_request_blocked`/`commits_status`/`requested_changes`/`jira_association_missing`/`status_checks_must_pass`/`security_policy_pipeline_check`/`security_policy_violations`/`locked_paths`/`locked_lfs_files`/`title_regex`/`merge_time`/`approvals_syncing`·无结论态 `unchecked`/`checking`/`preparing`。**注意**：阻塞态真身是 `merge_request_blocked`；`blocked` 与 `blocked_status` 均**不是** REST 取值（后者是 GraphQL 枚举成员名）；`not_fast_forward`/`ready` 属 GitHub 说法 |
 | `sha`, `merge_commit_sha`, `squash_commit_sha` | string | `sha`=source HEAD |
 | `labels` | string[] | **array of strings, not objects** (differs from Gitea/GitHub!) |
 | `created_at`/`updated_at`/`merged_at`/`closed_at` | string | ISO-8601 |

@@ -244,22 +244,52 @@ impl PlatformClient for GitLabClient {
 
 /// Map GitLab `detailed_merge_status` to `Option<bool>`.
 ///
-/// `mergeable` / `can_be_merged` → `Some(true)`; every documented blocking
-/// state (conflicts, CI, unresolved discussions, rebase needed, draft) →
-/// `Some(false)` so the UI reports "blocked", not "unknown"; anything not yet
-/// documented (e.g. `unchecked`, `checking`, `not_open`, `preparing`) → `None`
-/// (no verdict yet).
+/// The value domain is the 24 states the GitLab Merge Requests API documents
+/// (`docs.gitlab.com/api/merge_requests/#merge-status`, mirrored in
+/// `docs/RESEARCH-gitea-gitlab-apis.md` §2.4):
+///
+/// - `mergeable` → `Some(true)` — the only "can be merged" verdict.
+/// - every documented blocking state → `Some(false)` so the UI reports
+///   "blocked" instead of the yellow "unknown": conflicts, CI (running or
+///   failed, plus external status checks and security policies), unresolved
+///   discussions, rebase needed, draft, approvals, code-owner / path locks,
+///   another MR blocking this one, an empty source branch, reviewer requests,
+///   a title that misses the project's regex, a pending merge time, a Jira
+///   issue that is not referenced yet, and an MR that is no longer open.
+///   `not_open` is a merge blocker rather than an absent verdict: a closed or
+///   merged MR cannot be merged.
+/// - `unchecked` / `checking` / `preparing` → `None`: GitLab has not computed
+///   a verdict yet, which is what the UI's "unknown" is for. Anything the API
+///   adds later also lands here instead of being reported as mergeable.
+///
+/// `can_be_merged` / `cannot_be_merged` belong to the deprecated `merge_status`
+/// field (GitLab 15.6) and are still tolerated, since older instances and the
+/// non-detailed field can still be observed through the same code path.
 fn map_merge_status(status: Option<&str>) -> Option<bool> {
     match status {
         Some("mergeable" | "can_be_merged") => Some(true),
         Some(
             "cannot_be_merged"
-            | "blocked"
             | "conflict"
             | "ci_must_pass"
+            | "ci_still_running"
             | "discussions_not_resolved"
             | "need_rebase"
-            | "draft_status",
+            | "draft_status"
+            | "not_approved"
+            | "merge_request_blocked"
+            | "commits_status"
+            | "requested_changes"
+            | "not_open"
+            | "jira_association_missing"
+            | "status_checks_must_pass"
+            | "security_policy_pipeline_check"
+            | "security_policy_violations"
+            | "locked_paths"
+            | "locked_lfs_files"
+            | "title_regex"
+            | "merge_time"
+            | "approvals_syncing",
         ) => Some(false),
         _ => None,
     }
@@ -800,25 +830,47 @@ mod tests {
 
     #[test]
     fn map_merge_status_variants() {
-        // The mergeable family (RESEARCH §2.4 `merge_status` / §2.4
-        // `detailed_merge_status`).
+        // The one mergeable verdict, plus the deprecated `merge_status` field
+        // value still tolerated on older instances.
         for status in ["mergeable", "can_be_merged"] {
             assert_eq!(map_merge_status(Some(status)), Some(true), "{status}");
         }
-        // Every documented blocking state is "cannot merge", not "unknown".
+        // Every documented blocking state is "cannot merge", not "unknown":
+        // the full list from RESEARCH §2.4 (`detailed_merge_status`, 24 values).
         for status in [
             "cannot_be_merged",
-            "blocked",
-            "conflict",
+            "approvals_syncing",
             "ci_must_pass",
+            "ci_still_running",
+            "commits_status",
+            "conflict",
             "discussions_not_resolved",
-            "need_rebase",
             "draft_status",
+            "jira_association_missing",
+            "locked_lfs_files",
+            "locked_paths",
+            "merge_request_blocked",
+            "merge_time",
+            "need_rebase",
+            "not_approved",
+            "not_open",
+            "requested_changes",
+            "security_policy_pipeline_check",
+            "security_policy_violations",
+            "status_checks_must_pass",
+            "title_regex",
         ] {
             assert_eq!(map_merge_status(Some(status)), Some(false), "{status}");
         }
-        // No verdict computed yet.
-        for status in ["unchecked", "checking", "not_open", "preparing"] {
+        // No verdict computed yet — the yellow "unknown" is for these.
+        for status in ["unchecked", "checking", "preparing"] {
+            assert_eq!(map_merge_status(Some(status)), None, "{status}");
+        }
+        // Not REST values at all: `blocked` / `blocked_status` never appear in
+        // `detailed_merge_status` (the real one is `merge_request_blocked`;
+        // `blocked_status` is a GraphQL enum member name), and an unknown future
+        // value must not read as mergeable.
+        for status in ["blocked", "blocked_status", "whatever"] {
             assert_eq!(map_merge_status(Some(status)), None, "{status}");
         }
         assert_eq!(map_merge_status(None), None);

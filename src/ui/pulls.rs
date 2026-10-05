@@ -143,20 +143,29 @@ pub(crate) fn disconnected_copy(kind: Option<crate::platform::PlatformKind>) -> 
         },
         None => DisconnectedCopy {
             title: "尚未连接平台",
-            hint: "配置访问令牌后按 r 重试".to_string(),
+            hint: NEUTRAL_HINT.to_string(),
         },
     }
 }
 
-/// Compose the retry hint from the platform's own token variable and CLI
-/// name. An empty `cli_hint()` means the platform has no auth CLI, so the
-/// hint names only the env var.
+/// Retry hint for a platform that owns no credential variable at all — the
+/// wording stays neutral because there is no env var or CLI to name.
+const NEUTRAL_HINT: &str = "配置访问令牌后按 r 重试";
+
+/// Compose the retry hint from the platform's own token variable and CLI name.
+///
+/// An empty [`token_var`](crate::platform::PlatformKind::token_var) means the
+/// platform registers no variable (self-hosted), so the neutral wording is used
+/// instead of naming one that does not exist; an empty
+/// [`cli_hint`](crate::platform::PlatformKind::cli_hint) means it has no auth
+/// CLI (Gitea), so only the variable is named.
 fn credential_hint(kind: crate::platform::PlatformKind) -> String {
+    let var = kind.token_var();
     let cli = kind.cli_hint();
-    if cli.is_empty() {
-        format!("配置 {} 后按 r 重试", kind.token_var())
-    } else {
-        format!("配置 {} 或 {} 登录后按 r 重试", kind.token_var(), cli)
+    match (var.is_empty(), cli.is_empty()) {
+        (true, _) => NEUTRAL_HINT.to_string(),
+        (false, true) => format!("配置 {var} 后按 r 重试"),
+        (false, false) => format!("配置 {var} 或 {cli} 登录后按 r 重试"),
     }
 }
 
