@@ -3,18 +3,21 @@
 //! Single backend: `GITHUB_TOKEN` env → `gh auth token` subprocess. `gh` is
 //! optional — when absent and no env token is set, returns a guided error.
 //!
-//! The token is resolved once and cached in a `OnceLock` (M2: no
+//! The token is resolved once and cached in the per-host
+//! [`HostTokenCache`] shared with [`crate::platform::auth`] (M2: no
 //! `Octocrab::default()`, client reused across `r` refreshes). 401-triggered
 //! re-resolve is a future additive amendment, not applied here.
-
-use std::sync::OnceLock;
 
 use secrecy::SecretString;
 
 use super::error::GithubError;
+use crate::platform::auth::HostTokenCache;
+
+/// Cache key standing in for GitHub's single process-wide token.
+const GITHUB_CACHE_KEY: &str = "api.github.com";
 
 /// Cached token singleton (resolved once per process).
-static TOKEN: OnceLock<SecretString> = OnceLock::new();
+static TOKEN: HostTokenCache = HostTokenCache::new();
 
 /// Resolve a GitHub token, preferring the environment, then `gh auth token`.
 ///
@@ -22,13 +25,7 @@ static TOKEN: OnceLock<SecretString> = OnceLock::new();
 /// itself lives in [`pick_token`] so it is unit-testable without exposing the
 /// secret.
 pub(crate) fn resolve_token() -> Result<SecretString, GithubError> {
-    if let Some(t) = TOKEN.get() {
-        return Ok(t.clone());
-    }
-    let raw = pick_token(env_token(), gh_token())?;
-    let secret = SecretString::new(raw.into_boxed_str());
-    let _ = TOKEN.set(secret.clone());
-    Ok(secret)
+    TOKEN.get_or_init(GITHUB_CACHE_KEY, || pick_token(env_token(), gh_token()))
 }
 
 /// Pure precedence logic: env token wins; empty env falls back to `gh`;
@@ -75,6 +72,39 @@ fn gh_token() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::ExposeSecret;
+
+    #[test]
+    fn shared_cache_resolves_once_and_caches_per_host() {
+        let cache = HostTokenCache::new();
+        let calls = std::cell::Cell::new(0);
+        let resolve = || {
+            calls.set(calls.get() + 1);
+            Ok::<_, GithubError>("tok".to_string())
+        };
+        let first = cache.get_or_init("host", resolve).expect("first resolve");
+        let second = cache.get_or_init("host", resolve).expect("cached resolve");
+        assert_eq!(calls.get(), 1, "resolver runs once per host");
+        assert_eq!(
+            first.expose_secret().to_string(),
+            second.expose_secret().to_string()
+        );
+    }
+
+    #[test]
+    fn shared_cache_does_not_cache_a_failed_resolve() {
+        let cache = HostTokenCache::new();
+        let err = cache
+            .get_or_init("host", || {
+                Err::<String, _>(GithubError::Token("nope".into()))
+            })
+            .expect_err("resolution fails");
+        assert!(matches!(err, GithubError::Token(_)));
+        let ok = cache
+            .get_or_init("host", || Ok::<_, GithubError>("tok".to_string()))
+            .expect("retried after failure");
+        assert_eq!(ok.expose_secret().to_string(), "tok");
+    }
 
     #[test]
     fn env_token_wins_over_gh() {

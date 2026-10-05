@@ -286,6 +286,9 @@ fn notification_id(v: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Mutex;
 
     fn pr_json() -> Value {
         json!({
@@ -345,6 +348,100 @@ mod tests {
             "repository": { "full_name": "owner/repo" },
             "updated_at": "2024-01-04T00:00:00Z"
         })
+    }
+
+    /// `pr_json` under a different number, so a list test can tell "every row
+    /// arrived" from "a row was dropped".
+    fn pr_json_numbered(number: u64) -> Value {
+        let mut v = pr_json();
+        v["number"] = json!(number);
+        v["title"] = json!(format!("PR {number}"));
+        v
+    }
+
+    /// The request target [`GiteaClient`] builds for `owner`/`repo`: the API
+    /// base, the remote namespace, then `tail` (carrying any query string).
+    fn target(owner: &str, repo: &str, tail: &str) -> String {
+        format!("/api/v1/repos/{owner}/{repo}/{tail}")
+    }
+
+    /// A minimal `200 OK` JSON response.
+    fn ok_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// Serve `routes` (request target → JSON body) on a random localhost port,
+    /// answering up to eight requests and recording every request target so a
+    /// test can assert the exact URL the adapter asked for. An unknown target
+    /// gets a `404` instead of an empty body, so a wrong path fails loudly
+    /// rather than looking like an empty panel.
+    fn spawn_server(routes: Vec<(String, String)>) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind localhost");
+        let addr = listener.local_addr().expect("local addr");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for _ in 0..8 {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 8192];
+                let read = sock.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let asked = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_string();
+                recorded
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(asked.clone());
+                let resp = match routes.iter().find(|(route, _)| *route == asked) {
+                    Some((_, body)) => ok_response(body),
+                    None => {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_string()
+                    }
+                };
+                let _ = sock.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    /// A [`GiteaClient`] whose base URL points at `origin` while its remote
+    /// namespace still comes from `remote_url`, so requests keep their real
+    /// `/api/v1/repos/{owner}/{repo}/…` shape.
+    fn client_for(origin: &str, remote_url: &str) -> GiteaClient {
+        let mut remote = crate::platform::parse_remote(remote_url).expect("parse remote");
+        remote.scheme = "http".to_string();
+        remote.host = origin.trim_start_matches("http://").to_string();
+        remote.port = None;
+        GiteaClient {
+            http: cached_client(PLATFORM, &remote.host).expect("client"),
+            remote: remote.clone(),
+            token: SecretString::new("t".to_string().into_boxed_str()),
+            base_url: remote.api_base("v1"),
+        }
+    }
+
+    /// The request targets the server recorded, in order.
+    fn requested(seen: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        seen.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Minimal runtime for the tests that call into an async trait method.
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(f)
     }
 
     #[test]
@@ -520,5 +617,124 @@ mod tests {
         };
         let err = client.get("/x").expect_err("malformed token must fail");
         assert!(matches!(err, PlatformError::Token(_)));
+    }
+
+    /// Gitea reports `repository.full_name` in the repository's own casing,
+    /// which need not match the remote URL. Filtering the response on
+    /// `full_name` therefore drops every row for a remote spelled
+    /// `Owner/Repo` while the server answers `owner/repo`, and the panel goes
+    /// empty — the bug this repo-scoped endpoint was adopted to fix. This test
+    /// fails the moment a `full_name` filter (case-sensitive or not) is added
+    /// back, which is the regression it guards.
+    #[test]
+    fn list_notifications_keeps_a_thread_whose_repo_case_differs() {
+        let mut thread = notification_json();
+        thread["repository"]["full_name"] = json!("owner/repo");
+        let notifications = target("Owner", "Repo", "notifications?limit=100");
+        let (origin, seen) =
+            spawn_server(vec![(notifications.clone(), json!([thread]).to_string())]);
+        // A `.git` remote too: the suffix must not reach the repo-scoped path.
+        let client = client_for(&origin, "https://gitea.com/Owner/Repo.git");
+
+        let notes = block_on(client.list_notifications()).expect("notifications");
+        assert_eq!(
+            notes.len(),
+            1,
+            "a full_name differing only in case must not drop the row"
+        );
+        assert_eq!(notes[0].repo, "owner/repo");
+        assert_eq!(notes[0].subject_title, "PR #1");
+        assert!(notes[0].unread);
+        // The repo-scoped endpoint is what replaces the client-side filter, so
+        // the request itself must name this repository.
+        assert_eq!(requested(&seen), vec![notifications]);
+    }
+
+    #[test]
+    fn list_pulls_asks_for_this_repo_open_pulls() {
+        let pulls = target("Owner", "Repo", "pulls?state=open&limit=100");
+        let body = json!([pr_json_numbered(42), pr_json_numbered(43)]).to_string();
+        let (origin, seen) = spawn_server(vec![(pulls.clone(), body)]);
+        let client = client_for(&origin, "https://gitea.com/Owner/Repo");
+
+        let rows = block_on(client.list_pulls()).expect("pulls");
+        assert_eq!(rows.len(), 2, "every returned PR must survive mapping");
+        assert_eq!(rows.iter().map(|p| p.number).collect::<Vec<_>>(), [42, 43]);
+        // `state=open` is what keeps closed PRs off the panel and `limit=100`
+        // the page size; both are part of the request contract.
+        assert_eq!(requested(&seen), vec![pulls]);
+    }
+
+    #[test]
+    fn list_issues_asks_for_open_issues_and_drops_pull_request_rows() {
+        let mut pr_row = issue_json();
+        pr_row["number"] = json!(9);
+        pr_row["pull_request"] = json!({ "merged": false });
+        let issues = target("Owner", "Repo", "issues?state=open&limit=100");
+        let body = json!([issue_json(), pr_row]).to_string();
+        let (origin, seen) = spawn_server(vec![(issues.clone(), body)]);
+        let client = client_for(&origin, "https://gitea.com/Owner/Repo");
+
+        let rows = block_on(client.list_issues()).expect("issues");
+        // Gitea's issue list also carries PRs; they belong to the PR panel.
+        assert_eq!(rows.len(), 1, "a PR row leaked into the issue panel");
+        assert_eq!(rows[0].number, 7);
+        assert_eq!(rows[0].labels, vec!["bug".to_string()]);
+        assert_eq!(requested(&seen), vec![issues]);
+    }
+
+    #[test]
+    fn get_pull_asks_for_the_numbered_pull_and_its_commit_status() {
+        let pull = target("Owner", "Repo", "pulls/42");
+        // `pr_json`'s head sha drives the best-effort status lookup; that call
+        // swallows its errors, so the second URL is asserted rather than left
+        // to an empty check list.
+        let status = target("Owner", "Repo", "commits/abc123/status");
+        let body = json!({ "statuses": [check_json()] }).to_string();
+        let (origin, seen) = spawn_server(vec![
+            (pull.clone(), pr_json().to_string()),
+            (status.clone(), body),
+        ]);
+        let client = client_for(&origin, "https://gitea.com/Owner/Repo");
+
+        let detail = block_on(client.get_pull(42)).expect("pull");
+        assert_eq!(detail.summary.number, 42);
+        assert_eq!(detail.body, "description");
+        assert_eq!(
+            detail.labels,
+            vec!["bug".to_string(), "critical".to_string()]
+        );
+        assert_eq!(detail.mergeable, Some(true));
+        assert_eq!(detail.checks.len(), 1);
+        assert_eq!(detail.checks[0].name, "ci/test");
+        assert_eq!(requested(&seen), vec![pull, status]);
+    }
+
+    #[test]
+    fn get_issue_asks_for_the_numbered_issue() {
+        let issue = target("Owner", "Repo", "issues/7");
+        let (origin, seen) = spawn_server(vec![(issue.clone(), issue_json().to_string())]);
+        let client = client_for(&origin, "https://gitea.com/Owner/Repo");
+
+        let detail = block_on(client.get_issue(7)).expect("issue");
+        assert_eq!(detail.summary.number, 7);
+        assert_eq!(detail.summary.title, "Bug report");
+        assert_eq!(detail.summary.assignee.as_deref(), Some("carol"));
+        assert_eq!(requested(&seen), vec![issue]);
+    }
+
+    #[test]
+    fn list_checks_asks_for_the_commit_status_endpoint() {
+        let status = target("Owner", "Repo", "commits/abc123/status");
+        let body = json!({ "statuses": [check_json()] }).to_string();
+        let (origin, seen) = spawn_server(vec![(status.clone(), body)]);
+        let client = client_for(&origin, "https://gitea.com/Owner/Repo");
+
+        let checks = block_on(client.list_checks("abc123")).expect("checks");
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "ci/test");
+        assert_eq!(checks[0].status, "completed");
+        assert_eq!(checks[0].conclusion, "success");
+        assert_eq!(requested(&seen), vec![status]);
     }
 }

@@ -115,9 +115,10 @@ pub(crate) struct DisconnectedCopy {
     pub hint: String,
 }
 
-/// Credential guidance for `kind`, falling back to neutral copy when no
-/// remote has been resolved yet (`None`) — the hint then names no token var,
-/// because there is no platform to own one.
+/// Credential guidance for `kind`. An unresolved remote (`None`) falls back to
+/// the GitHub copy, not to neutral wording: v0.5.0 knew no platform but
+/// GitHub, so this state rendered exactly that text and the GitHub path keeps
+/// its v0.5.0 wording verbatim.
 ///
 /// Self-hosted is a dead-end credential path (`build_client` always rejects
 /// such remotes), so its hint states the limitation instead of asking for a
@@ -142,15 +143,11 @@ pub(crate) fn disconnected_copy(kind: Option<crate::platform::PlatformKind>) -> 
             hint: credential_hint(PlatformKind::SelfHosted),
         },
         None => DisconnectedCopy {
-            title: "尚未连接平台",
-            hint: NEUTRAL_HINT.to_string(),
+            title: "尚未连接 GitHub",
+            hint: credential_hint(PlatformKind::GitHub),
         },
     }
 }
-
-/// Retry hint for a repository whose remote names no platform at all — there is
-/// no env var or CLI to point at, so the wording stays neutral.
-const NEUTRAL_HINT: &str = "配置访问令牌后按 r 重试";
 
 /// Retry hint for an instance this app does not support. It is deliberately
 /// *not* a token prompt: self-hosted hosts are rejected before any credential
@@ -753,8 +750,9 @@ mod tests {
         app.set_error("打开 GitHub 回执失败: 未打开仓库");
         app.github_state.pulls = vec![pull(1, "ghost", false)];
         let text = render_text(&app, render_pulls);
-        // No remote has been resolved, so the gate copy stays platform-neutral.
-        assert!(text.contains("尚未连接平台"), "missing gate copy: {text}");
+        // No remote has been resolved, so the gate copy falls back to GitHub —
+        // the platform v0.5.0 knew, and the one this path has always shown.
+        assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
         assert!(
             text.contains("未打开仓库"),
             "status line must be prominent: {text}"
@@ -917,11 +915,17 @@ mod tests {
             "the limitation is stated: {}",
             self_hosted.hint
         );
-        // No remote resolved: stay neutral instead of guessing a token var.
+        // No remote resolved: the gate falls back to the GitHub copy, because
+        // v0.5.0 (which had no platform concept yet) always printed it.
         let unknown = disconnected_copy(None);
-        assert_eq!(unknown.title, "尚未连接平台");
-        assert_eq!(unknown.hint, "配置访问令牌后按 r 重试");
-        assert!(!unknown.hint.contains("TOKEN"), "no var is named");
+        assert_eq!(unknown.title, "尚未连接 GitHub");
+        assert_eq!(unknown.hint, "配置 GITHUB_TOKEN 或 gh 登录后按 r 重试");
+        let github = disconnected_copy(Some(PlatformKind::GitHub));
+        assert_eq!(
+            (unknown.title, unknown.hint),
+            (github.title, github.hint),
+            "the fallback is exactly the GitHub copy"
+        );
     }
 
     /// U4: a GitLab/Gitea remote must reach the body, not just the helper.

@@ -2,6 +2,8 @@
 
 use thiserror::Error;
 
+use crate::platform::{PlatformError, PlatformKind};
+
 /// Errors produced by [`crate::github::GithubClient`].
 ///
 /// Network/HTTP failures from octocrab are normalized into the [`Http`], [`Network`], and
@@ -54,9 +56,43 @@ impl From<octocrab::Error> for GithubError {
     }
 }
 
+/// Map [`crate::github::GithubError`] → [`PlatformError`] (platform label =
+/// `"GitHub"`).
+///
+/// Implemented here, on the backend side, because `platform` is the abstraction
+/// layer and must not name a concrete backend type; `github` is the layer that
+/// implements [`crate::platform::PlatformClient`], so the dependency runs
+/// `github` → `platform` (and never the other way).
+impl From<crate::github::GithubError> for PlatformError {
+    fn from(e: GithubError) -> Self {
+        let platform = PlatformKind::GitHub.as_str();
+        match e {
+            GithubError::Token(m) => PlatformError::Token(m),
+            GithubError::NotGitHub(m) => PlatformError::NotPlatform(m),
+            GithubError::Http {
+                status,
+                message,
+                rate_limited,
+            } => PlatformError::Http {
+                status,
+                message,
+                rate_limited,
+                platform,
+            },
+            GithubError::Network(m) => PlatformError::Network(m),
+            GithubError::Other(m) => PlatformError::Other {
+                platform,
+                message: m,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::platform::render_platform_error;
 
     #[test]
     fn github_error_display_is_the_message() {
@@ -94,5 +130,58 @@ mod tests {
             crate::platform::render_platform_error(&p),
             "GitHub 速率限制，请稍后重试"
         );
+    }
+
+    #[test]
+    fn from_github_error_maps_https_with_platform_label() {
+        let e: PlatformError = GithubError::Http {
+            status: 404,
+            message: "nope".into(),
+            rate_limited: false,
+        }
+        .into();
+        assert!(matches!(
+            e,
+            PlatformError::Http {
+                status: 404,
+                platform: "GitHub",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn from_github_error_network_passthrough() {
+        let e: PlatformError = GithubError::Network("dns fail".into()).into();
+        assert!(matches!(e, PlatformError::Network(_)));
+    }
+
+    #[test]
+    fn from_github_error_other_carries_label() {
+        let e: PlatformError = GithubError::Other("boom".into()).into();
+        assert!(matches!(
+            e,
+            PlatformError::Other {
+                platform: "GitHub",
+                message
+            } if message == "boom"
+        ));
+    }
+
+    #[test]
+    fn render_rate_limited() {
+        let e: PlatformError = GithubError::Http {
+            status: 429,
+            message: String::new(),
+            rate_limited: false,
+        }
+        .into();
+        assert_eq!(render_platform_error(&e), "GitHub 速率限制，请稍后重试");
+    }
+
+    #[test]
+    fn render_network_is_generic() {
+        let e: PlatformError = GithubError::Network("dns fail".into()).into();
+        assert_eq!(render_platform_error(&e), "网络错误，请检查网络连接");
     }
 }

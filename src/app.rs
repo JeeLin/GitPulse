@@ -255,6 +255,23 @@ fn platform_op_slug(kind: crate::platform::PlatformKind) -> &'static str {
     }
 }
 
+/// Platform name for user-facing receipt copy, or `None` when the platform has
+/// no name the user could recognise.
+///
+/// Reuses [`PlatformKind::as_str`] so the three SaaS families keep one spelling
+/// between errors and UI. [`PlatformKind::SelfHosted`] is excluded: `as_str`
+/// yields the variant name `SelfHosted`, which is an internal spelling and must
+/// never leak into the status row. `None` makes each caller drop the whole
+/// name slot (`加载回执…`) rather than render a sentence with a hole in it
+/// (`打开 平台 回执失败`).
+fn platform_display_name(kind: crate::platform::PlatformKind) -> Option<&'static str> {
+    use crate::platform::PlatformKind;
+    match kind {
+        PlatformKind::GitHub | PlatformKind::GitLab | PlatformKind::Gitea => Some(kind.as_str()),
+        PlatformKind::SelfHosted => None,
+    }
+}
+
 /// Number of commits loaded into the history view (`App::enter_history`).
 const HISTORY_LIMIT: usize = 200;
 
@@ -1010,17 +1027,18 @@ impl App {
     pub fn enter_github(&mut self) {
         self.github_state.tab = GithubTab::Pulls;
         // The label is read before the reset so this failure can still name
-        // the platform; a GitHub remote keeps its v0.5.0 wording.
+        // the platform; a GitHub remote keeps its v0.5.0 wording, and an
+        // unnamed one drops the name slot instead of leaving `打开 平台 回执…`.
         let platform = self.github_state.kind();
         self.reset_github_state();
         self.view = View::Pulls;
         self.clear_error();
 
         let Some(repo) = self.current_repo_path() else {
-            self.set_error(format!(
-                "打开 {} 回执失败: 未打开仓库",
-                platform.map_or("平台", |kind| kind.as_str())
-            ));
+            self.set_error(match platform.and_then(platform_display_name) {
+                Some(name) => format!("打开 {name} 回执失败: 未打开仓库"),
+                None => "打开平台回执失败: 未打开仓库".to_string(),
+            });
             return;
         };
         let url = match crate::git::remote_url(&repo) {
@@ -1154,8 +1172,9 @@ impl App {
         else {
             return;
         };
+        // No resolved remote: silent, as in v0.5.0 (`client.is_none()` returned
+        // without a word). The panel gate below already explains the absence.
         let Some(remote) = self.github_state.remote.clone() else {
-            self.set_error("未解析到远端，无法加载 PR 详情");
             return;
         };
         // No client yet, or a fetch already in flight: just show the panel
@@ -1195,8 +1214,9 @@ impl App {
         else {
             return;
         };
+        // No resolved remote: silent, as in v0.5.0 (`client.is_none()` returned
+        // without a word). The panel gate below already explains the absence.
         let Some(remote) = self.github_state.remote.clone() else {
-            self.set_error("未解析到远端，无法加载 Issue 详情");
             return;
         };
         // No client yet, or a fetch already in flight: just show the panel
@@ -1233,11 +1253,15 @@ impl App {
     /// `remote` via [`build_client`] because concrete clients are not `Clone`.
     /// The token itself is cached per host (`src/platform/auth.rs` for Gitea /
     /// GitLab, `src/github/auth.rs` for GitHub), so the rebuild is cheap.
+    ///
+    /// Without a remote the refresh is a silent no-op, as in v0.5.0: `r` is
+    /// only reachable from inside the hub, where [`App::enter_github`] has
+    /// already resolved the remote or reported why it could not — an error here
+    /// would overwrite that report with a second one about a state the user
+    /// never reached. The detail fetchers do report, because their panels
+    /// still open on an empty gate ([`App::open_github_detail`]).
     fn refresh_github(&mut self) {
         let Some(remote) = self.github_state.remote.clone() else {
-            self.remote_status = Some(RemoteStatus::Error(
-                "未解析到远端，请重新进入回执视图".to_string(),
-            ));
             return;
         };
         if !self.github_state.connected() {
@@ -1246,7 +1270,12 @@ impl App {
         if self.remote_rx.is_some() || self.batch_rx.is_some() || self.github_rx.is_some() {
             return;
         }
-        self.remote_status = Some(RemoteStatus::Running("加载回执…".to_string()));
+        self.remote_status = Some(RemoteStatus::Running(
+            platform_display_name(remote.kind).map_or_else(
+                || "加载回执…".to_string(),
+                |name| format!("加载 {name} 回执…"),
+            ),
+        ));
         self.receipt_op = platform_op_slug(remote.kind);
         let tab = self.github_state.tab;
         let repo_path = self.current_repo_path().map(|p| p.to_path_buf());
@@ -3378,6 +3407,33 @@ mod tests {
         KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE)
     }
 
+    /// The two palette targets that name the current repo instead of a screen,
+    /// named so a test can assert both arms of [`App::jump_palette_selection`]
+    /// without duplicating the selection dance.
+    #[derive(Clone, Copy, Debug)]
+    enum PaletteRow {
+        Repo,
+        Branch,
+    }
+
+    impl PaletteRow {
+        fn matches(self, target: &PaletteTarget) -> bool {
+            matches!(
+                (self, target),
+                (Self::Repo, PaletteTarget::Repo(_)) | (Self::Branch, PaletteTarget::Branch(_))
+            )
+        }
+
+        /// The view each arm writes directly, so a test can tell a real jump
+        /// from a no-op.
+        const fn landed_on(self) -> View {
+            match self {
+                Self::Repo => View::Repo,
+                Self::Branch => View::Branches,
+            }
+        }
+    }
+
     fn app_with_repos(count: usize) -> App {
         let mut app = App::new(Config::default());
         app.repos = (0..count)
@@ -4012,30 +4068,44 @@ mod tests {
         );
     }
 
-    /// U2: `r` without a resolved remote reports instead of panicking — both
-    /// with no client at all and with a stale gate left by an earlier repo.
+    /// v0.5.0 parity: `r` with no resolved remote is a silent no-op, both with
+    /// no client at all and with a stale gate left by an earlier repo.
+    ///
+    /// The status row stays untouched on purpose — `enter_github` has already
+    /// reported the real reason the hub opened empty, and a second message
+    /// here would be about a state the user never reached.
     #[test]
-    fn refresh_without_a_remote_reports_instead_of_panicking() {
+    fn refresh_without_a_remote_stays_silent_instead_of_panicking() {
         let mut app = App::new(Config::default());
         app.view = View::Pulls;
         assert!(app.dispatch_key(key(KeyCode::Char('r'))));
         assert!(app.github_rx.is_none(), "no client, nothing spawned");
+        assert!(
+            app.remote_status.is_none(),
+            "no client, no status to report: {:?}",
+            app.remote_status
+        );
 
         app.github_state.client = Some(crate::ui::pulls::offline_client());
         assert!(app.dispatch_key(key(KeyCode::Char('r'))));
         assert!(app.github_rx.is_none(), "no remote, nothing spawned");
-        match &app.remote_status {
-            Some(RemoteStatus::Error(msg)) => {
-                assert!(msg.contains("未解析到远端"), "unhelpful status: {msg}");
-            }
-            other => panic!("expected an explanatory error, got {other:?}"),
-        }
+        assert!(
+            app.remote_status.is_none(),
+            "no remote, no status to report: {:?}",
+            app.remote_status
+        );
     }
 
     /// U2: the detail views guard the same way — the panel still opens, so the
     /// user gets the explanation instead of a panic.
+    ///
+    /// Silence is v0.5.0 consistency, not a regression: `d99e450`'s
+    /// `open_github_detail` returned without a word when the client was missing
+    /// (`if self.github_state.client.is_none() { return; }`). M4 replaced that
+    /// with a `remote` guard and this assertion pinned the new message; the
+    /// guard now returns silently and the panel gate carries the explanation.
     #[test]
-    fn opening_a_detail_without_a_remote_reports_instead_of_panicking() {
+    fn opening_a_detail_without_a_remote_stays_silent_instead_of_panicking() {
         let mut app = App::new(Config::default());
         app.view = View::Pulls;
         app.github_state.client = Some(crate::ui::pulls::offline_client());
@@ -4053,10 +4123,9 @@ mod tests {
         assert_eq!(app.view, View::PullDetail, "the panel still opens");
         assert!(app.github_rx.is_none(), "nothing spawned");
         assert!(
+            app.status.is_none(),
+            "no status is invented for a missing remote: {:?}",
             app.status
-                .as_ref()
-                .is_some_and(|s| s.message.contains("未解析到远端")),
-            "the user is told why nothing loads"
         );
     }
 
@@ -4078,6 +4147,50 @@ mod tests {
             assert!(
                 op != "github" && op != "GitHub",
                 "{kind:?} borrows the GitHub op label"
+            );
+        }
+    }
+
+    /// U3: the arming status names the platform — a GitHub remote reproduces its
+    /// v0.5.0 `加载 GitHub 回执…` byte for byte, and the one platform with no
+    /// user-facing name drops the name slot instead of leaking `SelfHosted`.
+    #[tokio::test]
+    async fn refresh_github_names_the_platform_in_the_running_status() {
+        use crate::platform::PlatformKind;
+        assert_eq!(platform_display_name(PlatformKind::GitHub), Some("GitHub"));
+        assert_eq!(platform_display_name(PlatformKind::GitLab), Some("GitLab"));
+        assert_eq!(platform_display_name(PlatformKind::Gitea), Some("Gitea"));
+        assert_eq!(
+            platform_display_name(PlatformKind::SelfHosted),
+            None,
+            "the variant name is an internal spelling and must not reach the status row"
+        );
+
+        for (url, env, expected) in [
+            (
+                "https://github.com/octo/demo.git",
+                "GITHUB_TOKEN",
+                "加载 GitHub 回执…",
+            ),
+            (
+                "https://gitlab.com/group/proj.git",
+                "GITLAB_TOKEN",
+                "加载 GitLab 回执…",
+            ),
+        ] {
+            if std::env::var(env).is_err() {
+                std::env::set_var(env, "test-token");
+            }
+            let mut app = App::new(Config::default());
+            app.view = View::Pulls;
+            let remote = crate::platform::parse_remote(url).unwrap();
+            app.github_state.client = Some(crate::platform::build_client(&remote).expect("gate"));
+            app.github_state.remote = Some(remote);
+            app.refresh_github();
+            assert_eq!(
+                app.remote_status,
+                Some(RemoteStatus::Running(expected.to_string())),
+                "{url}: the status row lost the platform name"
             );
         }
     }
@@ -4121,6 +4234,106 @@ mod tests {
         }
     }
 
+    /// Receipt app whose gate is the platform mock: the readiness gate is a
+    /// `Box<dyn PlatformClient>`, so any family can sit behind it, and the six
+    /// lists are filled from that mock's payload — the *same* payload for every
+    /// kind, which is what makes the next test an equivalence claim.
+    async fn mock_receipt_app(kind: crate::platform::PlatformKind, url: &str) -> App {
+        use crate::platform::client::MockClient;
+        let client: Box<dyn crate::platform::PlatformClient> = Box::new(MockClient::dataset(kind));
+        let mut app = App::new(Config::default());
+        app.github_state.remote = Some(crate::platform::parse_remote(url).expect("remote"));
+        app.github_state.pulls = client.list_pulls().await.expect("pulls");
+        app.github_state.detail = Some(client.get_pull(42).await.expect("pull detail"));
+        app.github_state.checks = client.list_checks("deadbeef").await.expect("checks");
+        app.github_state.issues = client.list_issues().await.expect("issues");
+        app.github_state.issue_detail = Some(client.get_issue(7).await.expect("issue detail"));
+        app.github_state.notifications = client.list_notifications().await.expect("notifications");
+        app.github_state.client = Some(client);
+        app
+    }
+
+    /// P: swap the platform, keep the data — the receipt views must render the
+    /// same rows, titles and status for a GitHub, a Gitea and a GitLab client
+    /// that served one identical payload. This is the direct cover the seven
+    /// "GitHub client, GitLab data" tests could not give: those only ever
+    /// swapped the adapter, never the platform the view is told about.
+    #[tokio::test]
+    async fn receipt_views_render_one_frame_on_every_platform() {
+        use crate::platform::PlatformKind;
+        let views = [
+            View::Pulls,
+            View::PullDetail,
+            View::Checks,
+            View::Issues,
+            View::IssueDetail,
+            View::Notifications,
+        ];
+        let mut frames = Vec::new();
+        for (kind, url) in [
+            (PlatformKind::GitHub, "https://github.com/octo/demo.git"),
+            (PlatformKind::Gitea, "https://gitea.com/octo/demo.git"),
+            (PlatformKind::GitLab, "https://gitlab.com/octo/demo.git"),
+        ] {
+            let mut app = mock_receipt_app(kind, url).await;
+            assert_eq!(app.github_state.kind(), Some(kind), "{url}: wrong kind");
+            let mut per_view = Vec::new();
+            for view in views {
+                app.view = view;
+                per_view.push(render_text(&mut app));
+            }
+            frames.push((kind, per_view));
+        }
+
+        let (github_kind, github) = &frames[0];
+        assert_eq!(*github_kind, PlatformKind::GitHub);
+        // The frames under comparison are not blank: the payload reached the
+        // list rows, so an all-empty comparison cannot pass by accident.
+        assert!(
+            github[0].contains("#42Fixloginbug(open)"),
+            "the pull row is missing: {}",
+            github[0]
+        );
+        assert!(
+            github[3].contains("#7Crashonemptylist(open)"),
+            "the issue row is missing: {}",
+            github[3]
+        );
+        assert!(
+            github[1].contains("可合并"),
+            "the mergeability label is missing: {}",
+            github[1]
+        );
+
+        for (kind, other) in &frames[1..] {
+            for (index, view) in views.iter().enumerate() {
+                assert_eq!(
+                    fold_platform(&other[index]),
+                    fold_platform(&github[index]),
+                    "{kind:?} renders the {view:?} screen differently from GitHub"
+                );
+            }
+        }
+
+        // The folding above hides exactly two legitimate platform-owned
+        // details, so pin them: GitLab names the fourth tab `To-Dos` in its
+        // title while the other two say `通知`, and a longer title lengthens
+        // the border rule it sits in. Everything else compared above is the
+        // data row, the status row and the hint row.
+        assert!(
+            github[5].contains("通知·octo/demo"),
+            "missing notification title: {}",
+            github[5]
+        );
+        let gitlab = &frames[2].1;
+        assert!(
+            gitlab[5].contains("To-Dos·octo/demo"),
+            "GitLab must keep its own tab name: {}",
+            gitlab[5]
+        );
+        assert_ne!(gitlab[5], github[5]);
+    }
+
     /// B2: leaving the hub drops the settled receipt feedback, so the repo
     /// status row never renders `gitlab 成功` for an operation it never ran.
     #[test]
@@ -4162,6 +4375,71 @@ mod tests {
             "the settled receipt feedback followed the user out of the hub"
         );
         assert_eq!(app.receipt_op_label(), "", "the platform slug leaked too");
+    }
+
+    /// B2: the repo and branch rows are doors out of the hub just like the
+    /// screen rows — jumping to one drops the settled receipt feedback, or the
+    /// repo status row renders `操作完成` for a fetch that never ran there.
+    #[test]
+    fn palette_jump_to_a_repo_or_branch_row_drops_the_receipt_feedback() {
+        for row in [PaletteRow::Repo, PaletteRow::Branch] {
+            let mut app = app_with_repos(1);
+            app.current_repo = Some(0);
+            app.view = View::Pulls;
+            app.receipt_op = "gitlab";
+            app.remote_status = Some(RemoteStatus::Success);
+            app.toggle_palette_overlay();
+            let idx = app
+                .palette_targets()
+                .iter()
+                .position(|target| row.matches(target))
+                .unwrap_or_else(|| panic!("the {row:?} row is a palette target"));
+            app.palette_state.select(Some(idx));
+            assert!(app.dispatch_key(key(KeyCode::Enter)), "jump must not quit");
+            assert_eq!(app.view, row.landed_on(), "{row:?}: wrong landing view");
+            assert!(
+                app.remote_status.is_none(),
+                "{row:?}: the settled receipt feedback followed the user out of the hub"
+            );
+            assert_eq!(
+                app.receipt_op_label(),
+                "",
+                "{row:?}: the platform slug leaked too"
+            );
+        }
+    }
+
+    /// B2: the `leaving_receipts` guard is load-bearing in the other direction
+    /// too — a jump between two non-receipt views is not a receipt exit, so a
+    /// settled push on the repo status row must survive it.
+    #[test]
+    fn palette_jump_between_non_receipt_views_keeps_the_push_feedback() {
+        for row in [PaletteRow::Repo, PaletteRow::Branch] {
+            let mut app = app_with_repos(1);
+            app.current_repo = Some(0);
+            app.view = View::Dashboard;
+            app.remote_op = "push";
+            app.remote_status = Some(RemoteStatus::Success);
+            app.toggle_palette_overlay();
+            let idx = app
+                .palette_targets()
+                .iter()
+                .position(|target| row.matches(target))
+                .unwrap_or_else(|| panic!("the {row:?} row is a palette target"));
+            app.palette_state.select(Some(idx));
+            assert!(app.dispatch_key(key(KeyCode::Enter)), "jump must not quit");
+            assert_eq!(app.view, row.landed_on(), "{row:?}: wrong landing view");
+            assert_eq!(
+                app.remote_status,
+                Some(RemoteStatus::Success),
+                "{row:?}: a settled push was dropped by a jump that never left the hub"
+            );
+            assert_eq!(
+                app.receipt_op_label(),
+                "push",
+                "{row:?}: the op label changed"
+            );
+        }
     }
 
     /// Round-3 🟡1: leaving the hub disarms a fetch still in flight —
@@ -6244,6 +6522,25 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         raw.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// Fold the two things a platform legitimately owns on these screens — the
+    /// notification tab's own name and the border rule that grows with it — so
+    /// the remaining cells can be compared byte for byte. Data rows, titles and
+    /// the hint/status rows stay exact; only one word and the horizontal rule
+    /// that lengthens with it are normalized away.
+    fn fold_platform(text: &str) -> String {
+        let folded = text.replace("To-Dos", "通知");
+        let mut out: Vec<char> = Vec::with_capacity(folded.len());
+        let mut prev: Option<char> = None;
+        for c in folded.chars() {
+            if c == '─' && prev == Some('─') {
+                continue;
+            }
+            out.push(c);
+            prev = Some(c);
+        }
+        out.into_iter().collect()
     }
 
     /// Enter the repo view and then the commit-history view.

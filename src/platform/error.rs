@@ -3,7 +3,6 @@
 
 use thiserror::Error;
 
-use crate::github::GithubError;
 use crate::platform::remote::PlatformKind;
 
 /// Errors produced by platform clients.
@@ -46,32 +45,6 @@ pub enum PlatformError {
         platform: &'static str,
         message: String,
     },
-}
-
-/// Map [`GithubError`] → [`PlatformError`] (platform label = `"GitHub"`).
-impl From<GithubError> for PlatformError {
-    fn from(e: GithubError) -> Self {
-        let platform = PlatformKind::GitHub.as_str();
-        match e {
-            GithubError::Token(m) => PlatformError::Token(m),
-            GithubError::NotGitHub(m) => PlatformError::NotPlatform(m),
-            GithubError::Http {
-                status,
-                message,
-                rate_limited,
-            } => PlatformError::Http {
-                status,
-                message,
-                rate_limited,
-                platform,
-            },
-            GithubError::Network(m) => PlatformError::Network(m),
-            GithubError::Other(m) => PlatformError::Other {
-                platform,
-                message: m,
-            },
-        }
-    }
 }
 
 /// Actionable 401 message for `platform`.
@@ -168,42 +141,6 @@ mod tests {
     }
 
     #[test]
-    fn from_github_error_maps_https_with_platform_label() {
-        let e: PlatformError = GithubError::Http {
-            status: 404,
-            message: "nope".into(),
-            rate_limited: false,
-        }
-        .into();
-        assert!(matches!(
-            e,
-            PlatformError::Http {
-                status: 404,
-                platform: "GitHub",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn from_github_error_network_passthrough() {
-        let e: PlatformError = GithubError::Network("dns fail".into()).into();
-        assert!(matches!(e, PlatformError::Network(_)));
-    }
-
-    #[test]
-    fn from_github_error_other_carries_label() {
-        let e: PlatformError = GithubError::Other("boom".into()).into();
-        assert!(matches!(
-            e,
-            PlatformError::Other {
-                platform: "GitHub",
-                message
-            } if message == "boom"
-        ));
-    }
-
-    #[test]
     fn render_401_gives_actionable_token_hint_per_platform() {
         assert_eq!(
             render_platform_error(&http(401, "GitHub")),
@@ -238,23 +175,6 @@ mod tests {
             render_platform_error(&http(404, "GitHub")),
             "GitHub 仓库/资源不存在或无权限"
         );
-    }
-
-    #[test]
-    fn render_rate_limited() {
-        let e: PlatformError = GithubError::Http {
-            status: 429,
-            message: String::new(),
-            rate_limited: false,
-        }
-        .into();
-        assert_eq!(render_platform_error(&e), "GitHub 速率限制，请稍后重试");
-    }
-
-    #[test]
-    fn render_network_is_generic() {
-        let e: PlatformError = GithubError::Network("dns fail".into()).into();
-        assert_eq!(render_platform_error(&e), "网络错误，请检查网络连接");
     }
 
     #[test]

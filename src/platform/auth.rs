@@ -21,41 +21,73 @@ use super::remote::PlatformKind;
 /// Cached tokens, keyed by host.
 type TokenMap = HashMap<String, SecretString>;
 
-/// Per-host token cache, lazily initialized once per process.
-static TOKENS: OnceLock<Mutex<TokenMap>> = OnceLock::new();
-
-fn token_store() -> &'static Mutex<TokenMap> {
-    TOKENS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Lock a token map, recovering from a poisoned mutex.
+/// Process-wide per-host token cache, shared with [`crate::github::auth`].
 ///
-/// A panic in an unrelated thread must not turn every later refresh into a
-/// `Token` failure, so the (still consistent) inner map is reused.
-fn lock_or_recover(map: &Mutex<TokenMap>) -> MutexGuard<'_, TokenMap> {
-    map.lock().unwrap_or_else(|e| e.into_inner())
+/// Token *resolution* stays per backend (GitHub owns `GITHUB_TOKEN` → `gh
+/// auth token`; this module owns Gitea/GitLab), but the storage and
+/// poisoned-lock recovery exist once here so a fix to the cache cannot land in
+/// one backend and silently miss the other.
+pub(crate) struct HostTokenCache {
+    tokens: OnceLock<Mutex<TokenMap>>,
 }
 
-/// Lock the process-wide token cache.
-fn lock_tokens() -> MutexGuard<'static, TokenMap> {
-    lock_or_recover(token_store())
+impl HostTokenCache {
+    /// An empty cache; the map is allocated on first use.
+    pub(crate) const fn new() -> Self {
+        Self {
+            tokens: OnceLock::new(),
+        }
+    }
+
+    /// Cached token for `host`, or resolve it once via `resolve` and cache it.
+    ///
+    /// Lookup, resolution and insertion happen under a single lock, so
+    /// concurrent callers resolve at most once. A failed resolution is not
+    /// cached, so a later call retries.
+    pub(crate) fn get_or_init<F, E>(&self, host: &str, resolve: F) -> Result<SecretString, E>
+    where
+        F: FnOnce() -> Result<String, E>,
+    {
+        let mut tokens = self.lock_or_recover();
+        if let Some(t) = tokens.get(host) {
+            return Ok(t.clone());
+        }
+        let secret = SecretString::new(resolve()?.into_boxed_str());
+        Ok(tokens
+            .entry(host.to_string())
+            .or_insert_with(|| secret.clone())
+            .clone())
+    }
+
+    /// Lock the token map, recovering from a poisoned mutex.
+    ///
+    /// A panic in an unrelated thread must not turn every later refresh into a
+    /// `Token` failure, so the (still consistent) inner map is reused.
+    fn lock_or_recover(&self) -> MutexGuard<'_, TokenMap> {
+        let tokens = self.tokens.get_or_init(|| Mutex::new(HashMap::new()));
+        tokens.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
+
+#[cfg(test)]
+impl HostTokenCache {
+    /// Wrap an existing (possibly poisoned) map, to exercise poison recovery.
+    fn with_map(map: Mutex<TokenMap>) -> Self {
+        let tokens = OnceLock::new();
+        let _ = tokens.set(map);
+        Self { tokens }
+    }
+}
+
+/// Per-host token cache for the Gitea / GitLab adapters.
+static TOKENS: HostTokenCache = HostTokenCache::new();
 
 /// Resolve a token for `host`/`kind`, caching the result per host.
 ///
 /// Cache lookup, resolution and insertion all happen under a single lock, so
 /// concurrent refreshes resolve the token once instead of racing.
 pub fn resolve_token(host: &str, kind: PlatformKind) -> Result<SecretString, PlatformError> {
-    let mut tokens = lock_tokens();
-    if let Some(t) = tokens.get(host) {
-        return Ok(t.clone());
-    }
-    let raw = pick_token(kind, env_token(kind), cli_token(kind))?;
-    let secret = SecretString::new(raw.into_boxed_str());
-    Ok(tokens
-        .entry(host.to_string())
-        .or_insert_with(|| secret.clone())
-        .clone())
+    TOKENS.get_or_init(host, || pick_token(kind, env_token(kind), cli_token(kind)))
 }
 
 /// Pure precedence: a kind this module does not own is rejected; otherwise the
@@ -255,11 +287,13 @@ mod tests {
         .join();
         assert!(map.is_poisoned(), "guard thread panicked");
 
-        lock_or_recover(&map).insert(
+        let cache = HostTokenCache::with_map(Arc::try_unwrap(map).expect("sole owner"));
+        cache.lock_or_recover().insert(
             "host".to_string(),
             SecretString::new("tok".to_string().into_boxed_str()),
         );
-        let got = lock_or_recover(&map)
+        let got = cache
+            .lock_or_recover()
             .get("host")
             .map(|s| s.expose_secret().to_string());
         assert_eq!(got.as_deref(), Some("tok"));

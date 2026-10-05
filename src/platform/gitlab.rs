@@ -244,9 +244,10 @@ impl PlatformClient for GitLabClient {
 
 /// Map GitLab `detailed_merge_status` to `Option<bool>`.
 ///
-/// The value domain is the 24 states the GitLab Merge Requests API documents
+/// The value domain is the states the GitLab Merge Requests API documents
 /// (`docs.gitlab.com/api/merge_requests/#merge-status`, mirrored in
-/// `docs/RESEARCH-gitea-gitlab-apis.md` §2.4):
+/// `docs/RESEARCH-gitea-gitlab-apis.md` §2.4, which holds the full list — the
+/// count is not restated here so it cannot drift):
 ///
 /// - `mergeable` → `Some(true)` — the only "can be merged" verdict.
 /// - every documented blocking state → `Some(false)` so the UI reports
@@ -833,7 +834,8 @@ mod tests {
         // The one mergeable verdict of `detailed_merge_status`.
         assert_eq!(map_merge_status(Some("mergeable")), Some(true));
         // Every documented blocking state is "cannot merge", not "unknown":
-        // the full list from RESEARCH §2.4 (`detailed_merge_status`, 24 values).
+        // the full list from RESEARCH §2.4 (`detailed_merge_status` — the count
+        // is deliberately not restated here).
         for status in [
             "ci_must_pass",
             "ci_still_running",
@@ -861,11 +863,18 @@ mod tests {
         for status in ["unchecked", "checking", "preparing", "approvals_syncing"] {
             assert_eq!(map_merge_status(Some(status)), None, "{status}");
         }
-        // Not REST values at all: `blocked` / `blocked_status` never appear in
-        // `detailed_merge_status` (the real one is `merge_request_blocked`;
-        // `blocked_status` is a GraphQL enum member name), and an unknown future
-        // value must not read as mergeable.
-        for status in ["blocked", "blocked_status", "whatever"] {
+        // Not `detailed_merge_status` values at all: `blocked` / `blocked_status`
+        // never appear in it (the real one is `merge_request_blocked`;
+        // `blocked_status` is a GraphQL enum member name), `can_be_merged` /
+        // `cannot_be_merged` belong to the deprecated `merge_status` field, and
+        // an unknown future value must not read as mergeable.
+        for status in [
+            "blocked",
+            "blocked_status",
+            "can_be_merged",
+            "cannot_be_merged",
+            "whatever",
+        ] {
             assert_eq!(map_merge_status(Some(status)), None, "{status}");
         }
         assert_eq!(map_merge_status(None), None);

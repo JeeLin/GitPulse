@@ -162,8 +162,9 @@ mod tests {
         app.set_error("解析远端失败: 未配置远端");
         app.github_state.checks = vec![check("unit", "completed", "success")];
         let text = render_text(&app);
-        // The remote failed to resolve, so the gate copy names no platform.
-        assert!(text.contains("尚未连接平台"), "missing gate copy: {text}");
+        // No resolved remote means `kind == None`, which falls back to the
+        // GitHub gate copy, verbatim as in v0.5.0.
+        assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
         assert!(text.contains("未配置远端"), "status line must show: {text}");
         assert!(!text.contains("unit"), "no rows without a client: {text}");
     }

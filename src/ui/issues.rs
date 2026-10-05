@@ -342,8 +342,9 @@ mod tests {
         app.set_error("GitHub 认证失败");
         app.github_state.issues = vec![issue(1, "ghost", "open", &[])];
         let text = render_text(&app);
-        // The remote failed to resolve, so the gate copy names no platform.
-        assert!(text.contains("尚未连接平台"), "missing gate copy: {text}");
+        // No resolved remote means `kind == None`, which falls back to the
+        // GitHub gate copy, verbatim as in v0.5.0.
+        assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
         assert!(text.contains("GitHub认证失败"), "status must show: {text}");
         assert!(
             !text.contains("#1ghost"),
@@ -393,7 +394,7 @@ mod tests {
         app.set_error("GitHub 认证失败");
         app.github_state.issue_detail = Some(detail(7, "Ghost", "open", &[], None, "body"));
         let text = render_detail_text(&app);
-        assert!(text.contains("尚未连接平台"), "missing gate copy: {text}");
+        assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
         assert!(
             !text.contains("#7"),
             "no head renders without a client: {text}"

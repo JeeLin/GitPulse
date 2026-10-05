@@ -151,9 +151,11 @@ pub fn parse_remote(url: &str) -> Result<PlatformRemote, PlatformError> {
     // A trailing slash hides the `.git` suffix from a `trim_end_matches` on the
     // whole URL (`…/repo.git/`), so it is stripped from the last path segment.
     let path = path.strip_suffix(".git").unwrap_or(path);
-    let (owner, repo) = split_namespace(path)?;
+    // The kind decides how `path` is cut, so it must be known before the split.
+    let kind = PlatformKind::from_host(host);
+    let (owner, repo) = split_namespace(path, kind)?;
     Ok(PlatformRemote {
-        kind: PlatformKind::from_host(host),
+        kind,
         scheme: scheme.to_string(),
         host: host.to_string(),
         port,
@@ -233,22 +235,58 @@ fn split_host_port(host: &str) -> (&str, Option<u16>) {
 
 /// Split a full namespace path into `(namespace, repository)`.
 ///
-/// GitLab project paths are `group[/subgroup…]/project`, so the API needs the
-/// whole path while the UI only shows the repository; the repository is
-/// therefore the last segment and the namespace is everything before it.
-/// Two-segment paths (`owner/repo`, GitHub/Gitea) keep their historical
-/// meaning exactly.
-fn split_namespace(path: &str) -> Result<(String, String), PlatformError> {
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    match (segments.first(), segments.last(), segments.len()) {
-        (Some(_), Some(repo), len) if len >= 2 => {
-            let owner = segments[..len - 1].join("/");
-            Ok((owner, repo.to_string()))
+/// The two families read the path differently, so the split is platform-aware —
+/// this is the core lesson behind this function:
+///
+/// - **GitHub / Gitea**: `owner/repo` is always exactly two segments. Anything
+///   after `repo` is noise from a copy-pasted URL (`/issues/42`, `/tree/main`,
+///   `.git`), so the first two segments win — exactly v0.5.0's
+///   `split_owner_repo` (`splitn(2, '/')`, then the repo is the remainder's
+///   first segment). Taking the *last* segment instead makes a valid remote
+///   404 (`owner/repo/issues` + `42`) and leaks the junk into the panel title.
+/// - **GitLab**: the project path is `group[/subgroup…]/project`, so the API
+///   needs the whole path while the UI shows only the repository. The repo is
+///   therefore the last segment and the namespace is everything before it.
+/// - **SelfHosted**: no known family, so the GitLab rule applies — on a
+///   two-segment path both rules agree, and on a deeper path only
+///   "everything but the last" keeps a multi-level namespace intact instead of
+///   silently truncating it. [`crate::platform::build_client`] rejects this
+///   kind today, so the rule only needs to stay deterministic.
+fn split_namespace(path: &str, kind: PlatformKind) -> Result<(String, String), PlatformError> {
+    match kind {
+        PlatformKind::GitHub | PlatformKind::Gitea => {
+            // v0.5.0 semantics: `owner/repo[/noise…]` — first two segments.
+            let path = path.trim_start_matches('/');
+            let mut parts = path.splitn(2, '/');
+            let owner = parts.next().filter(|s| !s.is_empty());
+            let repo = parts
+                .next()
+                .and_then(|r| r.split('/').next())
+                .filter(|s| !s.is_empty());
+            match (owner, repo) {
+                (Some(owner), Some(repo)) => Ok((owner.to_string(), repo.to_string())),
+                _ => Err(namespace_error(path)),
+            }
         }
-        _ => Err(PlatformError::NotPlatform(format!(
-            "无法从远端路径解析 owner/repo：{path}"
-        ))),
+        // GitLab (and self-hosted): the repo is the last segment, the namespace
+        // is everything above it.
+        _ => {
+            let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+            match (segments.first(), segments.last(), segments.len()) {
+                (Some(_), Some(repo), len) if len >= 2 => {
+                    let owner = segments[..len - 1].join("/");
+                    Ok((owner, repo.to_string()))
+                }
+                _ => Err(namespace_error(path)),
+            }
+        }
     }
+}
+
+/// The one user-facing wording for an unresolvable remote path — identical to
+/// v0.5.0's `NotGitHub` message, so a failing remote never reads as a new bug.
+fn namespace_error(path: &str) -> PlatformError {
+    PlatformError::NotPlatform(format!("无法从远端路径解析 owner/repo：{path}"))
 }
 
 #[cfg(test)]
@@ -525,12 +563,96 @@ mod tests {
     }
 
     #[test]
+    fn parses_https_with_extra_path() {
+        // v0.5.0 (`parses_https_with_extra_path`, deleted with no replacement):
+        // everything after `repo` is noise, so the first two segments win.
+        let r = parse_remote("https://github.com/owner/repo/issues/42").unwrap();
+        assert_eq!(r.kind, PlatformKind::GitHub);
+        assert_eq!(r.owner, "owner");
+        assert_eq!(r.repo, "repo");
+        // The full path stays intact for platforms that need it (GitLab).
+        assert_eq!(r.path, "owner/repo/issues/42");
+    }
+
+    #[test]
+    fn parses_gitea_https_with_extra_path() {
+        // Gitea's repository path is GitHub-shaped: `owner/repo` plus noise.
+        let r = parse_remote("https://gitea.com/owner/repo/issues/42").unwrap();
+        assert_eq!(r.kind, PlatformKind::Gitea);
+        assert_eq!(r.owner, "owner");
+        assert_eq!(r.repo, "repo");
+    }
+
+    #[test]
+    fn gitlab_keeps_multi_level_namespace() {
+        // Must not regress to the two-segment GitHub rule: the whole path is
+        // GitLab's project id.
+        let r = parse_remote("https://gitlab.com/group/sub/repo").unwrap();
+        assert_eq!(r.kind, PlatformKind::GitLab);
+        assert_eq!(r.owner, "group/sub");
+        assert_eq!(r.repo, "repo");
+
+        let r = parse_remote("https://gitlab.com/group/a/b/repo").unwrap();
+        assert_eq!(r.owner, "group/a/b");
+        assert_eq!(r.repo, "repo");
+        assert_eq!(r.path, "group/a/b/repo");
+    }
+
+    #[test]
+    fn self_hosted_uses_the_namespace_rule() {
+        // Unknown family → GitLab semantics: a two-segment path is identical
+        // either way, and a deeper path keeps its namespace.
+        let r = parse_remote("https://git.example.com/owner/repo").unwrap();
+        assert_eq!(r.owner, "owner");
+        assert_eq!(r.repo, "repo");
+        let r = parse_remote("https://git.example.com/group/sub/repo").unwrap();
+        assert_eq!(r.owner, "group/sub");
+        assert_eq!(r.repo, "repo");
+    }
+
+    #[test]
+    fn missing_second_segment_keeps_v0_5_wording() {
+        assert_eq!(
+            parse_remote("https://github.com/owner"),
+            Err(namespace_error("owner"))
+        );
+        assert_eq!(
+            parse_remote("https://github.com/"),
+            Err(namespace_error(""))
+        );
+        assert_eq!(
+            parse_remote("https://github.com/owner/"),
+            Err(namespace_error("owner"))
+        );
+    }
+
+    #[test]
     fn split_namespace_requires_two_segments() {
         assert_eq!(
-            split_namespace("owner/repo").unwrap(),
+            split_namespace("owner/repo", PlatformKind::GitHub).unwrap(),
             ("owner".to_string(), "repo".to_string())
         );
-        assert!(split_namespace("owner").is_err());
-        assert!(split_namespace("").is_err());
+        assert_eq!(
+            split_namespace("owner/repo", PlatformKind::GitLab).unwrap(),
+            ("owner".to_string(), "repo".to_string())
+        );
+        assert!(split_namespace("owner", PlatformKind::GitHub).is_err());
+        assert!(split_namespace("", PlatformKind::GitHub).is_err());
+        assert!(split_namespace("owner", PlatformKind::GitLab).is_err());
+        assert!(split_namespace("", PlatformKind::GitLab).is_err());
+    }
+
+    #[test]
+    fn split_namespace_reads_segments_per_platform() {
+        // One path, two meanings: the last segment is GitLab's project, the
+        // second segment is GitHub's repository.
+        assert_eq!(
+            split_namespace("group/sub/repo", PlatformKind::GitLab).unwrap(),
+            ("group/sub".to_string(), "repo".to_string())
+        );
+        assert_eq!(
+            split_namespace("group/sub/repo", PlatformKind::GitHub).unwrap(),
+            ("group".to_string(), "sub".to_string())
+        );
     }
 }

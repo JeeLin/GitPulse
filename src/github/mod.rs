@@ -6,8 +6,10 @@
 //!
 //! Surface:
 //!   - [`GithubClient`] implementing [`crate::platform::PlatformClient`]
-//!   - [`GithubError`], re-exported so [`crate::platform::error`] can convert it;
-//!     user-facing rendering lives in [`crate::platform::render_platform_error`]
+//!   - [`GithubError`], re-exported as the public error type; the conversion into
+//!     [`crate::platform::PlatformError`] lives in [`error`] (on this side, so the
+//!     platform layer never names the GitHub backend); user-facing rendering lives
+//!     in [`crate::platform::render_platform_error`]
 //!   - [`models`]: re-exports of [`crate::platform::models`]
 
 use std::fmt::Debug;

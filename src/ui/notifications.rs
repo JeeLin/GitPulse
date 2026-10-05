@@ -241,8 +241,9 @@ mod tests {
         app.set_error("gh 不可用，无法自动获取 token");
         app.github_state.notifications = vec![note("ghost", "Issue", true)];
         let text = render_text(&app);
-        // The remote failed to resolve, so the gate copy names no platform.
-        assert!(text.contains("尚未连接平台"), "missing gate copy: {text}");
+        // No resolved remote means `kind == None`, which falls back to the
+        // GitHub gate copy, verbatim as in v0.5.0.
+        assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
         assert!(text.contains("gh不可用"), "status must show: {text}");
         assert!(!text.contains("ghost"), "no rows without a client: {text}");
         assert!(!text.contains('●'), "no marker without a client: {text}");

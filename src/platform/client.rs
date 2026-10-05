@@ -58,9 +58,391 @@ pub fn build_client(remote: &PlatformRemote) -> Result<Box<dyn PlatformClient>, 
     }
 }
 
+/// In-memory [`PlatformClient`] for tests that need a platform without a
+/// network, a token or a real adapter (the milestone-9 "trait mock").
+///
+/// Every method answers from the preset payload the test installed, so one
+/// dataset can be served by a GitHub-, Gitea- and GitLab-shaped client: the
+/// only thing that varies between them is [`MockClient::kind`], which is
+/// exactly the surface a view is allowed to branch on. That makes it the
+/// cheapest way to prove a view reads platform-neutral data.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct MockClient {
+    /// Platform this client claims to be; the field a view may ask about.
+    kind: PlatformKind,
+    pulls: Vec<PrSummary>,
+    pull: Option<PrDetail>,
+    checks: Vec<CheckSummary>,
+    issues: Vec<IssueSummary>,
+    issue: Option<IssueDetail>,
+    notifications: Vec<NotificationSummary>,
+    /// When set, every method fails with it instead of answering.
+    failure: Option<MockFailure>,
+}
+
+/// Recipe for a `PlatformError`: `PlatformError` is not `Clone`, so the mock
+/// keeps the ingredients and bakes a fresh error per call instead of cloning
+/// one. The variants mirror the failures a panel actually meets (missing
+/// token, API status), plus a catch-all for anything else.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+enum MockFailure {
+    Token(String),
+    Network(String),
+    Http {
+        status: u16,
+        message: String,
+        rate_limited: bool,
+        platform: &'static str,
+    },
+    Other {
+        platform: &'static str,
+        message: String,
+    },
+}
+
+#[cfg(test)]
+impl MockFailure {
+    /// Bake the stored recipe into a fresh error for one call.
+    fn to_error(&self) -> PlatformError {
+        match self {
+            Self::Token(m) => PlatformError::Token(m.clone()),
+            Self::Network(m) => PlatformError::Network(m.clone()),
+            Self::Http {
+                status,
+                message,
+                rate_limited,
+                platform,
+            } => PlatformError::Http {
+                status: *status,
+                message: message.clone(),
+                rate_limited: *rate_limited,
+                platform,
+            },
+            Self::Other { platform, message } => PlatformError::Other {
+                platform,
+                message: message.clone(),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<PlatformError> for MockFailure {
+    fn from(error: PlatformError) -> Self {
+        match error {
+            PlatformError::Token(m) => Self::Token(m),
+            PlatformError::NotPlatform(m) => Self::Token(m),
+            PlatformError::Http {
+                status,
+                message,
+                rate_limited,
+                platform,
+            } => Self::Http {
+                status,
+                message,
+                rate_limited,
+                platform,
+            },
+            PlatformError::Network(m) => Self::Network(m),
+            PlatformError::Other { platform, message } => Self::Other { platform, message },
+        }
+    }
+}
+
+#[cfg(test)]
+impl MockClient {
+    /// An empty client for `kind`: every list is empty and every detail miss.
+    pub(crate) fn new(kind: PlatformKind) -> Self {
+        Self {
+            kind,
+            pulls: Vec::new(),
+            pull: None,
+            checks: Vec::new(),
+            issues: Vec::new(),
+            issue: None,
+            notifications: Vec::new(),
+            failure: None,
+        }
+    }
+
+    /// The platform family this client answers for.
+    pub(crate) fn kind(&self) -> PlatformKind {
+        self.kind
+    }
+
+    /// Serve `pulls` from [`PlatformClient::list_pulls`].
+    pub(crate) fn with_pulls(mut self, pulls: Vec<PrSummary>) -> Self {
+        self.pulls = pulls;
+        self
+    }
+
+    /// Serve `detail` from [`PlatformClient::get_pull`] for its own number.
+    pub(crate) fn with_pull_detail(mut self, detail: PrDetail) -> Self {
+        self.pull = Some(detail);
+        self
+    }
+
+    /// Serve `checks` from [`PlatformClient::list_checks`].
+    pub(crate) fn with_checks(mut self, checks: Vec<CheckSummary>) -> Self {
+        self.checks = checks;
+        self
+    }
+
+    /// Serve `issues` from [`PlatformClient::list_issues`].
+    pub(crate) fn with_issues(mut self, issues: Vec<IssueSummary>) -> Self {
+        self.issues = issues;
+        self
+    }
+
+    /// Serve `detail` from [`PlatformClient::get_issue`] for its own number.
+    pub(crate) fn with_issue_detail(mut self, detail: IssueDetail) -> Self {
+        self.issue = Some(detail);
+        self
+    }
+
+    /// Serve `notifications` from [`PlatformClient::list_notifications`].
+    pub(crate) fn with_notifications(mut self, notifications: Vec<NotificationSummary>) -> Self {
+        self.notifications = notifications;
+        self
+    }
+
+    /// Fail every call with `error` — the client-side half of a load failure,
+    /// labelled the way the real adapter would label it.
+    pub(crate) fn failing(mut self, error: PlatformError) -> Self {
+        self.failure = Some(MockFailure::from(error));
+        self
+    }
+
+    /// The shared fixture: one dataset any kind can serve, so a test can hold
+    /// the data constant and vary only the platform.
+    pub(crate) fn dataset(kind: PlatformKind) -> Self {
+        let summary = PrSummary {
+            number: 42,
+            title: "Fix login bug".to_string(),
+            state: "open".to_string(),
+            draft: false,
+            author: "alice".to_string(),
+            head_ref: "feat/login".to_string(),
+            base_ref: "main".to_string(),
+            updated_at: "2026-01-02T03:04:05Z".to_string(),
+        };
+        let issue = IssueSummary {
+            number: 7,
+            title: "Crash on empty list".to_string(),
+            state: "open".to_string(),
+            author: "bob".to_string(),
+            assignee: Some("carol".to_string()),
+            updated_at: "2026-01-03T03:04:05Z".to_string(),
+            labels: vec!["bug".to_string()],
+        };
+        Self::new(kind)
+            .with_pulls(vec![summary.clone()])
+            .with_pull_detail(PrDetail {
+                summary,
+                body: "steps to reproduce".to_string(),
+                labels: vec!["bug".to_string()],
+                mergeable: Some(true),
+                checks: vec![CheckSummary {
+                    name: "unit".to_string(),
+                    status: "completed".to_string(),
+                    conclusion: "success".to_string(),
+                    html_url: "https://example.invalid/unit".to_string(),
+                }],
+            })
+            .with_checks(vec![CheckSummary {
+                name: "unit".to_string(),
+                status: "completed".to_string(),
+                conclusion: "success".to_string(),
+                html_url: "https://example.invalid/unit".to_string(),
+            }])
+            .with_issues(vec![issue.clone()])
+            .with_issue_detail(IssueDetail {
+                summary: issue,
+                body: "stack trace".to_string(),
+            })
+            .with_notifications(vec![NotificationSummary {
+                id: "1".to_string(),
+                repo: "octo/demo".to_string(),
+                subject_title: "Fix login bug".to_string(),
+                subject_type: "PullRequest".to_string(),
+                reason: "review_requested".to_string(),
+                updated_at: "2026-01-04T03:04:05Z".to_string(),
+                unread: true,
+            }])
+    }
+
+    /// `Err` if the client was built [`failing`], else hand the value through.
+    ///
+    /// [`failing`]: MockClient::failing
+    fn reply<T>(&self, value: T) -> Result<T, PlatformError> {
+        match &self.failure {
+            Some(recipe) => Err(recipe.to_error()),
+            None => Ok(value),
+        }
+    }
+
+    /// The stored detail for `number`, or a labelled miss. The failure recipe,
+    /// if any, is checked first so a failing client never invents a payload.
+    fn detail<T>(&self, stored: &Option<T>, number: u64, what: &str) -> Result<T, PlatformError>
+    where
+        T: Clone,
+    {
+        self.reply(())?;
+        match stored.clone() {
+            Some(detail) => Ok(detail),
+            None => Err(PlatformError::Other {
+                platform: self.kind.as_str(),
+                message: format!("mock has no {what} {number}"),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl PlatformClient for MockClient {
+    async fn list_pulls(&self) -> Result<Vec<PrSummary>, PlatformError> {
+        self.reply(self.pulls.clone())
+    }
+
+    async fn get_pull(&self, number: u64) -> Result<PrDetail, PlatformError> {
+        self.detail(&self.pull, number, "pull request")
+    }
+
+    async fn list_checks(&self, _sha: &str) -> Result<Vec<CheckSummary>, PlatformError> {
+        self.reply(self.checks.clone())
+    }
+
+    async fn list_issues(&self) -> Result<Vec<IssueSummary>, PlatformError> {
+        self.reply(self.issues.clone())
+    }
+
+    async fn get_issue(&self, number: u64) -> Result<IssueDetail, PlatformError> {
+        self.detail(&self.issue, number, "issue")
+    }
+
+    async fn list_notifications(&self) -> Result<Vec<NotificationSummary>, PlatformError> {
+        self.reply(self.notifications.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every SaaS kind serves the identical preset: the fixture is the
+    /// platform-neutral contract a view is written against, and the mock is
+    /// what lets a test hold it constant while the platform varies.
+    #[tokio::test]
+    async fn mock_client_serves_one_dataset_for_every_saas_kind() {
+        for kind in [
+            PlatformKind::GitHub,
+            PlatformKind::Gitea,
+            PlatformKind::GitLab,
+        ] {
+            let client = MockClient::dataset(kind);
+            assert_eq!(client.kind(), kind);
+            assert_eq!(client.list_pulls().await.unwrap().len(), 1, "{kind:?}");
+            assert_eq!(client.list_issues().await.unwrap().len(), 1, "{kind:?}");
+            assert_eq!(
+                client.list_notifications().await.unwrap().len(),
+                1,
+                "{kind:?}"
+            );
+            assert_eq!(
+                client.list_checks("deadbeef").await.unwrap().len(),
+                1,
+                "{kind:?}"
+            );
+            let pull = client.get_pull(42).await.unwrap();
+            assert_eq!(pull.summary.number, 42, "{kind:?}");
+            assert_eq!(pull.checks.len(), 1, "{kind:?}");
+            let issue = client.get_issue(7).await.unwrap();
+            assert_eq!(issue.summary.number, 7, "{kind:?}");
+        }
+    }
+
+    /// An unknown number fails instead of inventing a payload, and the failure
+    /// carries the client's own platform label.
+    #[tokio::test]
+    async fn mock_client_reports_a_labeled_miss_for_an_unknown_number() {
+        let client = MockClient::new(PlatformKind::Gitea);
+        let err = client
+            .get_pull(1)
+            .await
+            .expect_err("an empty client has no pulls");
+        assert_eq!(
+            err,
+            PlatformError::Other {
+                platform: "Gitea",
+                message: "mock has no pull request 1".to_string(),
+            }
+        );
+        assert!(client.get_issue(1).await.is_err());
+    }
+
+    /// [`MockClient::failing`] turns every method into the same failure, so a
+    /// view's error state can be driven without a network.
+    #[tokio::test]
+    async fn mock_client_can_fail_every_call_with_one_error() {
+        let client = MockClient::dataset(PlatformKind::GitLab)
+            .failing(PlatformError::Token("mock has no token".to_string()));
+        assert_eq!(
+            client.list_pulls().await,
+            Err(PlatformError::Token("mock has no token".to_string()))
+        );
+        assert!(client.list_issues().await.is_err());
+        assert!(client.list_checks("deadbeef").await.is_err());
+        assert!(client.list_notifications().await.is_err());
+        assert!(client.get_pull(42).await.is_err());
+        assert!(client.get_issue(7).await.is_err());
+        assert_eq!(
+            crate::platform::render_platform_error(&PlatformError::Token(
+                "mock has no token".to_string()
+            )),
+            "mock has no token"
+        );
+    }
+
+    /// The mock's `Http` recipe renders the platform's own 401 wording, so a
+    /// failing client reads the owner of the remote it replaced.
+    #[tokio::test]
+    async fn mock_http_failure_renders_per_platform_label() {
+        for (kind, expected) in [
+            (
+                PlatformKind::GitHub,
+                "GitHub 认证失败，请检查 GITHUB_TOKEN 或 gh auth token",
+            ),
+            (PlatformKind::Gitea, "Gitea 认证失败，请检查 GITEA_TOKEN"),
+            (
+                PlatformKind::GitLab,
+                "GitLab 认证失败，请检查 GITLAB_TOKEN 或 glab auth token",
+            ),
+        ] {
+            let client = MockClient::new(kind).failing(PlatformError::Http {
+                status: 401,
+                message: String::new(),
+                rate_limited: false,
+                platform: kind.as_str(),
+            });
+            let err = client.list_pulls().await.unwrap_err();
+            assert_eq!(
+                crate::platform::render_platform_error(&err),
+                expected,
+                "{kind:?}"
+            );
+            // A non-Http recipe still flows through the mock: a network error
+            // lands on the catch-all `Other` wording, platform-labelled.
+            let net_client = MockClient::new(kind).failing(PlatformError::Network("down".into()));
+            let net_err = net_client.list_notifications().await.unwrap_err();
+            assert!(
+                crate::platform::render_platform_error(&net_err).contains("网络错误"),
+                "{kind:?}: {net_err}"
+            );
+        }
+    }
 
     /// Ensure a resolvable token exists for every SaaS kind so the happy path
     /// of `build_client` is exercised without network access.
