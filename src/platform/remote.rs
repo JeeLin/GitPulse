@@ -20,7 +20,8 @@ impl PlatformKind {
     /// Classify a bare host into a platform kind.
     ///
     /// `github.com`, `gitlab.com`, `gitea.com` map to their owned variants;
-    /// any other host (e.g. `git.example.com`) is [`SelfHosted`].
+    /// any other host (e.g. `git.example.com`) is [`SelfHosted`]. The host must
+    /// be port-free (see [`parse_remote`]).
     pub fn from_host(host: &str) -> Self {
         match host {
             "github.com" => PlatformKind::GitHub,
@@ -31,8 +32,7 @@ impl PlatformKind {
     }
 
     /// Human-readable platform label (used in errors / UI).
-    #[allow(dead_code)]
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             PlatformKind::GitHub => "GitHub",
             PlatformKind::GitLab => "GitLab",
@@ -47,57 +47,85 @@ impl PlatformKind {
 pub struct PlatformRemote {
     /// Platform family (GitHub / GitLab / Gitea / SelfHosted).
     pub kind: PlatformKind,
+    /// REST origin scheme: `https`, or `http` when the remote itself is HTTP.
+    pub scheme: String,
     /// Bare host without scheme, userinfo, or port (e.g. `github.com`).
     pub host: String,
-    /// Repository owner (user or organization).
+    /// Explicit port from the remote URL; `None` when it uses the default.
+    pub port: Option<u16>,
+    /// Full namespace path, e.g. `group/subgroup/project` on GitLab.
+    pub path: String,
+    /// Namespace above the repository: `owner` for two-segment paths,
+    /// `group/subgroup` for GitLab subgroups.
     pub owner: String,
-    /// Repository name.
+    /// Repository (last path segment): `repo`.
     pub repo: String,
+}
+
+impl PlatformRemote {
+    /// REST origin: `{scheme}://{host}[:{port}]`.
+    pub fn origin(&self) -> String {
+        match self.port {
+            Some(port) => format!("{}://{}:{}", self.scheme, self.host, port),
+            None => format!("{}://{}", self.scheme, self.host),
+        }
+    }
+
+    /// REST API base URL: `{origin}/api/{version}` — Gitea uses `v1`, GitLab `v4`.
+    pub fn api_base(&self, version: &str) -> String {
+        format!("{}/api/{}", self.origin(), version)
+    }
 }
 
 /// Parse a git remote URL into a [`PlatformRemote`].
 ///
 /// Supports `https://`, `http://`, `ssh://`, `git://`, and the scp-like
 /// `git@host:owner/repo` forms for github.com, gitlab.com, gitea.com, and
-/// arbitrary self-hosted hosts. The scheme is dropped; `from_host` decides
-/// the platform kind.
+/// arbitrary self-hosted hosts. The scheme and port are preserved (the REST
+/// origin is rebuilt via [`PlatformRemote::api_base`]); only `ssh://`, `git://`
+/// and the scp-like form fall back to `https`, since those protocols cannot
+/// carry REST traffic.
 pub fn parse_remote(url: &str) -> Result<PlatformRemote, PlatformError> {
     let trimmed = url.trim().trim_end_matches(".git").trim();
-    let (host, path) = strip_scheme(trimmed)
+    let (scheme, host_port, path) = strip_scheme(trimmed)
         .ok_or_else(|| PlatformError::NotPlatform(format!("远端地址格式不正确：{url}")))?;
-    let host = strip_port(host);
-    let (owner, repo) = split_owner_repo(path)?;
+    let (host, port) = split_host_port(host_port);
+    let path = path.trim_matches('/');
+    let (owner, repo) = split_namespace(path)?;
     Ok(PlatformRemote {
         kind: PlatformKind::from_host(host),
+        scheme: scheme.to_string(),
         host: host.to_string(),
+        port,
+        path: path.to_string(),
         owner,
         repo,
     })
 }
 
-/// Strip a known scheme prefix, returning `(host, path)`.
+/// Strip a known scheme prefix, returning `(scheme, host[:port], path)`.
 ///
 /// Handles `ssh://`, `git://`, `https://`, `http://` (with optional `user@`)
-/// and the scp-like `git@host:` form.
-fn strip_scheme(s: &str) -> Option<(&str, &str)> {
-    if let Some(rest) = s.strip_prefix("ssh://") {
-        let rest = rest.strip_prefix("git@").unwrap_or(rest);
-        rest.split_once('/')
-    } else if let Some(rest) = s.strip_prefix("git://") {
-        let rest = rest.strip_prefix("git@").unwrap_or(rest);
-        rest.split_once('/')
-    } else if let Some(rest) = s.strip_prefix("https://") {
-        let rest = strip_user(rest);
-        rest.split_once('/')
-    } else if let Some(rest) = s.strip_prefix("http://") {
-        let rest = strip_user(rest);
-        rest.split_once('/')
-    } else if let Some(rest) = s.strip_prefix("git@") {
+/// and the scp-like `git@host:` form. The three non-HTTP forms report `https`
+/// because the REST API is reached over HTTP(S), never over SSH/git.
+fn strip_scheme(s: &str) -> Option<(&'static str, &str, &str)> {
+    if let Some(rest) = s.strip_prefix("git@") {
         // scp-like: git@github.com:owner/repo
-        rest.split_once(':')
-    } else {
-        None
+        return rest.split_once(':').map(|(h, p)| ("https", h, p));
     }
+    let (scheme, rest) = if let Some(rest) = s.strip_prefix("https://") {
+        ("https", strip_user(rest))
+    } else if let Some(rest) = s.strip_prefix("http://") {
+        ("http", strip_user(rest))
+    } else if let Some(rest) = s.strip_prefix("ssh://") {
+        ("https", strip_user(rest))
+    } else {
+        // Only the last fallback may fail; the earlier arms have already
+        // handled every scheme that parses.
+        let rest = s.strip_prefix("git://")?;
+        ("https", strip_user(rest))
+    };
+    rest.split_once('/').map(|(h, p)| (scheme, h, p))
 }
 
 /// Drop the `user@` userinfo prefix from a `host[/path…]`-style remainder.
@@ -108,31 +136,38 @@ fn strip_user(s: &str) -> &str {
     }
 }
 
-/// Drop the `:port` suffix so `from_host` matches and env-var names stay clean.
+/// Split `host[:port]` into `(bare host, port)`.
 ///
-/// Bracketed IPv6 literals (`[::1]:port`) are reduced to the bracketed form.
-fn strip_port(host: &str) -> &str {
+/// The bare host drives platform classification and env-var naming; the port is
+/// kept for building the REST origin. Bracketed IPv6 literals (`[::1]:8080`)
+/// keep their brackets in the host. A non-numeric port is treated as part of
+/// neither (host only), so the URL is still classified instead of rejected.
+fn split_host_port(host: &str) -> (&str, Option<u16>) {
     if let Some(end) = host.find(']') {
-        // [bracketed]:port → keep up to and including ] (or whole if no ']').
-        return &host[..=end];
+        // [bracketed]:port
+        let (h, rest) = host.split_at(end + 1);
+        return (h, rest.strip_prefix(':').and_then(|p| p.parse().ok()));
     }
     match host.split_once(':') {
-        Some((h, _port)) => h,
-        None => host,
+        Some((h, port)) => (h, port.parse().ok()),
+        None => (host, None),
     }
 }
 
-/// Split `"owner/repo[/...extra...]"` → `("owner", "repo")`.
-fn split_owner_repo(path: &str) -> Result<(String, String), PlatformError> {
-    let path = path.trim_start_matches('/');
-    let mut parts = path.splitn(2, '/');
-    let owner = parts.next().filter(|s| !s.is_empty());
-    let repo = parts
-        .next()
-        .and_then(|r| r.split('/').next())
-        .filter(|s| !s.is_empty());
-    match (owner, repo) {
-        (Some(o), Some(r)) => Ok((o.to_string(), r.to_string())),
+/// Split a full namespace path into `(namespace, repository)`.
+///
+/// GitLab project paths are `group[/subgroup…]/project`, so the API needs the
+/// whole path while the UI only shows the repository; the repository is
+/// therefore the last segment and the namespace is everything before it.
+/// Two-segment paths (`owner/repo`, GitHub/Gitea) keep their historical
+/// meaning exactly.
+fn split_namespace(path: &str) -> Result<(String, String), PlatformError> {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    match (segments.first(), segments.last(), segments.len()) {
+        (Some(_), Some(repo), len) if len >= 2 => {
+            let owner = segments[..len - 1].join("/");
+            Ok((owner, repo.to_string()))
+        }
         _ => Err(PlatformError::NotPlatform(format!(
             "无法从远端路径解析 owner/repo：{path}"
         ))),
@@ -159,12 +194,27 @@ mod tests {
     }
 
     #[test]
+    fn as_str_labels() {
+        assert_eq!(PlatformKind::GitHub.as_str(), "GitHub");
+        assert_eq!(PlatformKind::GitLab.as_str(), "GitLab");
+        assert_eq!(PlatformKind::Gitea.as_str(), "Gitea");
+        assert_eq!(PlatformKind::SelfHosted.as_str(), "SelfHosted");
+        // `const` usable: adapters bind their label to a `const`.
+        const GITEA: &str = PlatformKind::Gitea.as_str();
+        assert_eq!(GITEA, "Gitea");
+    }
+
+    #[test]
     fn parses_github_https() {
         let r = parse_remote("https://github.com/owner/repo.git").unwrap();
         assert_eq!(r.kind, PlatformKind::GitHub);
         assert_eq!(r.host, "github.com");
         assert_eq!(r.owner, "owner");
         assert_eq!(r.repo, "repo");
+        assert_eq!(r.path, "owner/repo");
+        assert_eq!(r.port, None);
+        assert_eq!(r.scheme, "https");
+        assert_eq!(r.api_base("v3"), "https://github.com/api/v3");
     }
 
     #[test]
@@ -174,6 +224,20 @@ mod tests {
         assert_eq!(r.host, "github.com");
         assert_eq!(r.owner, "owner");
         assert_eq!(r.repo, "repo");
+        assert_eq!(r.path, "owner/repo");
+        // ssh remotes still talk to the HTTPS REST API.
+        assert_eq!(r.scheme, "https");
+        assert_eq!(r.api_base("v3"), "https://github.com/api/v3");
+    }
+
+    #[test]
+    fn parses_gitea_two_segments() {
+        let r = parse_remote("https://gitea.com/owner/repo").unwrap();
+        assert_eq!(r.kind, PlatformKind::Gitea);
+        assert_eq!(r.owner, "owner");
+        assert_eq!(r.repo, "repo");
+        assert_eq!(r.path, "owner/repo");
+        assert_eq!(r.api_base("v1"), "https://gitea.com/api/v1");
     }
 
     #[test]
@@ -181,8 +245,26 @@ mod tests {
         let r = parse_remote("https://gitlab.com/group/sub/repo").unwrap();
         assert_eq!(r.kind, PlatformKind::GitLab);
         assert_eq!(r.host, "gitlab.com");
+        // The whole path is the project id; `repo` stays the last segment.
+        assert_eq!(r.path, "group/sub/repo");
+        assert_eq!(r.owner, "group/sub");
+        assert_eq!(r.repo, "repo");
+    }
+
+    #[test]
+    fn parses_gitlab_with_three_level_subgroup() {
+        let r = parse_remote("https://gitlab.com/a/b/c/repo").unwrap();
+        assert_eq!(r.path, "a/b/c/repo");
+        assert_eq!(r.owner, "a/b/c");
+        assert_eq!(r.repo, "repo");
+    }
+
+    #[test]
+    fn parses_gitlab_with_single_group() {
+        let r = parse_remote("https://gitlab.com/group/repo").unwrap();
+        assert_eq!(r.path, "group/repo");
         assert_eq!(r.owner, "group");
-        assert_eq!(r.repo, "sub");
+        assert_eq!(r.repo, "repo");
     }
 
     #[test]
@@ -200,8 +282,20 @@ mod tests {
         let r = parse_remote("https://git.example.com:8080/owner/repo").unwrap();
         assert_eq!(r.kind, PlatformKind::SelfHosted);
         assert_eq!(r.host, "git.example.com");
+        assert_eq!(r.port, Some(8080));
         assert_eq!(r.owner, "owner");
         assert_eq!(r.repo, "repo");
+        assert_eq!(r.origin(), "https://git.example.com:8080");
+        assert_eq!(r.api_base("v4"), "https://git.example.com:8080/api/v4");
+        assert_eq!(r.api_base("v1"), "https://git.example.com:8080/api/v1");
+    }
+
+    #[test]
+    fn keeps_http_scheme_for_plain_http_remote() {
+        let r = parse_remote("http://git.example.com/owner/repo").unwrap();
+        assert_eq!(r.scheme, "http");
+        assert_eq!(r.port, None);
+        assert_eq!(r.api_base("v4"), "http://git.example.com/api/v4");
     }
 
     #[test]
@@ -225,5 +319,35 @@ mod tests {
             parse_remote("https://github.com/owner"),
             Err(PlatformError::NotPlatform(_))
         ));
+        assert!(matches!(
+            parse_remote("https://github.com/"),
+            Err(PlatformError::NotPlatform(_))
+        ));
+    }
+
+    #[test]
+    fn split_host_port_handles_ipv6_and_bad_ports() {
+        assert_eq!(
+            split_host_port("git.example.com"),
+            ("git.example.com", None)
+        );
+        assert_eq!(
+            split_host_port("git.example.com:8080"),
+            ("git.example.com", Some(8080))
+        );
+        assert_eq!(split_host_port("[::1]"), ("[::1]", None));
+        assert_eq!(split_host_port("[::1]:8080"), ("[::1]", Some(8080)));
+        // Non-numeric port: classify the host anyway, drop the port.
+        assert_eq!(split_host_port("host:not-a-port"), ("host", None));
+    }
+
+    #[test]
+    fn split_namespace_requires_two_segments() {
+        assert_eq!(
+            split_namespace("owner/repo").unwrap(),
+            ("owner".to_string(), "repo".to_string())
+        );
+        assert!(split_namespace("owner").is_err());
+        assert!(split_namespace("").is_err());
     }
 }

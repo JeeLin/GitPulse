@@ -25,7 +25,7 @@ pub fn render_issues(f: &mut Frame, content: Rect, app: &App) {
     let area = content;
     let chunks = panel_chunks(area);
     if app.github_state.client.is_none() {
-        render_disconnected(f, chunks[0], "Issues", app);
+        render_disconnected(f, chunks[0], "Issues", app.github_state.kind(), app);
         render_footer(f, chunks[1], chunks[2], app, true);
         return;
     }
@@ -34,8 +34,8 @@ pub fn render_issues(f: &mut Frame, content: Rect, app: &App) {
     let block = Block::default()
         .title(panel_title(
             "Issues",
-            &app.github_state.owner,
-            &app.github_state.repo,
+            app.github_state.owner(),
+            app.github_state.repo(),
         ))
         .borders(Borders::ALL);
 
@@ -79,7 +79,7 @@ pub fn render_issue_detail(f: &mut Frame, content: Rect, app: &App) {
     let area = content;
     let chunks = panel_chunks(area);
     if app.github_state.client.is_none() {
-        render_disconnected(f, chunks[0], "Issue 详情", app);
+        render_disconnected(f, chunks[0], "Issue 详情", app.github_state.kind(), app);
         render_footer(f, chunks[1], chunks[2], app, false);
         return;
     }
@@ -87,8 +87,8 @@ pub fn render_issue_detail(f: &mut Frame, content: Rect, app: &App) {
     let block = Block::default()
         .title(panel_title(
             "Issue 详情",
-            &app.github_state.owner,
-            &app.github_state.repo,
+            app.github_state.owner(),
+            app.github_state.repo(),
         ))
         .borders(Borders::ALL);
 
@@ -248,11 +248,11 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    /// Connected app: `owner`/`repo` filled in and the readiness gate built.
+    /// Connected app: the `octo/demo` remote resolved and the readiness gate
+    /// built, so the panels render the real title instead of the `—` fallback.
     fn connected_app() -> App {
         let mut app = App::new(Config::default());
-        app.github_state.owner = "octo".to_string();
-        app.github_state.repo = "demo".to_string();
+        app.github_state.remote = Some(crate::ui::github_remote());
         app.github_state.client = Some(offline_client());
         app
     }
@@ -342,7 +342,8 @@ mod tests {
         app.set_error("GitHub 认证失败");
         app.github_state.issues = vec![issue(1, "ghost", "open", &[])];
         let text = render_text(&app);
-        assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
+        // The remote failed to resolve, so the gate copy names no platform.
+        assert!(text.contains("尚未连接平台"), "missing gate copy: {text}");
         assert!(text.contains("GitHub认证失败"), "status must show: {text}");
         assert!(
             !text.contains("#1ghost"),
@@ -392,7 +393,7 @@ mod tests {
         app.set_error("GitHub 认证失败");
         app.github_state.issue_detail = Some(detail(7, "Ghost", "open", &[], None, "body"));
         let text = render_detail_text(&app);
-        assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
+        assert!(text.contains("尚未连接平台"), "missing gate copy: {text}");
         assert!(
             !text.contains("#7"),
             "no head renders without a client: {text}"

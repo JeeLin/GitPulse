@@ -505,6 +505,14 @@ fn render_tags_view(f: &mut Frame, content: Rect, app: &mut App) {
 }
 
 #[cfg(test)]
+/// `octo/demo` on github.com: the remote behind the panel fixtures, kept in
+/// one place so the `octo/demo` titles and the gate copy the receipt tests
+/// assert on stay derived from the same source of truth.
+pub(crate) fn github_remote() -> crate::platform::PlatformRemote {
+    crate::platform::parse_remote("https://github.com/octo/demo.git").expect("github remote")
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;

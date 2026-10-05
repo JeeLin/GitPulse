@@ -1,14 +1,14 @@
-//! GitHub API access: single octocrab backend (M2 *单平台远端回执*).
+//! GitHub API access: the octocrab backend behind [`crate::platform`].
 //!
 //! gh CLI is auth-only (token resolution via [`auth`]); all transport is octocrab
 //! HTTP so there is one failure surface. The client is built once and reused across
-//! `r` refreshes (no `Octocrab::default()`).
+//! refreshes (no `Octocrab::default()`).
 //!
-//! Public surface (the Lane B/C contract):
-//!   - [`parse_remote_owner_repo`]: git remote URL → `(owner, repo)`
-//!   - [`GithubClient`] + `list_pulls` / `get_pull` / `list_issues` / `list_notifications`
-//!   - [`render_error`]: `GithubError` → user-facing line
-//!   - models: [`PrSummary`], [`PrDetail`], [`CheckSummary`], [`IssueSummary`], [`NotificationSummary`]
+//! Surface:
+//!   - [`GithubClient`] implementing [`crate::platform::PlatformClient`]
+//!   - [`GithubError`], re-exported so [`crate::platform::error`] can convert it;
+//!     user-facing rendering lives in [`crate::platform::render_platform_error`]
+//!   - [`models`]: re-exports of [`crate::platform::models`]
 
 use std::fmt::Debug;
 
@@ -18,57 +18,7 @@ pub mod error;
 pub mod models;
 
 pub use client::GithubClient;
-#[allow(unused_imports)]
-pub use error::{render_error, GithubError};
-#[allow(unused_imports)]
-pub use models::{
-    CheckSummary, IssueDetail, IssueSummary, NotificationSummary, PrDetail, PrSummary,
-};
-
-/// Parse a git remote URL into `(owner, repo)` for `github.com` remotes.
-///
-/// Supports `https://`, `http://`, `ssh://`, `git://`, and the scp-like
-/// `git@github.com:owner/repo` forms. Non-github.com remotes (or malformed
-/// ones) return [`GithubError::NotGitHub`].
-#[allow(dead_code)]
-pub fn parse_remote_owner_repo(url: &str) -> Result<(String, String), GithubError> {
-    let trimmed = url.trim().trim_end_matches(".git").trim();
-    let path = if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
-        rest.to_string()
-    } else {
-        trimmed
-            .strip_prefix("https://github.com/")
-            .or_else(|| trimmed.strip_prefix("http://github.com/"))
-            .or_else(|| trimmed.strip_prefix("ssh://git@github.com/"))
-            .or_else(|| trimmed.strip_prefix("ssh://github.com/"))
-            .or_else(|| trimmed.strip_prefix("git://github.com/"))
-            .ok_or_else(|| {
-                GithubError::NotGitHub(format!(
-                    "远端地址不是 GitHub：{trimmed}（仅支持 github.com）"
-                ))
-            })?
-            .to_string()
-    };
-    split_owner_repo(&path)
-}
-
-/// Split `"owner/repo[/...extra...]"` → `("owner", "repo")`.
-#[allow(dead_code)]
-fn split_owner_repo(path: &str) -> Result<(String, String), GithubError> {
-    let path = path.trim_start_matches('/');
-    let mut parts = path.splitn(2, '/');
-    let owner = parts.next().filter(|s| !s.is_empty());
-    let repo = parts
-        .next()
-        .and_then(|r| r.split('/').next())
-        .filter(|s| !s.is_empty());
-    match (owner, repo) {
-        (Some(o), Some(r)) => Ok((o.to_string(), r.to_string())),
-        _ => Err(GithubError::NotGitHub(format!(
-            "无法从远端路径解析 owner/repo：{path}"
-        ))),
-    }
-}
+pub use error::GithubError;
 
 /// Debug-form of an optional enum, lowercased for stable rendering.
 ///
@@ -94,56 +44,27 @@ fn debug_lower<T: Debug>(opt: &Option<T>) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_https_with_git_suffix() {
-        let (owner, repo) = parse_remote_owner_repo("https://github.com/owner/repo.git").unwrap();
-        assert_eq!(owner, "owner");
-        assert_eq!(repo, "repo");
+    /// Stand-in for an octocrab model enum: only its `Debug` form matters here.
+    #[derive(Debug)]
+    enum FakeState {
+        Open,
+        InProgress,
+        ActionRequired,
     }
 
     #[test]
-    fn parses_https_with_extra_path() {
-        let (owner, repo) =
-            parse_remote_owner_repo("https://github.com/owner/repo/issues/42").unwrap();
-        assert_eq!(owner, "owner");
-        assert_eq!(repo, "repo");
+    fn debug_lower_lowercases_and_fills_missing() {
+        assert_eq!(debug_lower(&Some(FakeState::Open)), "open");
+        let none: Option<FakeState> = None;
+        assert_eq!(debug_lower(&none), "unknown");
     }
 
     #[test]
-    fn parses_scp_like() {
-        let (owner, repo) = parse_remote_owner_repo("git@github.com:owner/repo.git").unwrap();
-        assert_eq!(owner, "owner");
-        assert_eq!(repo, "repo");
-    }
-
-    #[test]
-    fn parses_ssh_and_git_schemes() {
-        let (owner, repo) = parse_remote_owner_repo("ssh://git@github.com/owner/repo").unwrap();
-        assert_eq!(owner, "owner");
-        assert_eq!(repo, "repo");
-
-        let (owner, repo) = parse_remote_owner_repo("git://github.com/owner/repo").unwrap();
-        assert_eq!(owner, "owner");
-        assert_eq!(repo, "repo");
-    }
-
-    #[test]
-    fn rejects_non_github() {
-        assert!(matches!(
-            parse_remote_owner_repo("https://gitlab.com/owner/repo"),
-            Err(GithubError::NotGitHub(_))
-        ));
-        assert!(matches!(
-            parse_remote_owner_repo("git@gitlab.com:owner/repo"),
-            Err(GithubError::NotGitHub(_))
-        ));
-    }
-
-    #[test]
-    fn rejects_missing_repo() {
-        assert!(matches!(
-            parse_remote_owner_repo("https://github.com/owner"),
-            Err(GithubError::NotGitHub(_))
-        ));
+    fn debug_lower_restores_underscored_variants() {
+        assert_eq!(debug_lower(&Some(FakeState::InProgress)), "in_progress");
+        assert_eq!(
+            debug_lower(&Some(FakeState::ActionRequired)),
+            "action_required"
+        );
     }
 }

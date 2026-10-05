@@ -7,10 +7,11 @@
 
 use async_trait::async_trait;
 
-use crate::github::models::{
+use crate::platform::error::PlatformError;
+use crate::platform::models::{
     CheckSummary, IssueDetail, IssueSummary, NotificationSummary, PrDetail, PrSummary,
 };
-use crate::platform::error::PlatformError;
+use crate::platform::remote::PlatformKind;
 
 /// Async, object-safe interface every platform client implements.
 #[async_trait]
@@ -36,16 +37,96 @@ pub trait PlatformClient: Send + Sync {
 
 use crate::platform::gitea::GiteaClient;
 use crate::platform::gitlab::GitLabClient;
-use crate::platform::remote::{PlatformKind, PlatformRemote};
+use crate::platform::remote::PlatformRemote;
 
 /// Build the platform-specific [`PlatformClient`] for a parsed remote URL.
+///
+/// Self-hosted instances are rejected on purpose: a `SelfHosted` host has no
+/// known API family (GitHub/Gitea/GitLab), and silently routing it to
+/// `api.github.com` would fetch nothing useful while hiding the real problem.
 pub fn build_client(remote: &PlatformRemote) -> Result<Box<dyn PlatformClient>, PlatformError> {
     match remote.kind {
-        PlatformKind::GitHub | PlatformKind::SelfHosted => {
+        PlatformKind::GitHub => {
             let client = crate::github::GithubClient::new(&remote.owner, &remote.repo)?;
             Ok(Box::new(client))
         }
+        PlatformKind::SelfHosted => Err(PlatformError::NotPlatform(
+            "自托管实例暂不支持（当前支持 github.com / gitea.com / gitlab.com）".to_string(),
+        )),
         PlatformKind::Gitea => Ok(Box::new(GiteaClient::new(remote)?)),
         PlatformKind::GitLab => Ok(Box::new(GitLabClient::new(remote)?)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ensure a resolvable token exists for every SaaS kind so the happy path
+    /// of `build_client` is exercised without network access.
+    fn ensure_tokens() {
+        if std::env::var("GITHUB_TOKEN").is_err() {
+            std::env::set_var("GITHUB_TOKEN", "test-token");
+        }
+        if std::env::var("GITLAB_TOKEN").is_err() {
+            std::env::set_var("GITLAB_TOKEN", "test-token");
+        }
+        if std::env::var("GITEA_TOKEN").is_err() {
+            std::env::set_var("GITEA_TOKEN", "test-token");
+        }
+    }
+
+    #[test]
+    fn build_client_dispatches_every_saas_kind() {
+        ensure_tokens();
+        let cases = [
+            ("https://github.com/owner/repo", PlatformKind::GitHub),
+            ("https://gitea.com/owner/repo", PlatformKind::Gitea),
+            ("https://gitlab.com/group/repo", PlatformKind::GitLab),
+        ];
+        // octocrab builds a hyper client, which needs a live Tokio reactor.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let _guard = rt.enter();
+        for (url, kind) in cases {
+            let remote = crate::platform::parse_remote(url).expect("parse remote");
+            assert_eq!(remote.kind, kind);
+            build_client(&remote).unwrap_or_else(|e| panic!("build_client({url}) failed: {e}"));
+        }
+    }
+
+    #[test]
+    fn build_client_rejects_self_hosted() {
+        let remote = crate::platform::parse_remote("https://git.example.com/owner/repo")
+            .expect("parse remote");
+        assert_eq!(remote.kind, PlatformKind::SelfHosted);
+        // `Box<dyn PlatformClient>` is not `Debug`, so go through `Result::err`
+        // instead of `expect_err`.
+        let err = build_client(&remote)
+            .err()
+            .expect("self-hosted must be rejected");
+        assert!(matches!(err, PlatformError::NotPlatform(_)));
+        let rendered = crate::platform::render_platform_error(&err);
+        assert!(
+            rendered.contains("暂不支持"),
+            "unexpected message: {rendered}"
+        );
+        assert!(
+            rendered.contains("github.com"),
+            "unexpected message: {rendered}"
+        );
+    }
+
+    #[test]
+    fn build_client_rejects_self_hosted_with_port() {
+        let remote = crate::platform::parse_remote("http://git.example.com:8080/owner/repo")
+            .expect("parse remote");
+        assert_eq!(remote.kind, PlatformKind::SelfHosted);
+        let err = build_client(&remote)
+            .err()
+            .expect("self-hosted must be rejected");
+        assert!(err.to_string().contains("暂不支持"));
     }
 }

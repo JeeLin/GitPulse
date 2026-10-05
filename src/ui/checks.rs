@@ -24,7 +24,7 @@ pub fn render_checks(f: &mut Frame, content: Rect, app: &App) {
     let area = content;
     let chunks = panel_chunks(area);
     if app.github_state.client.is_none() {
-        render_disconnected(f, chunks[0], "CI 检查", app);
+        render_disconnected(f, chunks[0], "CI 检查", app.github_state.kind(), app);
         render_footer(f, chunks[1], chunks[2], app, false);
         return;
     }
@@ -33,8 +33,8 @@ pub fn render_checks(f: &mut Frame, content: Rect, app: &App) {
     let block = Block::default()
         .title(panel_title(
             "CI 检查",
-            &app.github_state.owner,
-            &app.github_state.repo,
+            app.github_state.owner(),
+            app.github_state.repo(),
         ))
         .borders(Borders::ALL);
 
@@ -74,11 +74,11 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    /// Connected app: `owner`/`repo` filled in and the readiness gate built.
+    /// Connected app: the `octo/demo` remote resolved and the readiness gate
+    /// built, so the panel renders the real title instead of the `—` fallback.
     fn connected_app() -> App {
         let mut app = App::new(Config::default());
-        app.github_state.owner = "octo".to_string();
-        app.github_state.repo = "demo".to_string();
+        app.github_state.remote = Some(crate::ui::github_remote());
         app.github_state.client = Some(offline_client());
         app
     }
@@ -162,8 +162,26 @@ mod tests {
         app.set_error("解析远端失败: 未配置远端");
         app.github_state.checks = vec![check("unit", "completed", "success")];
         let text = render_text(&app);
-        assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
+        // The remote failed to resolve, so the gate copy names no platform.
+        assert!(text.contains("尚未连接平台"), "missing gate copy: {text}");
         assert!(text.contains("未配置远端"), "status line must show: {text}");
         assert!(!text.contains("unit"), "no rows without a client: {text}");
+    }
+
+    /// U4: the gate copy follows the remote's platform — a Gitea remote asks for
+    /// `GITEA_TOKEN`, never the GitHub hint.
+    #[test]
+    fn checks_disconnected_uses_the_platform_of_the_resolved_remote() {
+        let mut app = App::new(Config::default());
+        app.github_state.remote =
+            Some(crate::platform::parse_remote("https://gitea.com/octo/demo.git").unwrap());
+        let text = render_text(&app);
+        assert!(text.contains("尚未连接Gitea"), "missing gate copy: {text}");
+        assert!(text.contains("GITEA_TOKEN"), "missing gitea hint: {text}");
+        assert!(!text.contains("GITHUB_TOKEN"), "no github hint: {text}");
+        assert!(
+            text.contains("CI检查·octo/demo"),
+            "title keeps the remote: {text}"
+        );
     }
 }

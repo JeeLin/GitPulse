@@ -11,11 +11,11 @@ pub mod client;
 pub mod error;
 pub mod gitea;
 pub mod gitlab;
+mod http;
 pub mod models;
 pub mod remote;
 
 pub use client::{build_client, PlatformClient};
 pub use error::{render_platform_error, PlatformError};
 pub use models::*;
-#[allow(unused_imports)]
 pub use remote::{parse_remote, PlatformKind, PlatformRemote};

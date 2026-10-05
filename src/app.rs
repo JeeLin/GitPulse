@@ -103,12 +103,11 @@ pub enum GithubTab {
 pub struct GithubState {
     /// Active receipts tab.
     pub tab: GithubTab,
-    /// `github.com` owner parsed from the current repo's remote URL.
-    pub owner: String,
-    /// Repository name parsed from the current repo's remote URL.
-    pub repo: String,
-    /// Parsed remote URL (owner + repo + platform family), set alongside
-    /// `client` in [`App::enter_github`]; `None` until a remote is resolved.
+    /// Parsed remote URL — platform family, owner and repo — set by
+    /// [`App::enter_github`] and the single source of truth for the receipt
+    /// copy: [`GithubState::owner`] / [`GithubState::repo`] / the platform
+    /// label are all derived from it. `None` while no remote has been
+    /// resolved, which every fallback (`—`, 「平台」) keys off.
     pub remote: Option<crate::platform::PlatformRemote>,
     /// Cached client used as a credential-validity gate; `None` until
     /// `enter_github` succeeds in building one.
@@ -129,6 +128,32 @@ pub struct GithubState {
     pub issue_detail: Option<crate::platform::IssueDetail>,
 }
 
+impl GithubState {
+    /// Namespace above the repository, or `None` while no remote has been
+    /// resolved. Derived from `remote` so there is no second copy to drift.
+    pub fn owner(&self) -> Option<&str> {
+        self.remote
+            .as_ref()
+            .map(|r| r.owner.as_str())
+            .filter(|owner| !owner.is_empty())
+    }
+
+    /// Repository name, `None` under the same conditions as
+    /// [`GithubState::owner`].
+    pub fn repo(&self) -> Option<&str> {
+        self.remote
+            .as_ref()
+            .map(|r| r.repo.as_str())
+            .filter(|repo| !repo.is_empty())
+    }
+
+    /// Platform family of the resolved remote, or `None` while none is known
+    /// (the panels fall back to neutral copy in that case).
+    pub fn kind(&self) -> Option<crate::platform::PlatformKind> {
+        self.remote.as_ref().map(|r| r.kind)
+    }
+}
+
 /// Message sent from a background GitHub fetch task over its channel.
 ///
 /// A task emits exactly one terminal message, consumed per-frame by
@@ -147,8 +172,28 @@ enum GithubMsg {
     IssueDetail(crate::platform::IssueDetail),
     /// Repository notification list result.
     Notifications(Vec<crate::platform::NotificationSummary>),
-    /// User-facing failure rendered via `platform::render_platform_error`.
-    Error(String),
+    /// Platform failure, rendered by [`App::poll_github`] through
+    /// `platform::render_platform_error` — the single place that decides the
+    /// user-facing wording.
+    Error(crate::platform::PlatformError),
+    /// Pre-rendered failure the platform layer cannot own (the git layer).
+    Other(String),
+}
+
+/// Op slug for a receipt fetch, stored in `remote_op` and rendered by
+/// `ui::remote::render_remote_status` as `{op} 成功`.
+///
+/// `remote_op` is an op identifier (`push` / `pull`), not display copy, so it
+/// stays lowercase — GitHub keeps its v0.5.0 `github` spelling and the other
+/// families get their own slug instead of sharing a hardcoded `github`.
+fn platform_op_slug(kind: crate::platform::PlatformKind) -> &'static str {
+    use crate::platform::PlatformKind;
+    match kind {
+        PlatformKind::GitHub => "github",
+        PlatformKind::GitLab => "gitlab",
+        PlatformKind::Gitea => "gitea",
+        PlatformKind::SelfHosted => "self-hosted",
+    }
 }
 
 /// Number of commits loaded into the history view (`App::enter_history`).
@@ -849,21 +894,39 @@ impl App {
     /// the pulls list. On a missing remote or a missing token the
     /// view still becomes [`View::Pulls`] so the panel can surface the error
     /// and the user can retry with `r`.
+    ///
+    /// `remote` is cleared on entry: a repository whose remote fails to
+    /// resolve must never keep the previous repository's remote alive (the
+    /// receipt copy and the `r` refresh both key off it).
     pub fn enter_github(&mut self) {
         self.github_state.tab = GithubTab::Pulls;
         self.github_state.selected = 0;
-        self.github_state.owner.clear();
-        self.github_state.repo.clear();
+        // The label is read before the reset so this failure can still name
+        // the platform; a GitHub remote keeps its v0.5.0 wording.
+        let platform = self.github_state.kind();
+        // `remote` is the single source of truth, so it is dropped up front:
+        // a repository whose remote cannot be resolved must never leave the
+        // previous repository's remote alive (the receipt copy and the `r`
+        // refresh both key off it).
+        self.github_state.remote = None;
         self.view = View::Pulls;
         self.clear_error();
 
         let Some(repo) = self.current_repo_path() else {
-            self.set_error("打开 GitHub 回执失败: 未打开仓库");
+            self.set_error(format!(
+                "打开 {} 回执失败: 未打开仓库",
+                platform.map_or("平台", |kind| kind.as_str())
+            ));
             return;
         };
         let url = match crate::git::remote_url(&repo) {
             Ok(url) => url,
             Err(e) => {
+                // The git layer hands back an `anyhow::Error`, which
+                // `render_platform_error` cannot take (it renders
+                // `PlatformError`); the two platform failures below do go
+                // through it, so the two error renderings are not
+                // interchangeable but are equally readable.
                 self.set_error(format!("解析远端失败: {e}"));
                 return;
             }
@@ -875,8 +938,6 @@ impl App {
                 return;
             }
         };
-        self.github_state.owner = remote.owner.clone();
-        self.github_state.repo = remote.repo.clone();
         self.github_state.remote = Some(remote.clone());
 
         if self.github_state.client.is_none() {
@@ -958,9 +1019,12 @@ impl App {
         if self.github_state.client.is_none() || self.github_rx.is_some() {
             return;
         }
-        let remote = self.github_state.remote.clone().unwrap();
+        let Some(remote) = self.github_state.remote.clone() else {
+            self.set_error("未解析到远端，无法加载 PR 详情");
+            return;
+        };
         self.remote_status = Some(RemoteStatus::Running("加载 PR…".to_string()));
-        self.remote_op = "github";
+        self.remote_op = platform_op_slug(remote.kind);
         let (tx, rx) = mpsc::unbounded_channel();
         self.github_rx = Some(rx);
         tokio::spawn(async move {
@@ -970,12 +1034,11 @@ impl App {
                         let _ = tx.send(GithubMsg::Detail(detail));
                     }
                     Err(e) => {
-                        let _ =
-                            tx.send(GithubMsg::Error(crate::platform::render_platform_error(&e)));
+                        let _ = tx.send(GithubMsg::Error(e));
                     }
                 },
                 Err(e) => {
-                    let _ = tx.send(GithubMsg::Error(crate::platform::render_platform_error(&e)));
+                    let _ = tx.send(GithubMsg::Error(e));
                 }
             }
         });
@@ -997,9 +1060,12 @@ impl App {
         if self.github_state.client.is_none() || self.github_rx.is_some() {
             return;
         }
-        let remote = self.github_state.remote.clone().unwrap();
+        let Some(remote) = self.github_state.remote.clone() else {
+            self.set_error("未解析到远端，无法加载 Issue 详情");
+            return;
+        };
         self.remote_status = Some(RemoteStatus::Running("加载 Issue…".to_string()));
-        self.remote_op = "github";
+        self.remote_op = platform_op_slug(remote.kind);
         let (tx, rx) = mpsc::unbounded_channel();
         self.github_rx = Some(rx);
         tokio::spawn(async move {
@@ -1009,12 +1075,11 @@ impl App {
                         let _ = tx.send(GithubMsg::IssueDetail(detail));
                     }
                     Err(e) => {
-                        let _ =
-                            tx.send(GithubMsg::Error(crate::platform::render_platform_error(&e)));
+                        let _ = tx.send(GithubMsg::Error(e));
                     }
                 },
                 Err(e) => {
-                    let _ = tx.send(GithubMsg::Error(crate::platform::render_platform_error(&e)));
+                    let _ = tx.send(GithubMsg::Error(e));
                 }
             }
         });
@@ -1034,9 +1099,14 @@ impl App {
         if self.remote_rx.is_some() || self.batch_rx.is_some() || self.github_rx.is_some() {
             return;
         }
+        let Some(remote) = self.github_state.remote.clone() else {
+            self.remote_status = Some(RemoteStatus::Error(
+                "未解析到远端，请重新进入回执视图".to_string(),
+            ));
+            return;
+        };
         self.remote_status = Some(RemoteStatus::Running("加载回执…".to_string()));
-        self.remote_op = "github";
-        let remote = self.github_state.remote.clone().unwrap();
+        self.remote_op = platform_op_slug(remote.kind);
         let tab = self.github_state.tab;
         let repo_path = self.current_repo_path().map(|p| p.to_path_buf());
         self.github_state.detail = None;
@@ -1047,7 +1117,7 @@ impl App {
             let client = match crate::platform::build_client(&remote) {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = tx.send(GithubMsg::Error(crate::platform::render_platform_error(&e)));
+                    let _ = tx.send(GithubMsg::Error(e));
                     return;
                 }
             };
@@ -1057,27 +1127,25 @@ impl App {
             match tab {
                 GithubTab::Pulls => match client.list_pulls().await {
                     Ok(v) => send(GithubMsg::Pulls(v)),
-                    Err(e) => send(GithubMsg::Error(crate::platform::render_platform_error(&e))),
+                    Err(e) => send(GithubMsg::Error(e)),
                 },
                 GithubTab::Issues => match client.list_issues().await {
                     Ok(v) => send(GithubMsg::Issues(v)),
-                    Err(e) => send(GithubMsg::Error(crate::platform::render_platform_error(&e))),
+                    Err(e) => send(GithubMsg::Error(e)),
                 },
                 GithubTab::Notifications => match client.list_notifications().await {
                     Ok(v) => send(GithubMsg::Notifications(v)),
-                    Err(e) => send(GithubMsg::Error(crate::platform::render_platform_error(&e))),
+                    Err(e) => send(GithubMsg::Error(e)),
                 },
                 GithubTab::Checks => match repo_path {
                     Some(path) => match crate::git::head_sha(&path) {
                         Ok(sha) => match client.list_checks(&sha).await {
                             Ok(v) => send(GithubMsg::Checks(v)),
-                            Err(e) => {
-                                send(GithubMsg::Error(crate::platform::render_platform_error(&e)))
-                            }
+                            Err(e) => send(GithubMsg::Error(e)),
                         },
-                        Err(e) => send(GithubMsg::Error(e.to_string())),
+                        Err(e) => send(GithubMsg::Other(e.to_string())),
                     },
-                    None => send(GithubMsg::Error(
+                    None => send(GithubMsg::Other(
                         "未打开仓库，无法获取 HEAD 提交".to_string(),
                     )),
                 },
@@ -1095,7 +1163,11 @@ impl App {
             Err(mpsc::error::TryRecvError::Empty) => return,
             Err(mpsc::error::TryRecvError::Disconnected) => {
                 self.github_rx = None;
-                self.remote_status = Some(RemoteStatus::Error("GitHub 任务意外退出".to_string()));
+                let platform = self.github_state.kind();
+                self.remote_status = Some(RemoteStatus::Error(format!(
+                    "{} 任务意外退出",
+                    platform.map_or("平台", |kind| kind.as_str())
+                )));
                 return;
             }
         };
@@ -1127,7 +1199,12 @@ impl App {
                 self.remote_status = Some(RemoteStatus::Success);
             }
             GithubMsg::Error(e) => {
-                self.remote_status = Some(RemoteStatus::Error(e));
+                self.remote_status = Some(RemoteStatus::Error(
+                    crate::platform::render_platform_error(&e),
+                ));
+            }
+            GithubMsg::Other(message) => {
+                self.remote_status = Some(RemoteStatus::Error(message));
             }
         }
     }
@@ -3582,6 +3659,310 @@ mod tests {
                 && (e.status().contains(git2::Status::INDEX_MODIFIED)
                     || e.status().contains(git2::Status::INDEX_NEW))
         })
+    }
+
+    /// Repository with one commit whose `origin` points at `url` — the two
+    /// shapes the receipts hub must tell apart (a platform URL, a local path).
+    fn repo_with_remote_at(dir: &std::path::Path, url: &str) {
+        init_repo_with_commit(dir);
+        let repo = git2::Repository::open(dir).unwrap();
+        repo.remote("origin", url).unwrap();
+    }
+
+    /// Arm `github_rx` with a sender that is already gone, so the next
+    /// `poll_github` observes the disconnected arm.
+    fn arm_dead_receiver(app: &mut App) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        app.github_rx = Some(rx);
+        drop(tx);
+    }
+
+    // ---------- receipts hub: remote as the single source of truth ----------
+
+    /// U1: `remote` is the only place the receipt copy comes from, so entering
+    /// the hub fills it and every failure path empties it.
+    #[tokio::test]
+    async fn enter_github_clears_the_previous_remote_when_the_next_one_cannot_be_parsed() {
+        let root = temp_dir("github-remote-reset");
+        // A credential is needed for A to cache a gate, which is what the `r`
+        // case below relies on; the fetch itself never reaches the network.
+        if std::env::var("GITHUB_TOKEN").is_err() {
+            std::env::set_var("GITHUB_TOKEN", "test-token");
+        }
+        let good = root.join("good");
+        repo_with_remote_at(&good, "https://github.com/octo/demo.git");
+        // A local path has no scheme/host, so `parse_remote` rejects it.
+        let bad = root.join("bad");
+        repo_with_remote_at(&bad, root.join("origin.git").to_str().unwrap());
+        std::fs::create_dir_all(root.join("origin.git")).unwrap();
+
+        let mut app = App::new(Config::default());
+        app.repos.push(git::query_status(&good).unwrap());
+        app.repos.push(git::query_status(&bad).unwrap());
+
+        // A resolves: the panels read owner/repo/platform off the remote.
+        app.current_repo = Some(0);
+        app.enter_github();
+        assert_eq!(app.github_state.owner(), Some("octo"));
+        assert_eq!(app.github_state.repo(), Some("demo"));
+        assert_eq!(
+            app.github_state.kind(),
+            Some(crate::platform::PlatformKind::GitHub)
+        );
+        // The readiness gate cached while entering A is what makes the `r`
+        // case below bite; the fetch A armed is dropped so the B `r` is the
+        // only receiver in play.
+        assert!(
+            app.github_state.client.is_some(),
+            "A must cache a gate for the stale-gate case to bite"
+        );
+        app.github_rx = None;
+
+        // B does not: nothing of A may survive, or the panel would keep
+        // showing A's repo and `r` would fetch A's data.
+        app.current_repo = Some(1);
+        app.enter_github();
+        assert!(
+            app.github_state.remote.is_none(),
+            "stale remote survived: {:?}",
+            app.github_state.remote
+        );
+        assert_eq!(app.github_state.owner(), None, "titles must fall back");
+        assert_eq!(app.github_state.repo(), None, "titles must fall back");
+        assert_eq!(app.github_state.kind(), None);
+        let status = app.status.as_ref().expect("the parse failure is reported");
+        assert!(status.is_error, "expected an error status: {status:?}");
+
+        // The gate cached from A must not turn `r` into a fetch against it.
+        assert!(app.dispatch_key(key(KeyCode::Char('r'))));
+        assert!(app.github_state.remote.is_none(), "remote stays empty");
+        assert!(
+            app.github_rx.is_none(),
+            "no fetch may be armed without a remote"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// U1: the accessors are views onto `remote`, including its two "not
+    /// usable for a title" shapes — no remote, and a half-filled one.
+    #[test]
+    fn github_state_accessors_mirror_the_remote_or_report_nothing() {
+        let state = GithubState::default();
+        assert_eq!(state.owner(), None, "no remote resolved");
+        assert_eq!(state.repo(), None);
+        assert_eq!(state.kind(), None);
+
+        let mut state = GithubState::default();
+        let mut remote = crate::platform::parse_remote("https://github.com/octo/demo.git").unwrap();
+        state.remote = Some(remote.clone());
+        assert_eq!(state.owner(), Some("octo"));
+        assert_eq!(state.repo(), Some("demo"));
+        assert_eq!(state.kind(), Some(crate::platform::PlatformKind::GitHub));
+
+        // An empty segment can never complete an `owner/repo` title.
+        remote.owner.clear();
+        state.remote = Some(remote.clone());
+        assert_eq!(state.owner(), None, "an empty owner is no owner");
+        assert_eq!(state.repo(), Some("demo"), "the other half still reads");
+        remote.repo.clear();
+        state.remote = Some(remote);
+        assert_eq!(state.repo(), None, "an empty repo is no repo");
+    }
+
+    /// U5: a git-layer failure reaches the panel verbatim, without being
+    /// wrapped in a platform wording it does not belong to.
+    #[test]
+    fn poll_github_shows_a_non_platform_failure_untouched() {
+        let mut app = App::new(Config::default());
+        app.view = View::Pulls;
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(GithubMsg::Other(
+            "未打开仓库，无法获取 HEAD 提交".to_string(),
+        ))
+        .unwrap();
+        drop(tx);
+        app.github_rx = Some(rx);
+        app.poll_github();
+        assert_eq!(
+            app.remote_status,
+            Some(RemoteStatus::Error(
+                "未打开仓库，无法获取 HEAD 提交".to_string()
+            )),
+            "a git-layer message is shown as written"
+        );
+    }
+
+    /// U5: a platform failure is rendered once, in `poll_github`, so every
+    /// sender agrees on the wording.
+    #[test]
+    fn poll_github_renders_a_platform_failure_through_the_shared_renderer() {
+        let mut app = App::new(Config::default());
+        app.view = View::Pulls;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let error = crate::platform::PlatformError::Network("boom".to_string());
+        let expected = crate::platform::render_platform_error(&error);
+        assert_eq!(expected, "网络错误，请检查网络连接", "the shared wording");
+        tx.send(GithubMsg::Error(error)).unwrap();
+        drop(tx);
+        app.github_rx = Some(rx);
+        app.poll_github();
+        assert_eq!(app.remote_status, Some(RemoteStatus::Error(expected)));
+    }
+
+    /// U3: with no repository open there is no remote to name, so the copy stays
+    /// neutral — but a GitHub remote keeps its v0.5.0 wording.
+    #[test]
+    fn enter_github_without_a_repository_names_only_a_known_platform() {
+        let mut app = App::new(Config::default());
+        app.enter_github();
+        let message = &app.status.as_ref().expect("an error is reported").message;
+        assert!(message.contains("未打开仓库"), "unexpected copy: {message}");
+        assert!(message.contains("平台"), "neutral fallback: {message}");
+
+        app.github_state.remote = Some(crate::ui::github_remote());
+        app.enter_github();
+        assert_eq!(
+            app.status.as_ref().map(|s| s.message.as_str()),
+            Some("打开 GitHub 回执失败: 未打开仓库"),
+            "GitHub copy must stay byte-identical to v0.5.0"
+        );
+    }
+
+    /// U2: `r` without a resolved remote reports instead of panicking — both
+    /// with no client at all and with a stale gate left by an earlier repo.
+    #[test]
+    fn refresh_without_a_remote_reports_instead_of_panicking() {
+        let mut app = App::new(Config::default());
+        app.view = View::Pulls;
+        assert!(app.dispatch_key(key(KeyCode::Char('r'))));
+        assert!(app.github_rx.is_none(), "no client, nothing spawned");
+
+        app.github_state.client = Some(crate::ui::pulls::offline_client());
+        assert!(app.dispatch_key(key(KeyCode::Char('r'))));
+        assert!(app.github_rx.is_none(), "no remote, nothing spawned");
+        match &app.remote_status {
+            Some(RemoteStatus::Error(msg)) => {
+                assert!(msg.contains("未解析到远端"), "unhelpful status: {msg}");
+            }
+            other => panic!("expected an explanatory error, got {other:?}"),
+        }
+    }
+
+    /// U2: the detail views guard the same way — the panel still opens, so the
+    /// user gets the explanation instead of a panic.
+    #[test]
+    fn opening_a_detail_without_a_remote_reports_instead_of_panicking() {
+        let mut app = App::new(Config::default());
+        app.view = View::Pulls;
+        app.github_state.client = Some(crate::ui::pulls::offline_client());
+        app.github_state.pulls = vec![crate::platform::PrSummary {
+            number: 1,
+            title: "t".to_string(),
+            state: "open".to_string(),
+            draft: false,
+            author: "alice".to_string(),
+            head_ref: "feat".to_string(),
+            base_ref: "main".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }];
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
+        assert_eq!(app.view, View::PullDetail, "the panel still opens");
+        assert!(app.github_rx.is_none(), "nothing spawned");
+        assert!(
+            app.status
+                .as_ref()
+                .is_some_and(|s| s.message.contains("未解析到远端")),
+            "the user is told why nothing loads"
+        );
+    }
+
+    /// U3: the op label follows the remote's platform; GitHub keeps its v0.5.0
+    /// `github` slug so `github 成功` stays byte-identical.
+    #[test]
+    fn receipt_op_label_follows_the_remote_platform() {
+        use crate::platform::PlatformKind;
+        assert_eq!(platform_op_slug(PlatformKind::GitHub), "github");
+        assert_eq!(platform_op_slug(PlatformKind::GitLab), "gitlab");
+        assert_eq!(platform_op_slug(PlatformKind::Gitea), "gitea");
+        assert_eq!(platform_op_slug(PlatformKind::SelfHosted), "self-hosted");
+        for kind in [
+            PlatformKind::GitLab,
+            PlatformKind::Gitea,
+            PlatformKind::SelfHosted,
+        ] {
+            let op = platform_op_slug(kind);
+            assert!(
+                op != "github" && op != "GitHub",
+                "{kind:?} borrows the GitHub op label"
+            );
+        }
+    }
+
+    /// U3: the op label a fetch arms is the remote's platform, so the status
+    /// row reads `gitlab 成功` / `gitea 成功` and never borrows the GitHub name.
+    #[tokio::test]
+    async fn refresh_github_labels_the_op_with_the_remote_platform() {
+        for (url, env, expected) in [
+            (
+                "https://gitlab.com/group/proj.git",
+                "GITLAB_TOKEN",
+                "gitlab",
+            ),
+            ("https://gitea.com/octo/demo.git", "GITEA_TOKEN", "gitea"),
+        ] {
+            if std::env::var(env).is_err() {
+                std::env::set_var(env, "test-token");
+            }
+            let mut app = App::new(Config::default());
+            app.view = View::Pulls;
+            let remote = crate::platform::parse_remote(url).unwrap();
+            // The gate is what `refresh_github` checks before arming; the
+            // spawned task is never polled, so this never reaches the network.
+            app.github_state.client = Some(crate::platform::build_client(&remote).expect("gate"));
+            app.github_state.remote = Some(remote);
+            app.refresh_github();
+            assert_eq!(
+                app.remote_op, expected,
+                "{url}: wrong op label ({expected} 成功 is what the user reads)"
+            );
+            assert_ne!(app.remote_op, "github", "{url}: GitHub op leaked");
+            app.github_rx = None;
+        }
+    }
+
+    /// U3: a task that dies is reported by platform, not by a hardcoded name.
+    #[test]
+    fn poll_github_names_the_platform_of_a_dead_fetch_task() {
+        let mut app = App::new(Config::default());
+        app.view = View::Pulls;
+        app.github_state.remote =
+            Some(crate::platform::parse_remote("https://gitlab.com/group/proj.git").unwrap());
+        arm_dead_receiver(&mut app);
+        app.poll_github();
+        assert!(app.github_rx.is_none(), "the dead receiver is dropped");
+        assert_eq!(
+            app.remote_status,
+            Some(RemoteStatus::Error("GitLab 任务意外退出".to_string())),
+            "a GitLab remote must not be reported as GitHub"
+        );
+
+        // GitHub keeps its v0.5.0 wording; an unknown remote stays neutral.
+        app.github_state.remote = Some(crate::ui::github_remote());
+        arm_dead_receiver(&mut app);
+        app.poll_github();
+        assert_eq!(
+            app.remote_status,
+            Some(RemoteStatus::Error("GitHub 任务意外退出".to_string()))
+        );
+
+        app.github_state.remote = None;
+        arm_dead_receiver(&mut app);
+        app.poll_github();
+        assert_eq!(
+            app.remote_status,
+            Some(RemoteStatus::Error("平台 任务意外退出".to_string()))
+        );
     }
 
     // ---------- A: pure state machine ----------

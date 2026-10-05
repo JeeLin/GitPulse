@@ -1,12 +1,12 @@
-//! Error type and user-facing rendering for GitHub API access.
+//! Error type for GitHub API access (rendering lives in `platform::error`).
 
 use thiserror::Error;
 
 /// Errors produced by [`crate::github::GithubClient`].
 ///
 /// Network/HTTP failures from octocrab are normalized into the [`Http`], [`Network`], and
-/// [`Other`] variants so the UI can render a stable, human-readable message through
-/// [`render_error`] regardless of octocrab's internal error shape.
+/// [`Other`] variants so [`crate::platform::render_platform_error`] can render a
+/// stable, human-readable message regardless of octocrab's internal error shape.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum GithubError {
     /// No usable GitHub token could be resolved (`GITHUB_TOKEN` / `gh auth token`).
@@ -54,114 +54,45 @@ impl From<octocrab::Error> for GithubError {
     }
 }
 
-/// Render an error as a short, user-facing line.
-///
-/// M2's single text channel: the caller passes the result to `App::set_error`.
-/// Status-aware mapping per design step2 (401/404/403/rate-limit/5xx/network).
-#[allow(dead_code)]
-pub fn render_error(e: &GithubError) -> String {
-    match e {
-        GithubError::Token(m) | GithubError::NotGitHub(m) => m.clone(),
-        GithubError::Network(_) => "网络错误，请检查网络连接".to_string(),
-        GithubError::Other(m) => format!("GitHub 错误: {m}"),
-        GithubError::Http {
-            status,
-            message,
-            rate_limited,
-        } => {
-            if *rate_limited || *status == 429 {
-                return "GitHub 速率限制，请稍后重试".to_string();
-            }
-            match *status {
-                401 => "GitHub 认证失败，请检查 GITHUB_TOKEN / gh auth token".to_string(),
-                403 => "无权限访问该资源".to_string(),
-                404 => "仓库/资源不存在或无权限".to_string(),
-                500..=599 => "GitHub 服务端错误，请稍后重试".to_string(),
-                _ => {
-                    if message.is_empty() {
-                        format!("GitHub HTTP {status}")
-                    } else {
-                        message.clone()
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn render_token_and_not_github_passthrough() {
+    fn github_error_display_is_the_message() {
         assert_eq!(
-            render_error(&GithubError::Token("需要 token".into())),
+            GithubError::Token("需要 token".into()).to_string(),
             "需要 token"
         );
         assert_eq!(
-            render_error(&GithubError::NotGitHub("非 GitHub 远端".into())),
-            "非 GitHub 远端"
+            GithubError::Network("dns fail".into()).to_string(),
+            "dns fail"
         );
     }
 
     #[test]
-    fn render_network_is_generic() {
-        assert_eq!(
-            render_error(&GithubError::Network("dns fail".into())),
-            "网络错误，请检查网络连接"
-        );
+    fn http_variant_renders_its_message() {
+        let e = GithubError::Http {
+            status: 404,
+            message: "Not Found".into(),
+            rate_limited: false,
+        };
+        assert_eq!(e.to_string(), "Not Found");
     }
 
     #[test]
-    fn render_other_keeps_detail() {
+    fn from_octocrab_maps_http_status_and_rate_limit() {
+        // Building an octocrab::Error without the network is awkward; assert the
+        // mapping contract on the enum shapes that matter instead.
+        let e = GithubError::Http {
+            status: 429,
+            message: String::new(),
+            rate_limited: true,
+        };
+        let p: crate::platform::PlatformError = e.into();
         assert_eq!(
-            render_error(&GithubError::Other("boom".into())),
-            "GitHub 错误: boom"
-        );
-    }
-
-    #[test]
-    fn render_status_specific_messages() {
-        let cases = [
-            (
-                401,
-                false,
-                "GitHub 认证失败，请检查 GITHUB_TOKEN / gh auth token",
-            ),
-            (403, false, "无权限访问该资源"),
-            (404, false, "仓库/资源不存在或无权限"),
-            (503, false, "GitHub 服务端错误，请稍后重试"),
-            (429, false, "GitHub 速率限制，请稍后重试"),
-            (403, true, "GitHub 速率限制，请稍后重试"),
-        ];
-        for (status, rate_limited, want) in cases {
-            let got = render_error(&GithubError::Http {
-                status,
-                message: "ignored".into(),
-                rate_limited,
-            });
-            assert_eq!(got, want, "status={status} rate_limited={rate_limited}");
-        }
-    }
-
-    #[test]
-    fn render_unknown_status_falls_back_to_message() {
-        assert_eq!(
-            render_error(&GithubError::Http {
-                status: 418,
-                message: "teapot".into(),
-                rate_limited: false,
-            }),
-            "teapot"
-        );
-        assert_eq!(
-            render_error(&GithubError::Http {
-                status: 418,
-                message: String::new(),
-                rate_limited: false,
-            }),
-            "GitHub HTTP 418"
+            crate::platform::render_platform_error(&p),
+            "GitHub 速率限制，请稍后重试"
         );
     }
 }

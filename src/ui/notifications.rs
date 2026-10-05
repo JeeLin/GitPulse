@@ -29,7 +29,7 @@ pub fn render_notifications(f: &mut Frame, content: Rect, app: &App) {
     let area = content;
     let chunks = panel_chunks(area);
     if app.github_state.client.is_none() {
-        render_disconnected(f, chunks[0], "通知", app);
+        render_disconnected(f, chunks[0], "通知", app.github_state.kind(), app);
         render_footer(f, chunks[1], chunks[2], app, false);
         return;
     }
@@ -38,8 +38,8 @@ pub fn render_notifications(f: &mut Frame, content: Rect, app: &App) {
     let block = Block::default()
         .title(panel_title(
             "通知",
-            &app.github_state.owner,
-            &app.github_state.repo,
+            app.github_state.owner(),
+            app.github_state.repo(),
         ))
         .borders(Borders::ALL);
 
@@ -123,11 +123,11 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    /// Connected app: `owner`/`repo` filled in and the readiness gate built.
+    /// Connected app: the `octo/demo` remote resolved and the readiness gate
+    /// built, so the panel renders the real title instead of the `—` fallback.
     fn connected_app() -> App {
         let mut app = App::new(Config::default());
-        app.github_state.owner = "octo".to_string();
-        app.github_state.repo = "demo".to_string();
+        app.github_state.remote = Some(crate::ui::github_remote());
         app.github_state.client = Some(offline_client());
         app
     }
@@ -235,7 +235,8 @@ mod tests {
         app.set_error("gh 不可用，无法自动获取 token");
         app.github_state.notifications = vec![note("ghost", "Issue", true)];
         let text = render_text(&app);
-        assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
+        // The remote failed to resolve, so the gate copy names no platform.
+        assert!(text.contains("尚未连接平台"), "missing gate copy: {text}");
         assert!(text.contains("gh不可用"), "status must show: {text}");
         assert!(!text.contains("ghost"), "no rows without a client: {text}");
         assert!(!text.contains('●'), "no marker without a client: {text}");

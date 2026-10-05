@@ -93,11 +93,52 @@ pub(crate) fn meta_budget(meta: &str, width: usize) -> usize {
 
 /// Panel title: `label · owner/repo`, falling back to `—` while the remote
 /// pair is unknown (a failed hub entry never fills it in).
-pub(crate) fn panel_title(label: &str, owner: &str, repo: &str) -> String {
-    if owner.is_empty() || repo.is_empty() {
-        format!("{label} · —")
-    } else {
-        format!("{label} · {owner}/{repo}")
+pub(crate) fn panel_title(label: &str, owner: Option<&str>, repo: Option<&str>) -> String {
+    match (owner, repo) {
+        (Some(owner), Some(repo)) if !owner.is_empty() && !repo.is_empty() => {
+            format!("{label} · {owner}/{repo}")
+        }
+        _ => format!("{label} · —"),
+    }
+}
+
+/// The two lines the disconnected body prints above the status line: the
+/// gate headline plus the credential hint of the platform that owns the
+/// resolved remote. Both are `&'static str` so a family only ever grows one
+/// entry here instead of a copy per panel.
+pub(crate) struct DisconnectedCopy {
+    /// Headline: which platform the client is not connected to.
+    pub title: &'static str,
+    /// How to obtain a credential for that platform, and the retry key.
+    pub hint: &'static str,
+}
+
+/// Credential guidance for `kind`, falling back to neutral copy when no
+/// remote has been resolved yet (`None`) — the hint then names no token var,
+/// because there is no platform to own one.
+pub(crate) fn disconnected_copy(kind: Option<crate::platform::PlatformKind>) -> DisconnectedCopy {
+    use crate::platform::PlatformKind;
+    match kind {
+        Some(PlatformKind::GitHub) => DisconnectedCopy {
+            title: "尚未连接 GitHub",
+            hint: "配置 GITHUB_TOKEN 或 gh 登录后按 r 重试",
+        },
+        Some(PlatformKind::GitLab) => DisconnectedCopy {
+            title: "尚未连接 GitLab",
+            hint: "配置 GITLAB_TOKEN 或 glab 登录后按 r 重试",
+        },
+        Some(PlatformKind::Gitea) => DisconnectedCopy {
+            title: "尚未连接 Gitea",
+            hint: "配置 GITEA_TOKEN 后按 r 重试",
+        },
+        Some(PlatformKind::SelfHosted) => DisconnectedCopy {
+            title: "尚未连接自托管平台",
+            hint: "配置访问令牌后按 r 重试",
+        },
+        None => DisconnectedCopy {
+            title: "尚未连接平台",
+            hint: "配置访问令牌后按 r 重试",
+        },
     }
 }
 
@@ -281,27 +322,34 @@ pub(crate) fn render_footer(
     f.render_widget(Paragraph::new(receipt_hints(show_enter).view), hints_area);
 }
 
-/// Panel body shown while the GitHub client is not ready: the status or
-/// error line promoted into the content area, above the retry guidance,
-/// instead of a list that could never load.
-pub(crate) fn render_disconnected(f: &mut Frame, area: Rect, label: &str, app: &App) {
+/// Panel body shown while the platform client is not ready: the platform's own
+/// gate copy plus the status or error line promoted into the content area,
+/// above the retry guidance, instead of a list that could never load.
+pub(crate) fn render_disconnected(
+    f: &mut Frame,
+    area: Rect,
+    label: &str,
+    kind: Option<crate::platform::PlatformKind>,
+    app: &App,
+) {
     let block = Block::default()
         .title(panel_title(
             label,
-            &app.github_state.owner,
-            &app.github_state.repo,
+            app.github_state.owner(),
+            app.github_state.repo(),
         ))
         .borders(Borders::ALL);
 
+    let copy = disconnected_copy(kind);
     let mut lines = vec![
         Line::from(Span::styled(
-            "尚未连接 GitHub",
+            copy.title,
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "配置 GITHUB_TOKEN 或 gh 登录后按 r 重试",
+            copy.hint,
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
@@ -321,7 +369,7 @@ pub(crate) fn render_disconnected(f: &mut Frame, area: Rect, label: &str, app: &
 pub fn render_pulls(f: &mut Frame, content: Rect, app: &App) {
     let chunks = panel_chunks(content);
     if app.github_state.client.is_none() {
-        render_disconnected(f, chunks[0], "PR 列表", app);
+        render_disconnected(f, chunks[0], "PR 列表", app.github_state.kind(), app);
         render_footer(f, chunks[1], chunks[2], app, true);
         return;
     }
@@ -330,8 +378,8 @@ pub fn render_pulls(f: &mut Frame, content: Rect, app: &App) {
     let block = Block::default()
         .title(panel_title(
             "PR 列表",
-            &app.github_state.owner,
-            &app.github_state.repo,
+            app.github_state.owner(),
+            app.github_state.repo(),
         ))
         .borders(Borders::ALL);
 
@@ -392,7 +440,7 @@ fn pull_item(pr: &PrSummary, width: usize) -> ListItem<'static> {
 pub fn render_pull_detail(f: &mut Frame, content: Rect, app: &App) {
     let chunks = panel_chunks(content);
     if app.github_state.client.is_none() {
-        render_disconnected(f, chunks[0], "PR 详情", app);
+        render_disconnected(f, chunks[0], "PR 详情", app.github_state.kind(), app);
         render_footer(f, chunks[1], chunks[2], app, false);
         return;
     }
@@ -400,8 +448,8 @@ pub fn render_pull_detail(f: &mut Frame, content: Rect, app: &App) {
     let block = Block::default()
         .title(panel_title(
             "PR 详情",
-            &app.github_state.owner,
-            &app.github_state.repo,
+            app.github_state.owner(),
+            app.github_state.repo(),
         ))
         .borders(Borders::ALL);
 
@@ -540,11 +588,11 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    /// Connected app: `owner`/`repo` filled in and the readiness gate built.
+    /// Connected app: the `octo/demo` remote resolved and the readiness gate
+    /// built, so the panels render the real titles instead of the `—` fallback.
     fn connected_app() -> App {
         let mut app = App::new(Config::default());
-        app.github_state.owner = "octo".to_string();
-        app.github_state.repo = "demo".to_string();
+        app.github_state.remote = Some(crate::ui::github_remote());
         app.github_state.client = Some(offline_client());
         app
     }
@@ -629,7 +677,8 @@ mod tests {
         app.set_error("打开 GitHub 回执失败: 未打开仓库");
         app.github_state.pulls = vec![pull(1, "ghost", false)];
         let text = render_text(&app, render_pulls);
-        assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
+        // No remote has been resolved, so the gate copy stays platform-neutral.
+        assert!(text.contains("尚未连接平台"), "missing gate copy: {text}");
         assert!(
             text.contains("未打开仓库"),
             "status line must be prominent: {text}"
@@ -734,11 +783,92 @@ mod tests {
     #[test]
     fn panel_title_falls_back_while_the_remote_pair_is_unknown() {
         assert_eq!(
-            panel_title("PR 列表", "octo", "demo"),
+            panel_title("PR 列表", Some("octo"), Some("demo")),
             "PR 列表 · octo/demo"
         );
-        assert_eq!(panel_title("PR 列表", "", ""), "PR 列表 · —");
-        assert_eq!(panel_title("通知", "octo", ""), "通知 · —");
+        assert_eq!(panel_title("PR 列表", None, None), "PR 列表 · —");
+        assert_eq!(panel_title("通知", Some("octo"), None), "通知 · —");
+        assert_eq!(
+            panel_title("通知", Some("octo"), Some("")),
+            "通知 · —",
+            "an empty segment still counts as unknown"
+        );
+    }
+
+    /// U4: the disconnected body names the platform that owns the remote, so
+    /// the credential hint always matches the token the client wants.
+    #[test]
+    fn disconnected_copy_names_the_credential_of_each_platform() {
+        use crate::platform::PlatformKind;
+        assert_eq!(
+            disconnected_copy(Some(PlatformKind::GitHub)).title,
+            "尚未连接 GitHub"
+        );
+        assert_eq!(
+            disconnected_copy(Some(PlatformKind::GitHub)).hint,
+            "配置 GITHUB_TOKEN 或 gh 登录后按 r 重试"
+        );
+        assert_eq!(
+            disconnected_copy(Some(PlatformKind::GitLab)).title,
+            "尚未连接 GitLab"
+        );
+        assert_eq!(
+            disconnected_copy(Some(PlatformKind::GitLab)).hint,
+            "配置 GITLAB_TOKEN 或 glab 登录后按 r 重试"
+        );
+        assert_eq!(
+            disconnected_copy(Some(PlatformKind::Gitea)).title,
+            "尚未连接 Gitea"
+        );
+        assert_eq!(
+            disconnected_copy(Some(PlatformKind::Gitea)).hint,
+            "配置 GITEA_TOKEN 后按 r 重试"
+        );
+        assert_eq!(
+            disconnected_copy(Some(PlatformKind::SelfHosted)).title,
+            "尚未连接自托管平台"
+        );
+        // No remote resolved: stay neutral instead of guessing a token var.
+        let unknown = disconnected_copy(None);
+        assert_eq!(unknown.title, "尚未连接平台");
+        assert_eq!(unknown.hint, "配置访问令牌后按 r 重试");
+        assert!(!unknown.hint.contains("TOKEN"), "no var is named");
+    }
+
+    /// U4: a GitLab/Gitea remote must reach the body, not just the helper.
+    #[test]
+    fn pulls_disconnected_renders_the_gate_copy_of_the_remote_platform() {
+        let cases = [
+            (
+                "https://github.com/octo/demo.git",
+                "尚未连接GitHub",
+                "GITHUB_TOKEN",
+                "GitLab",
+            ),
+            (
+                "https://gitlab.com/group/proj.git",
+                "尚未连接GitLab",
+                "GITLAB_TOKEN",
+                "GitHub",
+            ),
+            (
+                "https://gitea.com/octo/demo.git",
+                "尚未连接Gitea",
+                "GITEA_TOKEN",
+                "GitHub",
+            ),
+        ];
+        for (url, gate, hint, foreign) in cases {
+            let mut app = App::new(Config::default());
+            app.github_state.remote = Some(crate::platform::parse_remote(url).unwrap());
+            let text = render_text(&app, render_pulls);
+            assert!(text.contains(gate), "{url}: wrong gate copy: {text}");
+            assert!(text.contains(hint), "{url}: wrong hint: {text}");
+            assert!(
+                !text.contains(&format!("尚未连接{foreign}")),
+                "{url}: foreign copy leaked: {text}"
+            );
+        }
     }
 
     #[test]

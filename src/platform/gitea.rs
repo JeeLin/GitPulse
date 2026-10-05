@@ -1,10 +1,11 @@
 //! Gitea platform client: REST API implementation of [`PlatformClient`].
 //!
 //! Uses reqwest directly (the `gitea-rs` crate is stale). Auth is the GitHub-compatible
-//! `Authorization: token {token}` scheme, resolved via [`PlatformAuth`] / `platform::auth`.
+//! `Authorization: token {token}` scheme, resolved via [`crate::platform::auth`].
 //!
-//! Base URL: `https://{host}/api/v1`. Responses are parsed as `serde_json::Value`
-//! and mapped to the shared models in `crate::github::models`.
+//! Base URL: `{origin}/api/v1` (see [`PlatformRemote::api_base`]). Responses are
+//! parsed as `serde_json::Value` and mapped to the shared models in
+//! [`crate::platform::models`].
 
 use std::sync::Arc;
 
@@ -13,16 +14,17 @@ use reqwest::{header, Client, RequestBuilder};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 
-use crate::github::models::{
-    CheckSummary, IssueDetail, IssueSummary, NotificationSummary, PrDetail, PrSummary,
-};
 use crate::platform::auth::resolve_token;
 use crate::platform::client::PlatformClient;
 use crate::platform::error::PlatformError;
-use crate::platform::remote::PlatformRemote;
+use crate::platform::http::{cached_client, fetch_json};
+use crate::platform::models::{
+    CheckSummary, IssueDetail, IssueSummary, NotificationSummary, PrDetail, PrSummary,
+};
+use crate::platform::remote::{PlatformKind, PlatformRemote};
 
 /// Platform label used in error messages.
-const PLATFORM: &str = "Gitea";
+const PLATFORM: &str = PlatformKind::Gitea.as_str();
 
 /// Gitea REST API v1 client (async, reqwest-backed).
 pub struct GiteaClient {
@@ -34,73 +36,59 @@ pub struct GiteaClient {
 
 impl GiteaClient {
     /// Build a client for `remote`, resolving a token via `platform::auth`.
+    ///
+    /// The `reqwest::Client` (and its connection pool) is shared per host, so
+    /// rebuilding this client on every refresh is cheap.
     pub fn new(remote: &PlatformRemote) -> Result<Self, PlatformError> {
         let token = resolve_token(&remote.host, remote.kind)?;
-        let client = Client::builder()
-            .user_agent("gitpulse")
-            .build()
-            .map_err(|e| PlatformError::Other {
-                platform: PLATFORM,
-                message: e.to_string(),
-            })?;
-        let base_url = format!("https://{}/api/v1", remote.host);
+        let http = cached_client(PLATFORM, &remote.host)?;
         Ok(Self {
-            http: Arc::new(client),
+            http,
             remote: remote.clone(),
             token,
-            base_url,
+            base_url: remote.api_base("v1"),
         })
     }
 
-    /// The `Authorization: token {token}` header value.
-    fn auth_header(&self) -> header::HeaderValue {
-        let val = format!("token {}", self.token.expose_secret());
-        header::HeaderValue::from_str(&val).expect("token header value is valid")
+    /// The `Authorization: token {token}` header value for this client.
+    fn auth_header(&self) -> Result<header::HeaderValue, PlatformError> {
+        auth_header_value(self.token.expose_secret())
     }
 
     /// Build an authenticated GET request for `path`.
-    fn get(&self, path: &str) -> RequestBuilder {
+    fn get(&self, path: &str) -> Result<RequestBuilder, PlatformError> {
         let url = format!("{}{}", self.base_url, path);
-        self.http
+        Ok(self
+            .http
             .get(&url)
-            .header(header::AUTHORIZATION, self.auth_header())
+            .header(header::AUTHORIZATION, self.auth_header()?))
     }
 
-    /// Execute a GET, returning the JSON body or mapping errors to `PlatformError`.
-    async fn fetch_json(&self, req: RequestBuilder) -> Result<Value, PlatformError> {
-        let resp = req.send().await.map_err(reqwest_to_platform)?;
-        let status = resp.status().as_u16();
-        if !resp.status().is_success() {
-            let message = resp.text().await.unwrap_or_default();
-            return Err(PlatformError::Http {
-                status,
-                message,
-                rate_limited: status == 429,
-                platform: PLATFORM,
-            });
-        }
-        resp.json::<Value>()
-            .await
-            .map_err(|e| PlatformError::Other {
-                platform: PLATFORM,
-                message: e.to_string(),
-            })
+    /// GET `path` and decode the JSON body.
+    async fn fetch(&self, path: &str) -> Result<Value, PlatformError> {
+        fetch_json(PLATFORM, self.get(path)?).await
     }
 }
 
-/// Convert a `reqwest::Error` into a `PlatformError`.
+/// Build the `Authorization: token {token}` header value.
 ///
-/// Connect/timeout/build errors → `Network`; everything else (including decode
-/// and JSON errors) → `Other`.
-fn reqwest_to_platform(e: reqwest::Error) -> PlatformError {
-    if e.is_connect() || e.is_timeout() || e.is_builder() {
-        PlatformError::Network(e.to_string())
-    } else {
-        PlatformError::Other {
-            platform: PLATFORM,
-            message: e.to_string(),
-        }
-    }
+/// Gitea shares GitHub's `Authorization: token …` scheme while GitLab uses
+/// `PRIVATE-TOKEN`, so the two adapters build their headers separately; only the
+/// transport lives in `platform::http`.
+///
+/// A malformed token (CR/LF or other control characters) is an error, never a
+/// panic.
+fn auth_header_value(token: &str) -> Result<header::HeaderValue, PlatformError> {
+    header::HeaderValue::from_str(&format!("token {token}"))
+        .map_err(|e| PlatformError::Token(format!("Gitea token 含非法字符，无法作为请求头：{e}")))
+}
+
+/// Repo-scoped notification endpoint.
+///
+/// Gitea ships a repo-scoped variant (`GET /repos/{owner}/{repo}/notifications`),
+/// so the panel never has to download the whole user's notification list.
+fn notifications_path(owner: &str, repo: &str) -> String {
+    format!("/repos/{owner}/{repo}/notifications?limit=100")
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +102,7 @@ impl PlatformClient for GiteaClient {
             "/repos/{}/{}/pulls?state=open&limit=100",
             self.remote.owner, self.remote.repo,
         );
-        let json = self.fetch_json(self.get(&path)).await?;
+        let json = self.fetch(&path).await?;
         Ok(json
             .as_array()
             .map(|arr| arr.iter().map(pr_to_summary).collect())
@@ -126,7 +114,7 @@ impl PlatformClient for GiteaClient {
             "/repos/{}/{}/pulls/{}",
             self.remote.owner, self.remote.repo, number
         );
-        let json = self.fetch_json(self.get(&path)).await?;
+        let json = self.fetch(&path).await?;
         let sha = json["head"]["sha"].as_str().unwrap_or("");
         // Best-effort checks: a failure here leaves the list empty, not an error.
         let checks = self.list_checks(sha).await.unwrap_or_default();
@@ -144,7 +132,7 @@ impl PlatformClient for GiteaClient {
             "/repos/{}/{}/commits/{}/status",
             self.remote.owner, self.remote.repo, sha
         );
-        let json = self.fetch_json(self.get(&path)).await?;
+        let json = self.fetch(&path).await?;
         Ok(json["statuses"]
             .as_array()
             .map(|arr| arr.iter().map(check_to_summary).collect())
@@ -156,7 +144,7 @@ impl PlatformClient for GiteaClient {
             "/repos/{}/{}/issues?state=open&limit=100",
             self.remote.owner, self.remote.repo,
         );
-        let json = self.fetch_json(self.get(&path)).await?;
+        let json = self.fetch(&path).await?;
         Ok(json
             .as_array()
             .map(|arr| {
@@ -173,7 +161,7 @@ impl PlatformClient for GiteaClient {
             "/repos/{}/{}/issues/{}",
             self.remote.owner, self.remote.repo, number
         );
-        let json = self.fetch_json(self.get(&path)).await?;
+        let json = self.fetch(&path).await?;
         Ok(IssueDetail {
             summary: issue_to_summary(&json),
             body: json["body"].as_str().unwrap_or("").to_string(),
@@ -181,14 +169,15 @@ impl PlatformClient for GiteaClient {
     }
 
     async fn list_notifications(&self) -> Result<Vec<NotificationSummary>, PlatformError> {
-        let full_name = format!("{}/{}", self.remote.owner, self.remote.repo);
-        let json = self
-            .fetch_json(self.get("/notifications?limit=100"))
-            .await?;
+        let path = notifications_path(&self.remote.owner, &self.remote.repo);
+        let json = self.fetch(&path).await?;
         let items: Vec<NotificationSummary> = json
             .as_array()
             .map(|arr| arr.iter().map(notification_to_summary).collect())
             .unwrap_or_default();
+        // Already repo-scoped upstream; the client-side filter keeps a future
+        // switch to the global list from leaking other repositories' rows.
+        let full_name = self.remote.path.clone();
         Ok(items.into_iter().filter(|n| n.repo == full_name).collect())
     }
 }
@@ -264,7 +253,7 @@ fn issue_to_summary(v: &Value) -> IssueSummary {
 
 fn notification_to_summary(v: &Value) -> NotificationSummary {
     NotificationSummary {
-        id: v["id"].as_str().unwrap_or("").to_string(),
+        id: notification_id(&v["id"]),
         repo: v["repository"]["full_name"]
             .as_str()
             .unwrap_or("")
@@ -278,6 +267,14 @@ fn notification_to_summary(v: &Value) -> NotificationSummary {
         updated_at: v["updated_at"].as_str().unwrap_or("").to_string(),
         unread: v["unread"].as_bool().unwrap_or(false),
     }
+}
+
+/// Gitea notification thread ids are `int64`; accept a numeric or string id.
+fn notification_id(v: &Value) -> String {
+    v.as_i64()
+        .map(|i| i.to_string())
+        .or_else(|| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -337,11 +334,13 @@ mod tests {
         })
     }
 
+    /// Shape per Gitea's `NotificationThread` (int64 `id`, no `reason` field).
     fn notification_json() -> Value {
         json!({
-            "id": "nt-1",
+            "id": 1234i64,
             "unread": true,
-            "subject": { "type": "PullRequest", "title": "PR #1" },
+            "pinned": false,
+            "subject": { "type": "PullRequest", "title": "PR #1", "state": "open" },
             "repository": { "full_name": "owner/repo" },
             "updated_at": "2024-01-04T00:00:00Z"
         })
@@ -417,10 +416,61 @@ mod tests {
     #[test]
     fn notification_to_summary_extracts_fields() {
         let n = notification_to_summary(&notification_json());
-        assert_eq!(n.id, "nt-1");
+        assert_eq!(n.id, "1234");
         assert!(n.unread);
         assert_eq!(n.repo, "owner/repo");
         assert_eq!(n.subject_type, "PullRequest");
         assert_eq!(n.subject_title, "PR #1");
+    }
+
+    #[test]
+    fn notification_id_accepts_numbers_strings_and_missing() {
+        assert_eq!(notification_id(&json!(4321)), "4321");
+        assert_eq!(notification_id(&json!("nt-1")), "nt-1");
+        assert_eq!(notification_id(&Value::Null), "");
+    }
+
+    #[test]
+    fn notifications_path_is_repo_scoped() {
+        assert_eq!(
+            notifications_path("owner", "repo"),
+            "/repos/owner/repo/notifications?limit=100"
+        );
+    }
+
+    #[test]
+    fn auth_header_value_rejects_control_characters() {
+        assert!(auth_header_value("t0ken").is_ok());
+        let err = auth_header_value("bad\ntoken").expect_err("a newline must not be accepted");
+        match err {
+            PlatformError::Token(m) => assert!(m.contains("非法字符"), "unexpected: {m}"),
+            other => panic!("expected Token error, got {other:?}"),
+        }
+        let err = auth_header_value("bad\rtoken").expect_err("a CR must not be accepted");
+        assert!(matches!(err, PlatformError::Token(_)));
+    }
+
+    #[test]
+    fn new_uses_the_parsed_api_base() {
+        if std::env::var("GITEA_TOKEN").is_err() {
+            std::env::set_var("GITEA_TOKEN", "test-token");
+        }
+        let remote = crate::platform::parse_remote("https://gitea.com/owner/repo").unwrap();
+        let client = GiteaClient::new(&remote).expect("gitea client");
+        assert_eq!(client.base_url, "https://gitea.com/api/v1");
+        assert_eq!(client.base_url, remote.api_base("v1"));
+    }
+
+    #[test]
+    fn get_rejects_a_malformed_token_instead_of_panicking() {
+        let remote = crate::platform::parse_remote("https://gitea.com/owner/repo").unwrap();
+        let client = GiteaClient {
+            http: cached_client(PLATFORM, "gitea.com").expect("client"),
+            remote: remote.clone(),
+            token: SecretString::new("bad\ntoken".to_string().into_boxed_str()),
+            base_url: remote.api_base("v1"),
+        };
+        let err = client.get("/x").expect_err("malformed token must fail");
+        assert!(matches!(err, PlatformError::Token(_)));
     }
 }

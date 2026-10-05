@@ -4,6 +4,7 @@
 use thiserror::Error;
 
 use crate::github::GithubError;
+use crate::platform::remote::PlatformKind;
 
 /// Errors produced by platform clients.
 ///
@@ -30,7 +31,8 @@ pub enum PlatformError {
         message: String,
         /// Whether the API signalled rate limiting.
         rate_limited: bool,
-        /// Platform label ("GitHub", "GitLab", "Gitea", …).
+        /// Platform label (`"GitHub"`, `"GitLab"`, `"Gitea"`, … — the values of
+        /// [`PlatformKind::as_str`]).
         platform: &'static str,
     },
 
@@ -46,9 +48,10 @@ pub enum PlatformError {
     },
 }
 
-/// Map [`GithubError`] → [`PlatformError`] (platform label = "GitHub").
+/// Map [`GithubError`] → [`PlatformError`] (platform label = `"GitHub"`).
 impl From<GithubError> for PlatformError {
     fn from(e: GithubError) -> Self {
+        let platform = PlatformKind::GitHub.as_str();
         match e {
             GithubError::Token(m) => PlatformError::Token(m),
             GithubError::NotGitHub(m) => PlatformError::NotPlatform(m),
@@ -60,44 +63,37 @@ impl From<GithubError> for PlatformError {
                 status,
                 message,
                 rate_limited,
-                platform: "GitHub",
+                platform,
             },
             GithubError::Network(m) => PlatformError::Network(m),
             GithubError::Other(m) => PlatformError::Other {
-                platform: "GitHub",
+                platform,
                 message: m,
             },
         }
     }
 }
 
-/// Map `octocrab::Error` → [`PlatformError`] (platform label = "GitHub").
+/// Actionable 401 message for `platform`.
 ///
-/// Reuses the same normalization as `crate::github::error::GithubError`
-/// (`From<octocrab::Error>`): GitHub errors → `Http`, Hyper errors →
-/// `Network`, everything else → `Other`.
-impl From<octocrab::Error> for PlatformError {
-    fn from(e: octocrab::Error) -> Self {
-        match e {
-            octocrab::Error::GitHub { source, .. } => PlatformError::Http {
-                status: source.status_code.as_u16(),
-                message: source.message.clone(),
-                rate_limited: source.status_code.as_u16() == 429,
-                platform: "GitHub",
-            },
-            octocrab::Error::Hyper { .. } => PlatformError::Network(e.to_string()),
-            other => PlatformError::Other {
-                platform: "GitHub",
-                message: other.to_string(),
-            },
-        }
+/// Labels come from [`PlatformKind::as_str`], so the hint names the exact token
+/// source the user should check on that platform.
+fn token_hint(platform: &str) -> String {
+    if platform == PlatformKind::GitHub.as_str() {
+        format!("{platform} 认证失败，请检查 GITHUB_TOKEN 或 gh auth token")
+    } else if platform == PlatformKind::GitLab.as_str() {
+        format!("{platform} 认证失败，请检查 GITLAB_TOKEN 或 glab auth token")
+    } else if platform == PlatformKind::Gitea.as_str() {
+        format!("{platform} 认证失败，请检查 GITEA_TOKEN")
+    } else {
+        format!("{platform} 认证失败，请检查令牌")
     }
 }
 
 /// Render a platform error as a short, user-facing line.
 ///
-/// Mirrors [`crate::github::render_error`] but routes the status-aware mapping
-/// through the stored platform label so GitLab/Gitea messages stay consistent.
+/// Routes the status-aware mapping through the stored platform label so
+/// GitHub/GitLab/Gitea messages stay consistent and actionable.
 pub fn render_platform_error(e: &PlatformError) -> String {
     match e {
         PlatformError::Token(m) | PlatformError::NotPlatform(m) => m.clone(),
@@ -112,7 +108,7 @@ pub fn render_platform_error(e: &PlatformError) -> String {
                 return format!("{platform} 速率限制，请稍后重试");
             }
             match *status {
-                401 => format!("{platform} 认证失败，请检查令牌"),
+                401 => token_hint(platform),
                 403 => "无权限访问该资源".to_string(),
                 404 => format!("{platform} 仓库/资源不存在或无权限"),
                 500..=599 => format!("{platform} 服务端错误，请稍后重试"),
@@ -134,6 +130,15 @@ pub fn render_platform_error(e: &PlatformError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn http(status: u16, platform: &'static str) -> PlatformError {
+        PlatformError::Http {
+            status,
+            message: String::new(),
+            rate_limited: false,
+            platform,
+        }
+    }
 
     #[test]
     fn from_github_error_maps_https_with_platform_label() {
@@ -160,14 +165,52 @@ mod tests {
     }
 
     #[test]
-    fn render_http_routes_by_status() {
-        let e: PlatformError = GithubError::Http {
-            status: 401,
-            message: String::new(),
-            rate_limited: false,
-        }
-        .into();
-        assert_eq!(render_platform_error(&e), "GitHub 认证失败，请检查令牌");
+    fn from_github_error_other_carries_label() {
+        let e: PlatformError = GithubError::Other("boom".into()).into();
+        assert!(matches!(
+            e,
+            PlatformError::Other {
+                platform: "GitHub",
+                message
+            } if message == "boom"
+        ));
+    }
+
+    #[test]
+    fn render_401_gives_actionable_token_hint_per_platform() {
+        assert_eq!(
+            render_platform_error(&http(401, "GitHub")),
+            "GitHub 认证失败，请检查 GITHUB_TOKEN 或 gh auth token"
+        );
+        assert_eq!(
+            render_platform_error(&http(401, "GitLab")),
+            "GitLab 认证失败，请检查 GITLAB_TOKEN 或 glab auth token"
+        );
+        assert_eq!(
+            render_platform_error(&http(401, "Gitea")),
+            "Gitea 认证失败，请检查 GITEA_TOKEN"
+        );
+        // Unknown label (defensive): generic wording, no panic.
+        assert_eq!(
+            render_platform_error(&http(401, "SelfHosted")),
+            "SelfHosted 认证失败，请检查令牌"
+        );
+    }
+
+    #[test]
+    fn render_404_names_the_platform() {
+        assert_eq!(
+            render_platform_error(&http(404, "GitLab")),
+            "GitLab 仓库/资源不存在或无权限"
+        );
+        assert_eq!(
+            render_platform_error(&http(404, "Gitea")),
+            "Gitea 仓库/资源不存在或无权限"
+        );
+        assert_eq!(
+            render_platform_error(&http(404, "GitHub")),
+            "GitHub 仓库/资源不存在或无权限"
+        );
     }
 
     #[test]
@@ -179,5 +222,28 @@ mod tests {
         }
         .into();
         assert_eq!(render_platform_error(&e), "GitHub 速率限制，请稍后重试");
+    }
+
+    #[test]
+    fn render_network_is_generic() {
+        let e: PlatformError = GithubError::Network("dns fail".into()).into();
+        assert_eq!(render_platform_error(&e), "网络错误，请检查网络连接");
+    }
+
+    #[test]
+    fn render_unknown_status_falls_back_to_message() {
+        assert_eq!(render_platform_error(&http(418, "Gitea")), "Gitea HTTP 418");
+        let with_message = PlatformError::Http {
+            status: 418,
+            message: "teapot".into(),
+            rate_limited: false,
+            platform: "Gitea",
+        };
+        assert_eq!(render_platform_error(&with_message), "teapot");
+        let other = PlatformError::Other {
+            platform: "GitLab",
+            message: "boom".into(),
+        };
+        assert_eq!(render_platform_error(&other), "GitLab 错误: boom");
     }
 }
