@@ -94,6 +94,15 @@ impl View {
                 | View::Notifications
         )
     }
+
+    /// The two detail screens a receipt list opens.
+    ///
+    /// A detail fetch belongs to the detail it was armed for, so leaving one
+    /// for its list has to drop the in-flight request even when the tab does
+    /// not change — see [`App::switch_github_tab`].
+    pub(crate) fn is_receipt_detail(self) -> bool {
+        matches!(self, View::PullDetail | View::IssueDetail)
+    }
 }
 
 /// Active tab within the GitHub receipts hub (`p`/`c`/`i`/`n`).
@@ -1099,16 +1108,25 @@ impl App {
 
     /// Switch the active receipts tab and refresh its list.
     fn switch_github_tab(&mut self, tab: GithubTab) -> bool {
-        // A fetch in flight was armed for the *previous* tab, so its result
-        // describes rows the user is no longer looking at. Dropping the
-        // receiver lets the new tab's fetch start instead of being refused by
-        // the in-flight guard, and stops the old tab's rows from landing under
-        // the new tab's title.
+        // A fetch in flight was armed for the screen we are leaving, so its
+        // result describes rows the user is no longer looking at. Dropping the
+        // receiver lets the new screen's fetch start instead of being refused
+        // by the in-flight guard, and stops the old rows from landing under the
+        // new tab's title.
         //
-        // Only when the tab actually changes: re-pressing the current tab is
-        // idempotent (v0.5.0), and arming unconditionally would throw away a
-        // fetch that is still loading and spend another request per keypress.
-        if tab != self.github_state.tab {
+        // Two ways to leave, and they need opposite answers:
+        //
+        // - Another tab: arm unconditionally, or the guard in
+        //   [`App::refresh_github`] would refuse the new tab's fetch.
+        // - A detail screen for the *same* tab: the in-flight fetch may be
+        //   that detail's request, whose rows the list will never render, and
+        //   `refresh_github` would then early-return and leave the list on
+        //   stale data. Dropping it lets the list load.
+        //
+        // Re-pressing the current tab from its own list stays idempotent
+        // (v0.5.0): arming there would throw away a fetch that is still
+        // loading and spend another request per keypress.
+        if tab != self.github_state.tab || self.view.is_receipt_detail() {
             self.github_rx = None;
         }
         self.github_state.tab = tab;
@@ -4165,6 +4183,46 @@ mod tests {
         assert!(
             app.github_rx.is_none(),
             "the old tab's fetch has nowhere to land now"
+        );
+    }
+
+    /// The guard's false side: re-pressing the tab we are already on keeps the
+    /// in-flight fetch, so the same key cannot drop a loading result and spend
+    /// another request per keypress (v0.5.0 idempotency).
+    #[test]
+    fn re_pressing_the_current_tab_keeps_the_in_flight_fetch() {
+        let mut app = App::new(Config::default());
+        app.view = View::Pulls;
+        app.github_state.tab = GithubTab::Pulls;
+        let (_tx, rx) = mpsc::unbounded_channel::<GithubMsg>();
+        app.github_rx = Some(rx);
+        assert!(
+            app.switch_github_tab(GithubTab::Pulls),
+            "re-pressing the tab succeeds"
+        );
+        assert_eq!(app.view, View::Pulls, "still on the same list");
+        assert!(
+            app.github_rx.is_some(),
+            "a fetch for the screen we never left must survive"
+        );
+    }
+
+    /// Leaving a detail for its own list: the tab does not change, but the
+    /// in-flight fetch belongs to the detail and its rows the list will never
+    /// render, so it is dropped and the list can load instead of staying on
+    /// stale data behind the in-flight guard.
+    #[test]
+    fn leaving_a_detail_for_its_list_disarms_the_details_fetch() {
+        let mut app = App::new(Config::default());
+        app.view = View::PullDetail;
+        app.github_state.tab = GithubTab::Pulls;
+        let (_tx, rx) = mpsc::unbounded_channel::<GithubMsg>();
+        app.github_rx = Some(rx);
+        assert!(app.switch_github_tab(GithubTab::Pulls), "switch succeeds");
+        assert_eq!(app.view, View::Pulls, "the list is now on screen");
+        assert!(
+            app.github_rx.is_none(),
+            "the detail fetch has no list rows to land"
         );
     }
 

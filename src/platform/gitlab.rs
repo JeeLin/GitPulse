@@ -831,7 +831,7 @@ mod tests {
     #[test]
     fn map_merge_status_variants() {
         // The one mergeable verdict of `detailed_merge_status`.
-        assert_eq!(map_merge_status(Some("mergeable")), Some(true), "mergeable");
+        assert_eq!(map_merge_status(Some("mergeable")), Some(true));
         // Every documented blocking state is "cannot merge", not "unknown":
         // the full list from RESEARCH §2.4 (`detailed_merge_status`, 24 values).
         for status in [

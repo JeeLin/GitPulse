@@ -84,7 +84,7 @@ pub fn render_palette(f: &mut Frame, app: &mut App) {
     let targets = app.palette_targets();
     let items = targets
         .iter()
-        .map(|t| ListItem::new(target_label(t)))
+        .map(|t| ListItem::new(target_label(t, app.github_state.kind())))
         .collect::<Vec<_>>();
 
     let list = List::new(items)
@@ -102,9 +102,14 @@ pub fn render_palette(f: &mut Frame, app: &mut App) {
 }
 
 /// One palette row: the screen's label, or the repo/branch name it targets.
-fn target_label(target: &PaletteTarget) -> Line<'static> {
+/// `kind` is the remote's platform, so a platform-specific screen name matches
+/// the panel the row jumps to.
+fn target_label(
+    target: &PaletteTarget,
+    kind: Option<crate::platform::PlatformKind>,
+) -> Line<'static> {
     let (text, style) = match target {
-        PaletteTarget::View(view) => (screen_label(*view).to_string(), role::body()),
+        PaletteTarget::View(view) => (screen_label(*view, kind).to_string(), role::body()),
         PaletteTarget::Repo(name) => (format!("仓库 {name}"), role::code()),
         PaletteTarget::Branch(name) => (format!("分支 {name}"), role::code()),
     };
@@ -113,7 +118,13 @@ fn target_label(target: &PaletteTarget) -> Line<'static> {
 
 /// Chinese label of every screen, mirroring its title so the palette and the
 /// panel it jumps to agree on the name.
-fn screen_label(view: View) -> &'static str {
+///
+/// `kind` matters for the one slot whose name the platform decides: the
+/// notification receipt is GitHub's `通知` but GitLab's `To-Dos`, so the row
+/// derives that one from [`crate::platform::notifications_label`] — the same
+/// source as the panel title and the footer key hint. A palette row that kept
+/// `通知` under a `To-Dos` panel would name two different things on one screen.
+fn screen_label(view: View, kind: Option<crate::platform::PlatformKind>) -> &'static str {
     match view {
         View::Dashboard => "仪表盘",
         View::Repo => "仓库工作区",
@@ -128,7 +139,7 @@ fn screen_label(view: View) -> &'static str {
         View::Checks => "CI 检查",
         View::Issues => "Issues",
         View::IssueDetail => "Issue 详情",
-        View::Notifications => "通知",
+        View::Notifications => crate::platform::notifications_label(kind),
     }
 }
 
@@ -157,15 +168,42 @@ mod tests {
         );
     }
 
-    /// The screen labels are stable and distinct (no two screens share a name).
+    /// The screen labels are stable and distinct (no two screens share a name)
+    /// for every platform — including GitLab's `To-Dos` slot, whose name the
+    /// platform decides but which must still stay distinct from the rest.
     #[test]
     fn screen_labels_are_distinct() {
-        let mut seen = std::collections::HashSet::new();
-        for view in SCREENS {
-            assert!(
-                seen.insert(screen_label(view)),
-                "duplicate label for {view:?}"
-            );
+        use crate::platform::PlatformKind;
+        for kind in [
+            Some(PlatformKind::GitHub),
+            Some(PlatformKind::GitLab),
+            Some(PlatformKind::Gitea),
+            Some(PlatformKind::SelfHosted),
+            None,
+        ] {
+            let mut seen = std::collections::HashSet::new();
+            for view in SCREENS {
+                assert!(
+                    seen.insert(screen_label(view, kind)),
+                    "duplicate label for {view:?} on {kind:?}"
+                );
+            }
         }
+    }
+
+    /// The palette row for the notification slot names the same thing as the
+    /// panel the row jumps to — the invariant `screen_label` documents.
+    #[test]
+    fn palette_row_agrees_with_the_notification_panel_label() {
+        use crate::platform::PlatformKind;
+        assert_eq!(
+            screen_label(View::Notifications, Some(PlatformKind::GitLab)),
+            crate::platform::notifications_label(Some(PlatformKind::GitLab)),
+        );
+        assert_eq!(
+            screen_label(View::Notifications, Some(PlatformKind::GitHub)),
+            "通知",
+            "GitHub keeps its v0.5.0 wording in the palette too"
+        );
     }
 }

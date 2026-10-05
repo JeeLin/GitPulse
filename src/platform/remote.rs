@@ -73,6 +73,30 @@ impl PlatformKind {
             PlatformKind::Gitea | PlatformKind::SelfHosted => "",
         }
     }
+
+    /// Name of the fourth receipt tab, for the panel title, the footer key hint
+    /// and the command palette row alike.
+    ///
+    /// GitLab serves this list as To-Dos, so naming the slot `通知` under a
+    /// `To-Dos` title would be two names for one thing on one screen. It lives
+    /// here, beside the other platform copy, because it is platform vocabulary
+    /// rather than a rendering decision — a per-panel copy is exactly what let
+    /// the footer and the title drift apart.
+    pub const fn notifications_label(self) -> &'static str {
+        match self {
+            PlatformKind::GitLab => "To-Dos",
+            PlatformKind::GitHub | PlatformKind::Gitea | PlatformKind::SelfHosted => "通知",
+        }
+    }
+}
+
+/// [`PlatformKind::notifications_label`] for a repository whose remote has not
+/// been parsed yet, so the receipt tab keeps its neutral name.
+pub const fn notifications_label(kind: Option<PlatformKind>) -> &'static str {
+    match kind {
+        Some(platform) => platform.notifications_label(),
+        None => PlatformKind::GitHub.notifications_label(),
+    }
 }
 
 /// A parsed git remote URL with its target platform.

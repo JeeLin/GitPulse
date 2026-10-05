@@ -236,10 +236,11 @@ pub(crate) fn check_status_style(status: &str) -> Style {
 /// it yet, so the label says so instead of staying silent.
 ///
 /// The blocking wording is per platform. GitHub's `mergeable` only goes false
-/// on a real conflict, so it keeps its v0.5.0 `有冲突`; GitLab folds twenty
-/// blocking reasons into the same `false` (draft, approvals, path locks, another
-/// MR ahead in the queue, a merged MR …), so naming just one of them would be
-/// false — those read `不可合并`.
+/// on a real conflict, so it keeps its v0.5.0 `有冲突`; GitLab folds its
+/// official blocking states — draft, approvals, path locks, another MR ahead
+/// in the queue, a merged MR … — into the same `false` (the full list lives in
+/// `RESEARCH-gitea-gitlab-apis.md` §2.4, not restated here so the count cannot
+/// drift), so naming just one of them would be false — those read `不可合并`.
 pub(crate) fn mergeable_label(
     kind: Option<crate::platform::PlatformKind>,
     mergeable: Option<bool>,
@@ -247,10 +248,14 @@ pub(crate) fn mergeable_label(
     use crate::platform::PlatformKind;
     match mergeable {
         Some(true) => ("可合并", Style::default().fg(Color::Green)),
-        Some(false) if kind == Some(PlatformKind::GitHub) => {
-            ("有冲突", Style::default().fg(Color::Red))
-        }
-        Some(false) => ("不可合并", Style::default().fg(Color::Red)),
+        Some(false) => (
+            if kind == Some(PlatformKind::GitHub) {
+                "有冲突"
+            } else {
+                "不可合并"
+            },
+            Style::default().fg(Color::Red),
+        ),
         None => ("未知", Style::default().fg(Color::Yellow)),
     }
 }
@@ -283,14 +288,15 @@ fn column(value: &str) -> String {
 /// Bottom hint row of every receipt panel: hub entry, the four tabs, the
 /// refresh and the two ways out.
 ///
-/// `Enter 详情` is only useful on the Pulls and Issues *lists* (where it opens
-/// the selected item's detail); pass `show_enter = true` there and `false` for
+/// `show_enter` adds `Enter 详情`, which is only useful on the Pulls and
+/// Issues *lists* (where it opens the selected item's detail); pass `false` for
 /// the Checks / Notifications / detail views, where Enter is a no-op.
 ///
-/// The fourth tab's name comes from [`crate::ui::notifications::panel_label`],
-/// the same source as that panel's title: GitHub calls the slot `通知` and
-/// GitLab `To-Dos`, and a footer that still said `通知` under a `To-Dos` title
-/// would name two different things on one screen.
+/// `kind` is the remote's platform, so the fourth tab's name matches the
+/// notification panel's own title: it comes from
+/// [`crate::platform::notifications_label`], the single source for that slot.
+/// GitHub and Gitea call it `通知`, GitLab `To-Dos` — a footer still saying
+/// `通知` under a `To-Dos` title would name two different things on one screen.
 pub(crate) fn receipt_hints(
     show_enter: bool,
     kind: Option<crate::platform::PlatformKind>,
@@ -300,7 +306,7 @@ pub(crate) fn receipt_hints(
         hint("p", "PR"),
         hint("c", "checks"),
         hint("i", "issues"),
-        hint("n", super::notifications::panel_label(kind)),
+        hint("n", crate::platform::notifications_label(kind)),
         hint("r", "刷新"),
         hint("q/Esc", "返回"),
     ];
@@ -311,13 +317,15 @@ pub(crate) fn receipt_hints(
 }
 
 /// Footer hint row for the pull-detail panel (§2.3): the receipt hub keys
-/// minus `Enter 详情`, which is a no-op once a detail is open.
+/// minus `Enter 详情`, which is a no-op once a detail is open. `kind` carries
+/// the platform, see [`receipt_hints`].
 pub(crate) fn pull_detail_hints(kind: Option<crate::platform::PlatformKind>) -> HintRow {
     receipt_hints(false, kind)
 }
 
 /// Footer hint row for the issue-detail panel (§2.3): the same keys as the
-/// pull detail — the hub keys without the `Enter` no-op.
+/// pull detail — the hub keys without the `Enter` no-op. `kind` carries the
+/// platform, see [`receipt_hints`].
 pub(crate) fn issue_detail_hints(kind: Option<crate::platform::PlatformKind>) -> HintRow {
     receipt_hints(false, kind)
 }
@@ -968,7 +976,8 @@ mod tests {
             "可合并"
         );
         // GitHub only goes false on a real conflict, so its v0.5.0 wording
-        // stays; GitLab folds twenty blocking reasons into `false`.
+        // stays; GitLab folds its official blocking states into `false`
+        // (RESEARCH §2.4 — the count is deliberately not restated here).
         assert_eq!(
             mergeable_label(Some(PlatformKind::GitHub), Some(false)).0,
             "有冲突"

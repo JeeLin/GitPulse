@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::platform::NotificationSummary;
+use crate::platform::{notifications_label, NotificationSummary};
 
 use super::pulls::{
     cells, ellipsize, list_cursor, meta_budget, panel_chunks, panel_title, render_disconnected,
@@ -25,21 +25,15 @@ const EMPTY_NOTIFICATIONS: &str = "—（暂无通知）";
 /// yellow and bold; read rows keep a blank marker to stay aligned.
 const UNREAD_MARKER: &str = "● ";
 
-/// Panel label: GitHub serves notification threads while GitLab serves
-/// To-Dos — different objects sharing one receipt slot, so the title names
-/// which one the remote actually has.
-pub(crate) fn panel_label(kind: Option<crate::platform::PlatformKind>) -> &'static str {
-    match kind {
-        Some(crate::platform::PlatformKind::GitLab) => "To-Dos",
-        _ => "通知",
-    }
-}
-
 /// Render the repository-scoped notifications list.
 pub fn render_notifications(f: &mut Frame, content: Rect, app: &App) {
     let area = content;
     let chunks = panel_chunks(area);
-    let label = panel_label(app.github_state.kind());
+    // GitHub serves notification threads while GitLab serves To-Dos —
+    // different objects sharing one receipt slot, so the title names which one
+    // the remote actually has. The word itself comes from `platform` so the
+    // footer hint and the command palette row cannot drift from this title.
+    let label = notifications_label(app.github_state.kind());
     if !app.github_state.connected() {
         render_disconnected(f, chunks[0], label, app.github_state.kind(), app);
         render_footer(f, chunks[1], chunks[2], app, false);
@@ -260,10 +254,15 @@ mod tests {
     #[test]
     fn gitlab_receipts_are_labelled_to_dos() {
         use crate::platform::PlatformKind;
-        assert_eq!(panel_label(Some(PlatformKind::GitLab)), "To-Dos");
-        assert_eq!(panel_label(Some(PlatformKind::GitHub)), "通知");
-        assert_eq!(panel_label(Some(PlatformKind::Gitea)), "通知");
-        assert_eq!(panel_label(None), "通知", "no remote stays neutral");
+        assert_eq!(notifications_label(Some(PlatformKind::GitLab)), "To-Dos");
+        assert_eq!(notifications_label(Some(PlatformKind::GitHub)), "通知");
+        assert_eq!(notifications_label(Some(PlatformKind::Gitea)), "通知");
+        assert_eq!(
+            notifications_label(Some(PlatformKind::SelfHosted)),
+            "通知",
+            "unsupported instance keeps the neutral name"
+        );
+        assert_eq!(notifications_label(None), "通知", "no remote stays neutral");
     }
 
     /// B6: the label reaches the rendered title of a connected GitLab repo.

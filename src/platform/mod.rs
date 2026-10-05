@@ -18,4 +18,4 @@ pub mod remote;
 pub use client::{build_client, PlatformClient};
 pub use error::{render_platform_error, PlatformError};
 pub use models::*;
-pub use remote::{parse_remote, PlatformKind, PlatformRemote};
+pub use remote::{notifications_label, parse_remote, PlatformKind, PlatformRemote};
