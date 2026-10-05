@@ -347,12 +347,12 @@ pub(crate) fn view_hints(app: &App) -> HintRow {
         ),
         View::History => history::history_hints(),
         View::Tags => tags::tags_hints(app.tags_state.modal.as_ref()),
-        View::Pulls => pulls::receipt_hints(true),
-        View::PullDetail => pulls::pull_detail_hints(),
-        View::Checks => pulls::receipt_hints(false),
-        View::Issues => pulls::receipt_hints(true),
-        View::IssueDetail => pulls::issue_detail_hints(),
-        View::Notifications => pulls::receipt_hints(false),
+        View::Pulls => pulls::receipt_hints(true, app.github_state.kind()),
+        View::PullDetail => pulls::pull_detail_hints(app.github_state.kind()),
+        View::Checks => pulls::receipt_hints(false, app.github_state.kind()),
+        View::Issues => pulls::receipt_hints(true, app.github_state.kind()),
+        View::IssueDetail => pulls::issue_detail_hints(app.github_state.kind()),
+        View::Notifications => pulls::receipt_hints(false, app.github_state.kind()),
     }
 }
 

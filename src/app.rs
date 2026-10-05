@@ -1101,10 +1101,16 @@ impl App {
     fn switch_github_tab(&mut self, tab: GithubTab) -> bool {
         // A fetch in flight was armed for the *previous* tab, so its result
         // describes rows the user is no longer looking at. Dropping the
-        // receiver here lets the new tab's fetch start instead of being
-        // refused by the in-flight guard, and stops the old tab's verdict from
-        // landing under the new tab's title.
-        self.github_rx = None;
+        // receiver lets the new tab's fetch start instead of being refused by
+        // the in-flight guard, and stops the old tab's rows from landing under
+        // the new tab's title.
+        //
+        // Only when the tab actually changes: re-pressing the current tab is
+        // idempotent (v0.5.0), and arming unconditionally would throw away a
+        // fetch that is still loading and spend another request per keypress.
+        if tab != self.github_state.tab {
+            self.github_rx = None;
+        }
         self.github_state.tab = tab;
         self.github_state.selected = 0;
         self.view = match tab {
@@ -2726,11 +2732,25 @@ impl App {
         let leaving_receipts = self.view.is_receipt();
         match target {
             PaletteTarget::View(view) => self.jump_to_view(*view),
-            PaletteTarget::Repo(_) => self.view = View::Repo,
-            PaletteTarget::Branch(_) => self.view = View::Branches,
-        }
-        if leaving_receipts && !self.view.is_receipt() {
-            self.leave_receipt_domain();
+            // These two write `view` directly instead of delegating to
+            // `jump_to_view`, so they are the only ones that still have to run
+            // the receipt exit — a `View` target has already run it inside
+            // `jump_to_view`, and running it twice would clear the same state
+            // on every palette jump. Outside the hub there is nothing to drop,
+            // so the guard keeps a settled push on screen when the target is
+            // simply another repository.
+            PaletteTarget::Repo(_) => {
+                self.view = View::Repo;
+                if leaving_receipts {
+                    self.leave_receipt_domain();
+                }
+            }
+            PaletteTarget::Branch(_) => {
+                self.view = View::Branches;
+                if leaving_receipts {
+                    self.leave_receipt_domain();
+                }
+            }
         }
         self.palette_open = false;
         self.help_open = false;

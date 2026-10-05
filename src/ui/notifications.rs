@@ -28,7 +28,7 @@ const UNREAD_MARKER: &str = "● ";
 /// Panel label: GitHub serves notification threads while GitLab serves
 /// To-Dos — different objects sharing one receipt slot, so the title names
 /// which one the remote actually has.
-fn panel_label(kind: Option<crate::platform::PlatformKind>) -> &'static str {
+pub(crate) fn panel_label(kind: Option<crate::platform::PlatformKind>) -> &'static str {
     match kind {
         Some(crate::platform::PlatformKind::GitLab) => "To-Dos",
         _ => "通知",
@@ -279,6 +279,24 @@ mod tests {
         assert!(
             !text.contains("通知列表"),
             "GitHub wording must not leak: {text}"
+        );
+    }
+
+    /// B6: the footer key hint and the panel title name the same thing — a
+    /// GitLab repo must not show `To-Dos` above an `n 通知` hint, which would
+    /// read as two different slots on one screen.
+    #[test]
+    fn gitlab_panel_hint_agrees_with_its_title() {
+        let mut app = connected_app();
+        let mut remote = crate::ui::github_remote();
+        remote.kind = crate::platform::PlatformKind::GitLab;
+        app.github_state.remote = Some(remote);
+        app.github_state.notifications = vec![note("todo-1", "Issue", true)];
+        let text = render_text(&app);
+        assert!(text.contains("nTo-Dos"), "missing To-Dos hint: {text}");
+        assert!(
+            !text.contains("n通知"),
+            "the hint must follow the panel label: {text}"
         );
     }
 }

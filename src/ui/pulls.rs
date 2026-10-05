@@ -139,7 +139,7 @@ pub(crate) fn disconnected_copy(kind: Option<crate::platform::PlatformKind>) -> 
         },
         Some(PlatformKind::SelfHosted) => DisconnectedCopy {
             title: "尚未连接自托管平台",
-            hint: "该实例暂不支持（当前支持 github.com / gitea.com / gitlab.com）".to_string(),
+            hint: credential_hint(PlatformKind::SelfHosted),
         },
         None => DisconnectedCopy {
             title: "尚未连接平台",
@@ -148,24 +148,32 @@ pub(crate) fn disconnected_copy(kind: Option<crate::platform::PlatformKind>) -> 
     }
 }
 
-/// Retry hint for a platform that owns no credential variable at all — the
-/// wording stays neutral because there is no env var or CLI to name.
+/// Retry hint for a repository whose remote names no platform at all — there is
+/// no env var or CLI to point at, so the wording stays neutral.
 const NEUTRAL_HINT: &str = "配置访问令牌后按 r 重试";
+
+/// Retry hint for an instance this app does not support. It is deliberately
+/// *not* a token prompt: self-hosted hosts are rejected before any credential
+/// lookup, so telling the user to configure a token would be a dead end.
+const SELF_HOSTED_HINT: &str = "该实例暂不支持（当前支持 github.com / gitea.com / gitlab.com）";
 
 /// Compose the retry hint from the platform's own token variable and CLI name.
 ///
 /// An empty [`token_var`](crate::platform::PlatformKind::token_var) means the
-/// platform registers no variable (self-hosted), so the neutral wording is used
-/// instead of naming one that does not exist; an empty
-/// [`cli_hint`](crate::platform::PlatformKind::cli_hint) means it has no auth
-/// CLI (Gitea), so only the variable is named.
+/// platform registers no variable, which only self-hosted does: it is out of
+/// scope rather than short of a credential, so it gets the unsupported-instance
+/// wording. An empty [`cli_hint`](crate::platform::PlatformKind::cli_hint)
+/// means the platform has no auth CLI (Gitea), so only the variable is named.
 fn credential_hint(kind: crate::platform::PlatformKind) -> String {
     let var = kind.token_var();
+    if var.is_empty() {
+        return SELF_HOSTED_HINT.to_string();
+    }
     let cli = kind.cli_hint();
-    match (var.is_empty(), cli.is_empty()) {
-        (true, _) => NEUTRAL_HINT.to_string(),
-        (false, true) => format!("配置 {var} 后按 r 重试"),
-        (false, false) => format!("配置 {var} 或 {cli} 登录后按 r 重试"),
+    if cli.is_empty() {
+        format!("配置 {var} 后按 r 重试")
+    } else {
+        format!("配置 {var} 或 {cli} 登录后按 r 重试")
     }
 }
 
@@ -224,12 +232,25 @@ pub(crate) fn check_status_style(status: &str) -> Style {
     }
 }
 
-/// Mergeability of the detail view: `None` means GitHub has not computed it
-/// yet, so the label says so instead of staying silent.
-pub(crate) fn mergeable_label(mergeable: Option<bool>) -> (&'static str, Style) {
+/// Mergeability of the detail view: `None` means the platform has not computed
+/// it yet, so the label says so instead of staying silent.
+///
+/// The blocking wording is per platform. GitHub's `mergeable` only goes false
+/// on a real conflict, so it keeps its v0.5.0 `有冲突`; GitLab folds twenty
+/// blocking reasons into the same `false` (draft, approvals, path locks, another
+/// MR ahead in the queue, a merged MR …), so naming just one of them would be
+/// false — those read `不可合并`.
+pub(crate) fn mergeable_label(
+    kind: Option<crate::platform::PlatformKind>,
+    mergeable: Option<bool>,
+) -> (&'static str, Style) {
+    use crate::platform::PlatformKind;
     match mergeable {
         Some(true) => ("可合并", Style::default().fg(Color::Green)),
-        Some(false) => ("有冲突", Style::default().fg(Color::Red)),
+        Some(false) if kind == Some(PlatformKind::GitHub) => {
+            ("有冲突", Style::default().fg(Color::Red))
+        }
+        Some(false) => ("不可合并", Style::default().fg(Color::Red)),
         None => ("未知", Style::default().fg(Color::Yellow)),
     }
 }
@@ -265,13 +286,21 @@ fn column(value: &str) -> String {
 /// `Enter 详情` is only useful on the Pulls and Issues *lists* (where it opens
 /// the selected item's detail); pass `show_enter = true` there and `false` for
 /// the Checks / Notifications / detail views, where Enter is a no-op.
-pub(crate) fn receipt_hints(show_enter: bool) -> HintRow {
+///
+/// The fourth tab's name comes from [`crate::ui::notifications::panel_label`],
+/// the same source as that panel's title: GitHub calls the slot `通知` and
+/// GitLab `To-Dos`, and a footer that still said `通知` under a `To-Dos` title
+/// would name two different things on one screen.
+pub(crate) fn receipt_hints(
+    show_enter: bool,
+    kind: Option<crate::platform::PlatformKind>,
+) -> HintRow {
     let mut hints: Vec<Line<'static>> = vec![
         hint("g", "进入"),
         hint("p", "PR"),
         hint("c", "checks"),
         hint("i", "issues"),
-        hint("n", "通知"),
+        hint("n", super::notifications::panel_label(kind)),
         hint("r", "刷新"),
         hint("q/Esc", "返回"),
     ];
@@ -283,14 +312,14 @@ pub(crate) fn receipt_hints(show_enter: bool) -> HintRow {
 
 /// Footer hint row for the pull-detail panel (§2.3): the receipt hub keys
 /// minus `Enter 详情`, which is a no-op once a detail is open.
-pub(crate) fn pull_detail_hints() -> HintRow {
-    receipt_hints(false)
+pub(crate) fn pull_detail_hints(kind: Option<crate::platform::PlatformKind>) -> HintRow {
+    receipt_hints(false, kind)
 }
 
 /// Footer hint row for the issue-detail panel (§2.3): the same keys as the
 /// pull detail — the hub keys without the `Enter` no-op.
-pub(crate) fn issue_detail_hints() -> HintRow {
-    receipt_hints(false)
+pub(crate) fn issue_detail_hints(kind: Option<crate::platform::PlatformKind>) -> HintRow {
+    receipt_hints(false, kind)
 }
 
 /// Readiness-gate client for the panel tests.
@@ -346,7 +375,10 @@ pub(crate) fn render_footer(
             app.status.as_ref(),
         );
     }
-    f.render_widget(Paragraph::new(receipt_hints(show_enter).view), hints_area);
+    f.render_widget(
+        Paragraph::new(receipt_hints(show_enter, app.github_state.kind()).view),
+        hints_area,
+    );
 }
 
 /// Panel body shown while the platform client is not ready: the platform's own
@@ -495,13 +527,18 @@ pub fn render_pull_detail(f: &mut Frame, content: Rect, app: &App) {
 
     let inner = block.inner(chunks[0]);
     f.render_widget(block, chunks[0]);
-    render_detail_panes(f, detail, inner);
+    render_detail_panes(f, detail, inner, app.github_state.kind());
     render_footer(f, chunks[1], chunks[2], app, false);
 }
 
 /// Split the detail shell into its three panes — summary head, wrapped
 /// description, check sub-list — and draw each one.
-fn render_detail_panes(f: &mut Frame, detail: &PrDetail, inner: Rect) {
+fn render_detail_panes(
+    f: &mut Frame,
+    detail: &PrDetail,
+    inner: Rect,
+    kind: Option<crate::platform::PlatformKind>,
+) {
     // The check sub-list is capped at half the pane so a PR with many runs
     // cannot push the description out of view.
     let checks_h = (detail.checks.len().min(MAX_DETAIL_CHECKS) as u16 + 2)
@@ -519,7 +556,7 @@ fn render_detail_panes(f: &mut Frame, detail: &PrDetail, inner: Rect) {
     // The summary head sits directly on the pane (no block of its own), so
     // it uses the full inner width.
     f.render_widget(
-        Paragraph::new(summary_lines(detail, panes[0].width as usize)),
+        Paragraph::new(summary_lines(detail, panes[0].width as usize, kind)),
         panes[0],
     );
     f.render_widget(body_paragraph(detail), panes[1]);
@@ -575,7 +612,11 @@ fn render_checks_pane(f: &mut Frame, detail: &PrDetail, area: Rect) {
 
 /// Summary head of the detail view: `#N title (state)` over a line with the
 /// mergeability label and the pull's metadata.
-fn summary_lines(detail: &PrDetail, width: usize) -> Vec<Line<'static>> {
+fn summary_lines(
+    detail: &PrDetail,
+    width: usize,
+    kind: Option<crate::platform::PlatformKind>,
+) -> Vec<Line<'static>> {
     let summary = &detail.summary;
     let number = format!("#{} ", summary.number);
     let state_tag = format!(" ({})", summary.state);
@@ -592,7 +633,7 @@ fn summary_lines(detail: &PrDetail, width: usize) -> Vec<Line<'static>> {
         Span::styled(draft_tag, Style::default().fg(Color::Yellow)),
     ]);
 
-    let (merge, merge_style) = mergeable_label(detail.mergeable);
+    let (merge, merge_style) = mergeable_label(kind, detail.mergeable);
     let meta = format!(
         " · {} · {}→{} · {}",
         summary.author, summary.head_ref, summary.base_ref, summary.updated_at
@@ -921,9 +962,27 @@ mod tests {
         assert_eq!(conclusion_style("skipped").fg, Some(Color::Gray));
         assert_eq!(check_status_style("in_progress").fg, Some(Color::Yellow));
         assert_eq!(check_status_style("queued").fg, Some(Color::Yellow));
-        assert_eq!(mergeable_label(Some(true)).0, "可合并");
-        assert_eq!(mergeable_label(Some(false)).0, "有冲突");
-        assert_eq!(mergeable_label(None).0, "未知");
+        use crate::platform::PlatformKind;
+        assert_eq!(
+            mergeable_label(Some(PlatformKind::GitHub), Some(true)).0,
+            "可合并"
+        );
+        // GitHub only goes false on a real conflict, so its v0.5.0 wording
+        // stays; GitLab folds twenty blocking reasons into `false`.
+        assert_eq!(
+            mergeable_label(Some(PlatformKind::GitHub), Some(false)).0,
+            "有冲突"
+        );
+        assert_eq!(
+            mergeable_label(Some(PlatformKind::GitLab), Some(false)).0,
+            "不可合并"
+        );
+        assert_eq!(
+            mergeable_label(Some(PlatformKind::Gitea), Some(false)).0,
+            "不可合并"
+        );
+        assert_eq!(mergeable_label(None, Some(false)).0, "不可合并");
+        assert_eq!(mergeable_label(Some(PlatformKind::GitHub), None).0, "未知");
     }
 
     #[test]
