@@ -13,12 +13,12 @@ use crate::app::App;
 use crate::platform::{notifications_label, NotificationSummary};
 
 use super::pulls::{
-    cells, ellipsize, list_cursor, meta_budget, panel_title, render_disconnected, row_width,
-    META_GAP,
+    cells, ellipsize, list_cursor, meta_budget, panel_title, render_disconnected,
+    render_load_error, row_width, META_GAP,
 };
 
-/// Empty-state copy: nothing to review. Zero rows is a valid state — the
-/// footer's status row covers failed loads.
+/// Empty-state copy: nothing to review. Zero rows is a valid state — a failed
+/// load paints the panel's `error` state.
 const EMPTY_NOTIFICATIONS: &str = "—（暂无通知）";
 
 /// Marker of an unread row: the dot is what catches the eye first, so it is
@@ -35,6 +35,17 @@ pub fn render_notifications(f: &mut Frame, content: Rect, app: &App) {
     // the remote actually has. The word itself comes from `platform` so the
     // footer hint and the command palette row cannot drift from this title.
     let label = notifications_label(app.github_state.kind());
+    if let Some(message) = app.load_error.as_deref() {
+        render_load_error(
+            f,
+            content,
+            label,
+            app.github_state.owner(),
+            app.github_state.repo(),
+            message,
+        );
+        return;
+    }
     if !app.github_state.connected() {
         render_disconnected(f, content, label, app.github_state.kind(), app);
         return;

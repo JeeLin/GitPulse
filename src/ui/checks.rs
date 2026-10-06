@@ -10,10 +10,12 @@ use ratatui::{
 
 use crate::app::App;
 
-use super::pulls::{check_line, list_cursor, panel_title, render_disconnected, row_width};
+use super::pulls::{
+    check_line, list_cursor, panel_title, render_disconnected, render_load_error, row_width,
+};
 
 /// Empty-state copy: no selected pull, or a pull without check runs. Zero
-/// runs is a valid state — the footer's status row covers failed loads.
+/// runs is a valid state — a failed load paints the panel's `error` state.
 const EMPTY_CHECKS: &str = "—（暂无检查记录）";
 
 /// Render the head-commit check runs for the selected pull request.
@@ -21,6 +23,18 @@ const EMPTY_CHECKS: &str = "—（暂无检查记录）";
 /// The panel draws its content only (§4.1): the status row and the hint row
 /// are both painted once by the footer.
 pub fn render_checks(f: &mut Frame, content: Rect, app: &App) {
+    if let Some(message) = app.load_error.as_deref() {
+        render_load_error(
+            f,
+            content,
+            "CI 检查",
+            app.github_state.owner(),
+            app.github_state.repo(),
+            message,
+        );
+        return;
+    }
+
     if !app.github_state.connected() {
         render_disconnected(f, content, "CI 检查", app.github_state.kind(), app);
         return;

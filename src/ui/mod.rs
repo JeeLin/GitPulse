@@ -107,6 +107,15 @@ pub fn render_status_or_remote(
     }
 }
 
+/// Panel title of the two named-item lists: `label [repo] (count)`.
+///
+/// Shared by [`render_named_list`] and by the `error` state the same panels
+/// render when their load failed (§4.3), so a failed panel still names itself
+/// the same way its ready shape does.
+pub(crate) fn named_title(label: &str, repo_name: &str, count: usize) -> String {
+    format!("{label} [{repo_name}] ({count})")
+}
+
 /// Panel skeleton shared by the two named-item lists — the commit history
 /// and the tag list (G7): a bordered block titled `label [repo] (count)`
 /// around either the rows the caller built or, when there are none, the
@@ -114,10 +123,10 @@ pub fn render_status_or_remote(
 ///
 /// Zero rows is a valid state of both panels (an unborn HEAD, a repository
 /// without tags) rather than a failure, so the empty copy is rendered as
-/// data and the error status — drawn by the caller — still covers failed
-/// loads. The rows are handed in already built because each panel maps its
-/// own item type to a [`ListItem`]; only the block, the highlight style and
-/// the highlight symbol are shared.
+/// data; a failed load is not rendered here at all — it paints the panel's
+/// `error` state instead (§4.3). The rows are handed in already built because
+/// each panel maps its own item type to a [`ListItem`]; only the block, the
+/// highlight style and the highlight symbol are shared.
 pub(crate) fn render_named_list(
     f: &mut Frame,
     area: Rect,
@@ -128,7 +137,7 @@ pub(crate) fn render_named_list(
     list_state: &mut ListState,
 ) {
     let block = Block::default()
-        .title(format!("{label} [{repo_name}] ({})", items.len()))
+        .title(named_title(label, repo_name, items.len()))
         .borders(Borders::ALL);
 
     if items.is_empty() {
@@ -363,7 +372,7 @@ fn render_dashboard_view(f: &mut Frame, content: Rect, app: &mut App) {
     let batch_running = app.batch_running();
     let mut state = DashboardState {
         repos: &app.repos,
-        status: app.status.as_ref(),
+        load_error: app.load_error.as_deref(),
         list_state: &mut app.dashboard_state,
         batch_log: &app.batch_log,
         batch_op: app.batch_op,
@@ -385,6 +394,7 @@ fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
         list_state: &mut app.file_state,
         show_discard_confirm: app.show_discard_confirm,
         confirm_file,
+        load_error: app.load_error.as_deref(),
     };
     repo::render_repo(f, content, state);
 }
@@ -397,6 +407,7 @@ fn render_commit_view(f: &mut Frame, content: Rect, app: &mut App) {
         list_state: &mut app.file_state,
         show_discard_confirm: false,
         confirm_file: None,
+        load_error: app.load_error.as_deref(),
     };
     repo::render_repo(f, content, state);
     commit::render_commit_popup(f, &app.commit_message);
@@ -424,6 +435,7 @@ fn render_branches_view(f: &mut Frame, content: Rect, app: &mut App) {
         input: &app.branch_input,
         show_delete_confirm: app.show_branch_delete_confirm,
         confirm_branch: confirm,
+        load_error: app.load_error.as_deref(),
     };
     branches::render_branches(f, content, state);
 }
@@ -442,6 +454,7 @@ fn render_config_view(f: &mut Frame, content: Rect, app: &mut App) {
         picker_dir: &app.picker_dir,
         picker_entries: &app.picker_entries,
         picker_state: &mut app.picker_state,
+        load_error: app.load_error.as_deref(),
     };
     config::render_config(f, content, state);
 }
@@ -459,6 +472,7 @@ fn render_history_view(f: &mut Frame, content: Rect, app: &mut App) {
         list_state: &mut app.history.list_state,
         selected: app.history.selected,
         repo_name,
+        load_error: app.load_error.as_deref(),
     };
     history::render_history(f, content, state);
 }
@@ -474,6 +488,7 @@ fn render_tags_view(f: &mut Frame, content: Rect, app: &mut App) {
         list_state: &mut app.tags_state.list_state,
         modal: app.tags_state.modal.as_ref(),
         repo_name,
+        load_error: app.load_error.as_deref(),
     };
     tags::render_tags(f, content, state);
 }
@@ -825,6 +840,69 @@ mod tests {
                 "{needle:?} must not blank the file list (§4.4)"
             );
         }
+    }
+
+    /// §4.3 assertion 3 + 4: an *operation* failure — a local git action the
+    /// user triggered and a GitHub receipt action alike — reports on the
+    /// status row in `danger`, and the panel stays `ready` with the rows it
+    /// already loaded. One rule, two paths: the paired cases are the same
+    /// assertion written once per backend.
+    #[test]
+    fn operation_failure_keeps_the_panel_ready_on_the_local_git_and_github_paths() {
+        // Local git: a rejected stage, with the file list it failed to touch.
+        let mut git_app = base_app();
+        git_app.view = View::Repo;
+        git_app.file_entries = vec![FileEntry {
+            path: std::path::PathBuf::from("src/main.rs"),
+            state: FileState::Modified,
+        }];
+        git_app.set_error("stage 失败: 索引已锁定");
+        assert_operation_failure(&mut git_app, "stage失败:索引已锁定", "src/main.rs");
+
+        // GitHub: a rejected receipt action, with the PR list it did not
+        // reload. Same rule, same landing spot.
+        let mut github_app = connected_app();
+        github_app.view = View::Pulls;
+        github_app.github_state.pulls = vec![crate::platform::PrSummary {
+            number: 42,
+            title: "Fix login bug".to_string(),
+            state: "open".to_string(),
+            draft: false,
+            author: "alice".to_string(),
+            head_ref: "feat/login".to_string(),
+            base_ref: "main".to_string(),
+            updated_at: "2026-01-02T03:04:05Z".to_string(),
+        }];
+        github_app.set_error("GitHub 操作失败: 401");
+        assert_operation_failure(&mut github_app, "GitHub操作失败:401", "Fixloginbug");
+    }
+
+    /// One half of the pair above: the reason lands once, on the status row,
+    /// in `danger`, and the panel keeps rendering `ready` — no `error` state,
+    /// no `按 r 重试` over data that did load.
+    fn assert_operation_failure(app: &mut App, needle: &str, list_row: &str) {
+        let view = app.view;
+        let buffer = render_buffer(app);
+        let height = buffer.area.height;
+        assert_eq!(
+            rows_with(&buffer, needle),
+            vec![height - 2],
+            "view {view:?}: an operation result belongs on the status row only"
+        );
+        assert_eq!(
+            buffer[(0, height - 2)].fg,
+            Color::Red,
+            "view {view:?}: the operation failure renders in danger"
+        );
+        let text = compact_frame(&buffer);
+        assert!(
+            text.contains(list_row),
+            "view {view:?}: the panel must stay ready with its rows: {text}"
+        );
+        assert!(
+            !text.contains("加载失败") && !text.contains("按r重试"),
+            "view {view:?}: an operation result never paints the error state: {text}"
+        );
     }
 
     #[test]

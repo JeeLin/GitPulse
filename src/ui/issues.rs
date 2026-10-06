@@ -12,12 +12,12 @@ use crate::app::App;
 use crate::platform::{IssueDetail, IssueSummary};
 
 use super::pulls::{
-    cells, ellipsize, list_cursor, meta_budget, panel_title, render_disconnected, row_width,
-    state_style, META_GAP,
+    cells, ellipsize, list_cursor, meta_budget, panel_title, render_disconnected,
+    render_load_error, row_width, state_style, META_GAP,
 };
 
-/// Empty-state copy: no open issues. Zero rows is a valid state — the footer's
-/// status row covers failed loads.
+/// Empty-state copy: no open issues. Zero rows is a valid state — a failed load
+/// paints the panel's `error` state.
 const EMPTY_ISSUES: &str = "—（暂无 Issues）";
 
 /// Render the open-issues list (excluding pull requests).
@@ -25,6 +25,18 @@ const EMPTY_ISSUES: &str = "—（暂无 Issues）";
 /// The panel draws its content only (§4.1): the status row and the hint row
 /// are both painted once by the footer.
 pub fn render_issues(f: &mut Frame, content: Rect, app: &App) {
+    if let Some(message) = app.load_error.as_deref() {
+        render_load_error(
+            f,
+            content,
+            "Issues",
+            app.github_state.owner(),
+            app.github_state.repo(),
+            message,
+        );
+        return;
+    }
+
     if !app.github_state.connected() {
         render_disconnected(f, content, "Issues", app.github_state.kind(), app);
         return;
@@ -75,6 +87,18 @@ const ISSUE_DETAIL_PLACEHOLDER: &str = "—（暂无 Issue 详情）";
 /// (identification + metadata) and a soft-wrapped body. Issues carry no
 /// check sub-list, so there is no third pane.
 pub fn render_issue_detail(f: &mut Frame, content: Rect, app: &App) {
+    if let Some(message) = app.load_error.as_deref() {
+        render_load_error(
+            f,
+            content,
+            "Issue 详情",
+            app.github_state.owner(),
+            app.github_state.repo(),
+            message,
+        );
+        return;
+    }
+
     if !app.github_state.connected() {
         render_disconnected(f, content, "Issue 详情", app.github_state.kind(), app);
         return;

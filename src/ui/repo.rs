@@ -6,6 +6,7 @@ use ratatui::{
     Frame,
 };
 
+use super::components::state_panel::{self, PanelState};
 use super::{hint, pulls, render_confirm_overlay};
 use crate::git::FileEntry;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
@@ -13,7 +14,9 @@ use crate::ui::components::footer::{hints as join_hints, HintRow};
 /// State for rendering the single-repo view.
 ///
 /// The panel draws its content only (§4.1): the status row and the hint row
-/// are both painted once by the footer, so no async result is read here.
+/// are both painted once by the footer, so no async *result* is read here. A
+/// failed *load* is not an async result — it belongs to the panel, and arrives
+/// as [`RepoState::load_error`].
 pub struct RepoState<'a> {
     /// Working-tree entries to list.
     pub entries: &'a [FileEntry],
@@ -23,11 +26,22 @@ pub struct RepoState<'a> {
     pub show_discard_confirm: bool,
     /// File the confirmation targets, when open.
     pub confirm_file: Option<&'a FileEntry>,
+    /// Load failure of the file list / repository status (§4.3): the panel
+    /// shows its `error` state instead of the list.
+    pub load_error: Option<&'a str>,
 }
 
 /// Render the single-repo file status list, plus the discard confirmation
 /// overlay when it is open.
+///
+/// A failed load paints the panel's `error` state (§4.3) instead of the list —
+/// an operation failure leaves the list exactly as it was.
 pub fn render_repo(f: &mut Frame, content: Rect, mut state: RepoState<'_>) {
+    if let Some(message) = state.load_error {
+        state_panel::render_state_panel(f, content, "文件状态", &PanelState::Error { message });
+        return;
+    }
+
     render_file_list(f, content, &mut state);
 
     // Overlay discard confirmation dialog
@@ -154,6 +168,7 @@ mod tests {
             list_state,
             show_discard_confirm: false,
             confirm_file: None,
+            load_error: None,
         }
     }
 
@@ -307,27 +322,48 @@ mod tests {
         );
     }
 
-    /// §4.1: the failed load lands on the footer's status row, once, and
-    /// the panel body keeps no row of its own for it.
+    /// §4.3: a failed load paints the panel's `error` state (`加载失败` + the
+    /// reason + `按 r 重试`) and never the footer's status row.
     #[test]
-    fn render_error_status_row_shows_reason_in_red() {
+    fn render_load_error_shows_the_panel_error_state_not_the_status_row() {
+        let mut list_state = ListState::default();
+        let mut state = base_state(&[], &mut list_state);
+        state.load_error = Some("加载文件列表失败: boom");
+        let terminal = render_with_footer(state, StatusRow::plain(None), 80, 24);
+        let text = compact(&terminal);
+        assert!(text.contains("加载失败"), "missing error title: {text}");
+        assert!(
+            text.contains("加载文件列表失败:boom"),
+            "missing reason: {text}"
+        );
+        assert!(text.contains("按r重试"), "missing retry hint: {text}");
+        assert!(
+            !rows_with(&terminal, "加载文件列表失败:boom").contains(&22),
+            "the load failure must not reach the footer status row: {text}"
+        );
+        // The stale operation message on the status row is a different face:
+        // it stays where §4.2 put it and never paints the panel.
         let status = StatusLine {
-            message: "加载文件列表失败: boom".to_string(),
+            message: "stage 失败: boom".to_string(),
             is_error: true,
         };
         let mut list_state = ListState::default();
+        let entries = vec![entry("src/lib.rs", FileState::Modified)];
         let terminal = render_with_footer(
-            base_state(&[], &mut list_state),
+            base_state(&entries, &mut list_state),
             StatusRow::plain(Some(&status)),
             80,
             24,
         );
         let text = compact(&terminal);
-        assert!(text.contains("boom"), "missing error: {text}");
+        assert!(
+            text.contains("Msrc/lib.rs"),
+            "the list must survive: {text}"
+        );
         assert_eq!(
-            rows_with(&terminal, "boom"),
+            rows_with(&terminal, "stage失败:boom"),
             vec![22],
-            "the error must land on the footer status row only"
+            "an operation result stays on the status row only: {text}"
         );
         assert_eq!(status_fg(&terminal), Color::Red, "error must render red");
     }

@@ -11,6 +11,7 @@ use ratatui::{
 use crate::git::BranchInfo;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 
+use super::components::state_panel::{self, PanelState};
 use super::{hint, pulls};
 
 /// Borrowed render state for the branch panel, referencing `App.branches`
@@ -30,6 +31,9 @@ pub struct BranchesState<'a> {
     pub show_delete_confirm: bool,
     /// Branch targeted by the delete confirmation, when shown.
     pub confirm_branch: Option<&'a BranchInfo>,
+    /// Load failure of the branch list (§4.3): the panel shows its `error`
+    /// state instead of the list.
+    pub load_error: Option<&'a str>,
 }
 
 /// Render the branch list, plus the create/confirm overlays when active.
@@ -38,10 +42,20 @@ pub struct BranchesState<'a> {
 /// are both drawn once by the footer — the hint row from
 /// [`branches_hints`] — so nothing here reserves a row for either.
 ///
-/// A failed load arrives as an error [`crate::ui::status::StatusLine`] the
-/// footer paints with an empty list, so an empty panel never masquerades as
-/// success (checkpoint 2).
+/// A failed load is not a footer result: it paints the panel's `error` state
+/// over the list (§4.3), so an empty panel never masquerades as success
+/// (checkpoint 2) and an operation failure leaves the list untouched.
 pub fn render_branches(f: &mut Frame, content: Rect, mut state: BranchesState<'_>) {
+    if let Some(message) = state.load_error {
+        state_panel::render_state_panel(
+            f,
+            content,
+            &branch_title(state.repo_name, 0),
+            &PanelState::Error { message },
+        );
+        return;
+    }
+
     render_branch_list(f, content, &mut state);
 
     if state.show_delete_confirm {
@@ -88,6 +102,12 @@ pub(crate) fn branches_hints(show_input: bool, show_delete_confirm: bool) -> Hin
     HintRow::new(key_hints(show_input, show_delete_confirm))
 }
 
+/// Panel title: `分支 [repo] (count)` — shared by the list and the `error`
+/// state so a failed load still names the panel it belongs to.
+fn branch_title(repo_name: &str, count: usize) -> String {
+    format!("分支 [{repo_name}] ({count})")
+}
+
 fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) {
     let width = pulls::row_width(area);
     let items: Vec<ListItem> = state
@@ -117,11 +137,7 @@ fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) 
         .collect();
 
     let block = Block::default()
-        .title(format!(
-            "分支 [{}] ({})",
-            state.repo_name,
-            state.branches.len()
-        ))
+        .title(branch_title(state.repo_name, state.branches.len()))
         .borders(Borders::ALL);
 
     let list = List::new(items)
@@ -175,6 +191,7 @@ mod tests {
             input: "",
             show_delete_confirm: false,
             confirm_branch: None,
+            load_error: None,
         }
     }
 

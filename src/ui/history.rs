@@ -10,7 +10,8 @@ use ratatui::{
 
 use crate::git::{CommitDetail, CommitRow, RefKind};
 
-use super::{hint, pulls};
+use super::components::state_panel::{self, PanelState};
+use super::{hint, named_title, pulls};
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 
 /// Inner width of the DAG column: one cell per lane, capped at the lanes
@@ -44,6 +45,9 @@ pub struct HistoryRender<'a> {
     pub selected: usize,
     /// Name of the repository being read (shown in the title).
     pub repo_name: &'a str,
+    /// Load failure of the commit list or of the detail payload (§4.3): the
+    /// commit-list panel shows its `error` state instead of the list.
+    pub load_error: Option<&'a str>,
 }
 
 /// Render the history view: DAG column, commit list and detail pane. The
@@ -51,6 +55,11 @@ pub struct HistoryRender<'a> {
 ///
 /// The list is drawn first so the DAG column can scroll with the offset the
 /// list actually settled on, keeping graph rows and commit rows aligned.
+///
+/// A failed load lands on the panel whose content is missing (§4.3): with no
+/// commits the error state replaces the list, while a commit list that did
+/// load keeps its rows and the detail pane reports the failure — the content
+/// that arrived stays readable either way.
 pub fn render_history(f: &mut Frame, content: Rect, mut state: HistoryRender<'_>) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -64,6 +73,21 @@ pub fn render_history(f: &mut Frame, content: Rect, mut state: HistoryRender<'_>
     let graph_area = columns[0];
     let list_area = columns[1];
     let detail_area = columns[2];
+
+    if let Some(message) = state.load_error {
+        // Which pane lost its content decides where the error state goes: a
+        // failed list has no rows at all, a failed detail keeps them.
+        if state.commits.is_empty() {
+            let title = named_title("提交历史", state.repo_name, 0);
+            state_panel::render_state_panel(f, list_area, &title, &PanelState::Error { message });
+            return;
+        }
+        let title = detail_pane_title(&state);
+        state_panel::render_state_panel(f, detail_area, &title, &PanelState::Error { message });
+        render_commit_list(f, list_area, &mut state);
+        render_graph(f, graph_area, &state);
+        return;
+    }
 
     render_commit_list(f, list_area, &mut state);
     render_graph(f, graph_area, &state);
@@ -150,11 +174,9 @@ fn render_graph(f: &mut Frame, area: Rect, state: &HistoryRender<'_>) {
 /// Detail pane: the complete commit message soft-wrapped, followed by the
 /// list of paths the commit changed.
 fn render_detail(f: &mut Frame, area: Rect, state: &HistoryRender<'_>) {
-    let title = match selected_commit(state) {
-        Some(commit) => format!("详情 [{}]", commit.id),
-        None => "详情".to_string(),
-    };
-    let block = Block::default().title(title).borders(Borders::ALL);
+    let block = Block::default()
+        .title(detail_pane_title(state))
+        .borders(Borders::ALL);
 
     let paragraph = match state.detail {
         None => Paragraph::new(Span::styled(
@@ -184,6 +206,16 @@ fn render_detail(f: &mut Frame, area: Rect, state: &HistoryRender<'_>) {
         }
     };
     f.render_widget(paragraph, area);
+}
+
+/// Title of the detail pane: `详情 [id]` while a commit is highlighted,
+/// `详情` otherwise. The `error` state of a failed detail load reuses it, so
+/// the pane it replaces keeps its name.
+fn detail_pane_title(state: &HistoryRender<'_>) -> String {
+    match selected_commit(state) {
+        Some(commit) => format!("详情 [{}]", commit.id),
+        None => "详情".to_string(),
+    }
 }
 
 /// The highlighted commit: the index `App` passed in, when it still points
@@ -250,6 +282,12 @@ mod tests {
     /// author/time tail to fit on the selected row — and return the
     /// whitespace-stripped buffer text (wide CJK glyphs leave padding cells).
     fn render_to_text(state: HistoryState) -> String {
+        render_to_text_with(state, None)
+    }
+
+    /// Same frame with a load failure in play, so a test can place the
+    /// panel's `error` state (§4.3).
+    fn render_to_text_with(state: HistoryState, load_error: Option<&str>) -> String {
         let hints = history_hints();
         let backend = TestBackend::new(120, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -268,6 +306,7 @@ mod tests {
                             list_state: &mut state.list_state,
                             selected: state.selected,
                             repo_name: "demo",
+                            load_error,
                         };
                         render_history(f, body, render)
                     },

@@ -381,8 +381,8 @@ pub(crate) fn offline_client() -> Box<dyn crate::platform::PlatformClient> {
 
 /// Panel body shown while the platform client is not ready: the platform's own
 /// gate copy above the retry guidance, instead of a list that could never
-/// load. The reason the client is missing is the footer's status row — the
-/// one landing spot for it (§4.1) — so the body never repeats it.
+/// load. The reason the client is missing is the gate copy itself — nothing is
+/// repeated on the status row (§4.1).
 pub(crate) fn render_disconnected(
     f: &mut Frame,
     area: Rect,
@@ -414,8 +414,43 @@ pub(crate) fn render_disconnected(
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+/// The panel's `error` state for a failed load of its own content (§4.3):
+/// `加载失败`, the reason and `按 r 重试`, on a `danger` shell that keeps the
+/// panel title.
+///
+/// Local git panels ask for the same shape through
+/// [`crate::ui::components::state_panel`]; the receipts panels share this one
+/// wrapper because they all read [`App::load_error`] straight off the app.
+pub(crate) fn render_load_error(
+    f: &mut Frame,
+    area: Rect,
+    label: &str,
+    owner: Option<&str>,
+    repo: Option<&str>,
+    message: &str,
+) {
+    crate::ui::components::state_panel::render_state_panel(
+        f,
+        area,
+        &panel_title(label, owner, repo),
+        &crate::ui::components::state_panel::PanelState::Error { message },
+    );
+}
+
 /// Render the open-pull list (the receipts hub entry point).
 pub fn render_pulls(f: &mut Frame, content: Rect, app: &App) {
+    if let Some(message) = app.load_error.as_deref() {
+        render_load_error(
+            f,
+            content,
+            "PR 列表",
+            app.github_state.owner(),
+            app.github_state.repo(),
+            message,
+        );
+        return;
+    }
+
     if !app.github_state.connected() {
         render_disconnected(f, content, "PR 列表", app.github_state.kind(), app);
         return;
@@ -484,6 +519,18 @@ fn pull_item(pr: &PrSummary, width: usize) -> ListItem<'static> {
 /// Render the detail of the highlighted pull request: the bordered shell,
 /// the placeholder while its payload has not arrived, and the three panes.
 pub fn render_pull_detail(f: &mut Frame, content: Rect, app: &App) {
+    if let Some(message) = app.load_error.as_deref() {
+        render_load_error(
+            f,
+            content,
+            "PR 详情",
+            app.github_state.owner(),
+            app.github_state.repo(),
+            message,
+        );
+        return;
+    }
+
     if !app.github_state.connected() {
         render_disconnected(f, content, "PR 详情", app.github_state.kind(), app);
         return;

@@ -10,6 +10,7 @@ use ratatui::{
     Frame,
 };
 
+use super::components::state_panel::{self, PanelState};
 use super::hint;
 use super::repo::centered_rect;
 use crate::git::show_path;
@@ -36,6 +37,11 @@ pub struct ConfigState<'a> {
     pub picker_entries: &'a [PathBuf],
     /// Selection cursor for the picker list.
     pub picker_state: &'a mut ListState,
+    /// Load failure of the picker's directory listing (§4.3): the popup
+    /// shows its `error` state instead of an entry list. The scan-dir list
+    /// itself is in-memory config and never fails to load, so it keeps its
+    /// rows — a rejected path stays an operation result on the status row.
+    pub load_error: Option<&'a str>,
 }
 
 /// Render the scan-dir list plus the add-scan-dir overlays (directory picker
@@ -54,6 +60,7 @@ pub fn render_config(f: &mut Frame, content: Rect, mut state: ConfigState<'_>) {
             state.picker_dir,
             state.picker_entries,
             state.picker_state,
+            state.load_error,
         );
     }
     if state.show_input {
@@ -120,17 +127,33 @@ pub(crate) fn config_hints(
 /// then a virtual "select current directory" row plus each subdirectory.
 /// Row 0 / highlighted subdirectory are what Enter submits; the list scrolls
 /// with the cursor.
+///
+/// A directory that could not be read replaces the whole popup with its
+/// `error` state (§4.3): the listing is content that did not load, so `r`
+/// retry comes with it. The reason already names the directory, which is why
+/// the path line gives way to it.
 fn render_dir_picker(
     f: &mut Frame,
     area: Rect,
     dir: &Path,
     entries: &[PathBuf],
     list_state: &mut ListState,
+    load_error: Option<&str>,
 ) {
     // Fit the popup to small terminals instead of overflowing the frame.
     let height = area.height.saturating_sub(4).clamp(6, 16).min(area.height);
     let popup_area = centered_rect(70, height, area);
     f.render_widget(Clear, popup_area);
+
+    if let Some(message) = load_error {
+        state_panel::render_state_panel(
+            f,
+            popup_area,
+            "选择扫描目录",
+            &PanelState::Error { message },
+        );
+        return;
+    }
 
     let block = Block::default()
         .title(format!("选择扫描目录 ({})", entries.len()))
@@ -381,6 +404,7 @@ mod tests {
             picker_dir: Path::new(""),
             picker_entries: &[],
             picker_state,
+            load_error: None,
         }
     }
 
@@ -416,9 +440,10 @@ mod tests {
         assert!(text.contains("Esc返回"), "missing back hint: {text}");
     }
 
-    /// §4.1: the panel body draws no status row of its own — the footer is
-    /// the one landing spot for an async result, so a message appears there
-    /// and nowhere else, and the list keeps its own rows.
+    /// §4.3: `目录不能为空` is the verdict of an action the user triggered
+    /// (submitting the add-scan-dir input), not content that failed to load,
+    /// so it belongs on the transient status row and never on the panel — the
+    /// other face of the same rule the picker case below pins.
     #[test]
     fn render_error_status_reaches_the_footer_status_row_only() {
         let status = StatusLine {
@@ -450,6 +475,47 @@ mod tests {
             vec![buffer.area.height - 2],
             "the error must land on the footer status row only"
         );
+    }
+
+    /// §4.3: the directory listing is content, so a read failure paints the
+    /// picker's `error` state (`加载失败` + reason + `按 r 重试`) and never
+    /// the status row — the opposite face of
+    /// `render_error_status_reaches_the_footer_status_row_only`.
+    #[test]
+    fn render_picker_load_error_shows_the_panel_error_state_only() {
+        let mut list_state = ListState::default();
+        let mut picker_state = ListState::default();
+        let mut state = base_state(&[], &mut list_state, &mut picker_state);
+        state.show_picker = true;
+        state.picker_dir = Path::new("/denied");
+        state.load_error = Some("无法读取目录 /denied: 权限不足");
+        let hints = config_hints(true, false, false);
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::components::footer::draw_frame(
+                    f,
+                    StatusRow::plain(None),
+                    &hints,
+                    |f, body| render_config(f, body, state),
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<u16> = (0..buffer.area.height)
+            .filter(|y| row_compact(buffer, *y).contains("无法读取目录/denied:权限不足"))
+            .collect();
+        assert!(
+            rows.iter().all(|y| *y != buffer.area.height - 2),
+            "a load failure must not land on the status row: {rows:?}"
+        );
+        assert!(!rows.is_empty(), "the reason must still reach the panel");
+        let all: String = (0..buffer.area.height)
+            .map(|y| row_compact(buffer, y))
+            .collect();
+        assert!(all.contains("加载失败"), "missing error title: {all}");
+        assert!(all.contains("按r重试"), "missing retry hint: {all}");
     }
 
     #[test]

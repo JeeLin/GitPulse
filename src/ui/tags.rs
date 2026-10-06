@@ -12,7 +12,8 @@ use crate::app::TagsModal;
 use crate::git::TagInfo;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 
-use super::{hint, pulls};
+use super::components::state_panel::{self, PanelState};
+use super::{hint, named_title, pulls};
 
 /// Empty-state copy of a repository that carries no tag (G7): zero tags is a
 /// valid state rather than a failure, so the panel says so instead of
@@ -30,16 +31,33 @@ pub struct TagsRender<'a> {
     pub modal: Option<&'a TagsModal>,
     /// Name of the repository the panel edits (shown in the title).
     pub repo_name: &'a str,
+    /// Load failure of the tag list (§4.3): the panel shows its `error` state
+    /// instead of the list.
+    pub load_error: Option<&'a str>,
 }
 
 /// Render the tag list, plus the create/confirm overlays when active.
 ///
 /// The panel draws its content only (§4.1): the status row and the hint row
 /// are both painted once by the footer — the hint row from [`tags_hints`] —
-/// so no async result is read here. Push feedback ([`RemoteStatus`]) takes
+/// so no async *result* is read here. Push feedback ([`RemoteStatus`]) takes
 /// over that row, and a notice recorded while it runs shares it, see
 /// [`super::remote::render_remote_status`].
+///
+/// A failed load is not a footer result: it paints the panel's `error` state
+/// over the list (§4.3), while a failed delete or push keeps the list and
+/// reports on the status row.
 pub fn render_tags(f: &mut Frame, content: Rect, mut state: TagsRender<'_>) {
+    if let Some(message) = state.load_error {
+        state_panel::render_state_panel(
+            f,
+            content,
+            &named_title("标签", state.repo_name, 0),
+            &PanelState::Error { message },
+        );
+        return;
+    }
+
     render_tag_list(f, content, &mut state);
 
     match state.modal {
@@ -141,7 +159,6 @@ fn render_delete_dialog(f: &mut Frame, area: Rect, tag_to_delete: &str) {
 mod tests {
     use super::*;
     use crate::ui::components::footer::StatusRow;
-    use crate::ui::status::StatusLine;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -220,6 +237,7 @@ mod tests {
             list_state,
             modal: None,
             repo_name: "demo",
+            load_error: None,
         }
     }
 
@@ -262,42 +280,68 @@ mod tests {
         );
     }
 
-    /// §4.1: a failed load lands on the footer's status row and nowhere
-    /// else, so the panel body keeps drawing the empty state.
+    /// §4.3: a failed tag load paints the panel's `error` state (`加载失败` +
+    /// reason + `按 r 重试`) instead of the empty state, and the reason never
+    /// reaches the footer status row.
     #[test]
-    fn render_error_status_shows_reason_on_the_footer_row_only() {
-        let status = StatusLine {
-            message: "加载标签列表失败: boom".to_string(),
-            is_error: true,
-        };
+    fn render_load_error_shows_the_panel_error_state_not_the_status_row() {
         let mut list_state = ListState::default();
-        let state = base_state(&[], &mut list_state);
+        let mut state = base_state(&[], &mut list_state);
+        state.load_error = Some("加载标签列表失败: boom");
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
                 crate::ui::components::footer::draw_frame(
                     f,
-                    StatusRow::plain(Some(&status)),
+                    StatusRow::plain(None),
                     &tags_hints(None),
                     |f, body| render_tags(f, body, state),
                 );
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let rows: Vec<u16> = (0..buffer.area.height)
-            .filter(|y| {
+        let rows_with = |needle: &str| -> Vec<u16> {
+            let buffer = buffer.clone();
+            (0..buffer.area.height)
+                .filter(|y| {
+                    let raw: String = (0..buffer.area.width)
+                        .map(|x| buffer[(x, *y)].symbol().to_string())
+                        .collect();
+                    let row: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+                    row.contains(needle)
+                })
+                .collect()
+        };
+        assert!(
+            rows_with("加载标签列表失败:boom")
+                .iter()
+                .all(|y| *y != buffer.area.height - 2),
+            "a load failure must not land on the status row"
+        );
+        assert!(
+            !rows_with("加载标签列表失败:boom").is_empty(),
+            "the reason must reach the panel"
+        );
+        let all: String = (0..buffer.area.height)
+            .map(|y| {
                 let raw: String = (0..buffer.area.width)
-                    .map(|x| buffer[(x, *y)].symbol().to_string())
+                    .map(|x| buffer[(x, y)].symbol().to_string())
                     .collect();
                 let row: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
-                row.contains("boom")
+                row
             })
             .collect();
-        assert_eq!(
-            rows,
-            vec![buffer.area.height - 2],
-            "the error must land on the footer status row only"
+        assert!(all.contains("加载失败"), "missing error title: {all}");
+        assert!(all.contains("按r重试"), "missing retry hint: {all}");
+        assert!(
+            all.contains("标签[demo]"),
+            "the panel keeps its title: {all}"
+        );
+        // The empty state must not read as "this repository has no tags".
+        assert!(
+            !all.contains("暂无标签"),
+            "empty state masked the error: {all}"
         );
     }
 

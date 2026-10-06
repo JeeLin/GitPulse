@@ -10,18 +10,19 @@ use ratatui::{
 
 use crate::app::BatchLogLine;
 use crate::git::RepoInfo;
-use crate::ui::status::StatusLine;
 
 use super::{hint, pulls};
 use crate::ui::components::footer::{hints as join_hints, HintRow};
+use crate::ui::components::state_panel::{self, PanelState};
 
 /// Borrowed render state for the dashboard, referencing `App.repos` directly
 /// so no mock data source exists (checkpoint 2).
 pub struct DashboardState<'a> {
     /// Live repository snapshots from `App.repos`.
     pub repos: &'a [RepoInfo],
-    /// Current status line, if any; an error hides the repository list.
-    pub status: Option<&'a StatusLine>,
+    /// Scan failure from `App.load_error`; the list is replaced by the `error`
+    /// state while it is set (§4.3).
+    pub load_error: Option<&'a str>,
     /// Selection cursor shared across frames.
     pub list_state: &'a mut ListState,
     /// Rolling per-repository batch progress log (convention 6).
@@ -41,11 +42,11 @@ fn dashboard_title(count: usize) -> String {
 
 /// Render the repository dashboard overview.
 ///
-/// An error status replaces the repository list so a failed load never
-/// masquerades as an empty list (checkpoint 2). The panel draws content only:
-/// every status — the batch progress included — reaches the frame through the
-/// footer's status row (§4.1), which `DashboardState::status` only feeds so
-/// this body can pick its error shape.
+/// A failed scan replaces the repository list with the panel's `error` state so
+/// it never masquerades as an empty list (§4.3, checkpoint 2). The panel draws
+/// content only: every async *result* — the batch progress included — reaches
+/// the frame through the footer's status row (§4.1), and an operation failure
+/// leaves the list untouched.
 pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState<'_>) {
     // Bottom scrolling batch log (convention 6) takes space only while it
     // has content; the list keeps every remaining row otherwise.
@@ -65,16 +66,14 @@ pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState
     let list_area = chunks[0];
     let batch_area = (batch_rows > 0).then(|| chunks[1]);
 
-    if let Some(status) = state.status {
-        if status.is_error {
-            let block = Block::default()
-                .title("GitPulse 仓库状态")
-                .borders(Borders::ALL);
-            let paragraph =
-                Paragraph::new(status.message.clone()).style(Style::default().fg(Color::Red));
-            f.render_widget(paragraph.block(block), list_area);
-            return;
-        }
+    if let Some(message) = state.load_error {
+        state_panel::render_state_panel(
+            f,
+            list_area,
+            "GitPulse 仓库状态",
+            &PanelState::Error { message },
+        );
+        return;
     }
 
     // Empty state: scan dirs may be unconfigured or simply contain no repos,
@@ -289,7 +288,17 @@ mod tests {
     /// [`crate::ui::components::footer::draw_frame`] — the shape
     /// `ui::render` uses — and the hint row is the bottom row.
     fn render_to_text(state: &mut DashboardState<'_>) -> String {
-        compact_text(&render_to_terminal(state))
+        compact_text(&render_to_terminal(state, None))
+    }
+
+    /// Same frame with a message on the footer's status row, so a test can
+    /// place an *operation* result next to the panel (§4.3).
+    fn render_with_status(state: &mut DashboardState<'_>, message: &str) -> Terminal<TestBackend> {
+        let status = crate::ui::status::StatusLine {
+            message: message.to_string(),
+            is_error: true,
+        };
+        render_to_terminal(state, Some(&status))
     }
 
     /// Frame height the panel tests draw: the content area plus the two footer
@@ -299,9 +308,11 @@ mod tests {
     /// The panel draws content only (§4.1), so the frame goes through
     /// [`crate::ui::components::footer::draw_frame`] — the shape
     /// `ui::render` uses — and the footer takes the bottom two rows.
-    fn render_to_terminal(state: &mut DashboardState<'_>) -> Terminal<TestBackend> {
+    fn render_to_terminal(
+        state: &mut DashboardState<'_>,
+        status: Option<&crate::ui::status::StatusLine>,
+    ) -> Terminal<TestBackend> {
         let hints = dashboard_hints();
-        let status = state.status;
         let backend = TestBackend::new(80, FRAME_ROWS);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
@@ -349,7 +360,7 @@ mod tests {
         list_state.select(Some(0));
         let text = render_to_text(&mut DashboardState {
             repos: &repos,
-            status: None,
+            load_error: None,
             list_state: &mut list_state,
             batch_log: &[],
             batch_op: "",
@@ -361,23 +372,27 @@ mod tests {
         assert!(text.contains("dev"), "missing branch: {text}");
     }
 
+    /// §4.3: a failed *scan* is a load failure, so the panel paints its
+    /// `error` state (`加载失败` + reason + `按 r 重试`) instead of the list,
+    /// and nothing reaches the status row.
     #[test]
-    fn render_error_state_shows_error_not_list() {
-        let status = StatusLine {
-            message: "error: failed to scan repos".to_string(),
-            is_error: true,
-        };
+    fn render_load_error_shows_the_error_state_not_the_list() {
         let repos = vec![make_repo("alpha", "main")];
         let mut list_state = ListState::default();
-        let text = render_to_text(&mut DashboardState {
+        let text = compact(&render_to_text(&mut DashboardState {
             repos: &repos,
-            status: Some(&status),
+            load_error: Some("扫描仓库失败: 权限不足"),
             list_state: &mut list_state,
             batch_log: &[],
             batch_op: "",
             batch_running: false,
-        });
-        assert!(text.contains("error"), "missing error: {text}");
+        }));
+        assert!(text.contains("加载失败"), "missing error title: {text}");
+        assert!(
+            text.contains("扫描仓库失败:权限不足"),
+            "missing reason: {text}"
+        );
+        assert!(text.contains("按r重试"), "missing retry hint: {text}");
         assert!(!text.contains("alpha"), "repo list leaked: {text}");
     }
 
@@ -385,21 +400,23 @@ mod tests {
     /// row — once, and nowhere in the content area.
     #[test]
     fn render_status_reaches_the_footer_status_row_only() {
-        let status = StatusLine {
-            message: "refreshed: 3 repos".to_string(),
-            is_error: false,
-        };
         let repos = vec![make_repo("alpha", "main")];
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let terminal = render_to_terminal(&mut DashboardState {
-            repos: &repos,
-            status: Some(&status),
-            list_state: &mut list_state,
-            batch_log: &[],
-            batch_op: "",
-            batch_running: false,
-        });
+        let terminal = render_to_terminal(
+            &mut DashboardState {
+                repos: &repos,
+                load_error: None,
+                list_state: &mut list_state,
+                batch_log: &[],
+                batch_op: "",
+                batch_running: false,
+            },
+            Some(&crate::ui::status::StatusLine {
+                message: "refreshed: 3 repos".to_string(),
+                is_error: false,
+            }),
+        );
         let text = compact(&compact_text(&terminal));
         // Non-error status keeps the list and reaches the status row only.
         assert!(text.contains("alpha"), "list hidden: {text}");
@@ -410,31 +427,30 @@ mod tests {
         );
     }
 
-    /// §4.1: a failed load replaces the list body *and* reaches the footer
-    /// status row — once, not twice.
+    /// §4.3: an *operation* failure (a batch run that lost a repository) keeps
+    /// the loaded list and reports on the status row — the panel does not
+    /// blank itself for something it already loaded.
     #[test]
-    fn render_error_reaches_the_footer_status_row_once() {
-        let status = StatusLine {
-            message: "error: scan failed".to_string(),
-            is_error: true,
-        };
+    fn render_operation_error_keeps_the_list_and_reaches_the_status_row_only() {
         let repos = vec![make_repo("alpha", "main")];
         let mut list_state = ListState::default();
-        let terminal = render_to_terminal(&mut DashboardState {
-            repos: &repos,
-            status: Some(&status),
-            list_state: &mut list_state,
-            batch_log: &[],
-            batch_op: "",
-            batch_running: false,
-        });
+        let terminal = render_with_status(
+            &mut DashboardState {
+                repos: &repos,
+                load_error: None,
+                list_state: &mut list_state,
+                batch_log: &[],
+                batch_op: "",
+                batch_running: false,
+            },
+            "批量 pull 完成: 1 成功 / 1 失败",
+        );
         let text = compact(&compact_text(&terminal));
-        assert!(text.contains("error"), "missing error: {text}");
-        assert!(!text.contains("alpha"), "repo list leaked: {text}");
+        assert!(text.contains("alpha"), "the list must survive: {text}");
         assert_eq!(
-            rows_with(&terminal, "error:scanfailed"),
-            vec![1, FRAME_ROWS - 2],
-            "the error body and the footer status row are the only two renderings"
+            rows_with(&terminal, "批量pull完成:1成功/1失败"),
+            vec![FRAME_ROWS - 2],
+            "the result belongs on the footer status row only: {text}"
         );
     }
 
@@ -458,7 +474,7 @@ mod tests {
         ];
         let text = render_to_text(&mut DashboardState {
             repos: &repos,
-            status: None,
+            load_error: None,
             list_state: &mut list_state,
             batch_log: &batch_log,
             batch_op: "pull",
@@ -490,7 +506,7 @@ mod tests {
         let mut list_state = ListState::default();
         let text = render_to_text(&mut DashboardState {
             repos: &[],
-            status: None,
+            load_error: None,
             list_state: &mut list_state,
             batch_log: &[],
             batch_op: "",
@@ -514,7 +530,7 @@ mod tests {
         list_state.select(Some(0));
         let text = render_to_text(&mut DashboardState {
             repos: &repos,
-            status: None,
+            load_error: None,
             list_state: &mut list_state,
             batch_log: &[],
             batch_op: "",
@@ -530,21 +546,17 @@ mod tests {
 
     #[test]
     fn render_error_state_shows_error_not_config_hint() {
-        let status = StatusLine {
-            message: "error: scan failed".to_string(),
-            is_error: true,
-        };
         let mut list_state = ListState::default();
         let text = render_to_text(&mut DashboardState {
             repos: &[],
-            status: Some(&status),
+            load_error: Some("扫描仓库失败: 权限不足"),
             list_state: &mut list_state,
             batch_log: &[],
             batch_op: "",
             batch_running: false,
         });
         let compact = compact(&text);
-        assert!(compact.contains("error"), "missing error: {compact}");
+        assert!(compact.contains("扫描仓库失败"), "missing error: {compact}");
         assert!(
             !compact.contains("暂无仓库"),
             "hint must not mask the error: {compact}"

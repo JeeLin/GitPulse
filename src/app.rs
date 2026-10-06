@@ -487,7 +487,20 @@ pub struct App {
     /// instead of cloning them every frame.
     pub(crate) config: Config,
     /// Bottom status line (convention 3); rendered with the dashboard (M1 subtask 4).
+    ///
+    /// Only *operation results* live here — "how did that action go" (§4.3):
+    /// commit / push / pull / stage / delete outcomes, validation refusals and
+    /// batch summaries. A load failure belongs in [`App::load_error`].
     pub status: Option<StatusLine>,
+    /// Failure of the load behind the current view's panel (§4.3): the content
+    /// never arrived, so the panel itself renders its `error` state (`加载失败`
+    /// / the reason / `按 r 重试`) and keeps it until a reload succeeds.
+    ///
+    /// One slot is enough because only one view is on screen: every loader
+    /// writes it while its own view is active, clears it on success and on the
+    /// view's entry points, so a message can never surface on a panel it does
+    /// not describe.
+    pub load_error: Option<String>,
     /// Discovered git repositories (M1 subtask 3).
     pub repos: Vec<RepoInfo>,
     /// Dashboard selection cursor, consumed by the dashboard renderer (M1 subtask 4).
@@ -583,6 +596,7 @@ impl App {
             view: View::Dashboard,
             config,
             status: None,
+            load_error: None,
             repos: Vec::new(),
             dashboard_state: ListState::default(),
             current_repo: None,
@@ -624,12 +638,36 @@ impl App {
         }
     }
 
-    /// Record an error message on the status line (persists until the next operation).
+    /// Record the result of an operation the user triggered on the status row
+    /// (§4.3): commit / push / pull / stage / delete verdicts, validation
+    /// refusals, batch summaries.
+    ///
+    /// The status row answers "how did that action go", so it is transient and
+    /// belongs to no panel. A *load* failure must not come here — that is
+    /// "this content did not load", which is [`App::set_load_error`].
     pub fn set_error(&mut self, message: impl Into<String>) {
         self.status = Some(StatusLine {
             message: message.into(),
             is_error: true,
         });
+    }
+
+    /// Record a load failure on the panel that owns the current view (§4.3):
+    /// the reason never reached the content, so the panel renders its `error`
+    /// state (`加载失败` / reason / `按 r 重试`) and keeps it — a successful
+    /// reload of that content clears it.
+    ///
+    /// The status row is left alone: it may still carry the result of an
+    /// operation that ran before the load failed, and the two faces never show
+    /// the same message.
+    pub fn set_load_error(&mut self, message: impl Into<String>) {
+        self.load_error = Some(message.into());
+    }
+
+    /// Drop the panel load failure — a reload of that content succeeded, or the
+    /// view that owned it was left.
+    pub fn clear_load_error(&mut self) {
+        self.load_error = None;
     }
 
     /// Clear the status line.
@@ -693,16 +731,18 @@ impl App {
 
     /// Discover git repositories from `config.scan_dirs` and load their status.
     ///
-    /// On failure, records an error and clears `repos` so the UI shows the
-    /// error rather than an empty list masquerading as success (checkpoint 2).
+    /// A scan that failed is a load failure, so it lands on the dashboard's
+    /// `error` state and `repos` is cleared — the panel shows the reason
+    /// instead of an empty list masquerading as success (§4.3, checkpoint 2).
     pub fn load_repos(&mut self) {
         match git::discover_repos(&self.config.scan_dirs) {
             Ok(repos) => {
                 self.repos = repos;
                 self.clear_error();
+                self.clear_load_error();
             }
             Err(e) => {
-                self.set_error(format!("扫描仓库失败: {e}"));
+                self.set_load_error(format!("扫描仓库失败: {e}"));
                 self.repos = Vec::new();
             }
         }
@@ -733,9 +773,10 @@ impl App {
             if i < self.repos.len() {
                 self.view = View::Repo;
                 self.current_repo = Some(i);
+                self.clear_error();
+                self.clear_load_error();
                 self.load_file_entries();
                 self.file_state.select(Some(0));
-                self.clear_error();
             }
         }
     }
@@ -749,6 +790,7 @@ impl App {
                     Ok(entries) => {
                         self.file_entries = entries;
                         self.clear_error();
+                        self.clear_load_error();
                         if self.file_entries.is_empty() {
                             self.file_state.select(None);
                         } else {
@@ -758,7 +800,7 @@ impl App {
                         }
                     }
                     Err(e) => {
-                        self.set_error(format!("加载文件列表失败: {e}"));
+                        self.set_load_error(format!("加载文件列表失败: {e}"));
                         self.file_entries.clear();
                         self.file_state.select(None);
                     }
@@ -778,8 +820,9 @@ impl App {
                         self.diff_content = diff;
                         self.view = View::Diff;
                         self.diff_scroll = 0;
+                        self.clear_load_error();
                     }
-                    Err(e) => self.set_error(format!("加载 diff 失败: {e}")),
+                    Err(e) => self.set_load_error(format!("加载 diff 失败: {e}")),
                 }
             }
         }
@@ -1015,7 +1058,9 @@ impl App {
     /// platform client once (cached as a credential-validity gate) and lands on
     /// the pulls list. On a missing remote or a missing token the
     /// view still becomes [`View::Pulls`] so the panel can surface the error
-    /// and the user can retry with `r`.
+    /// and the user can retry with `r` — those failures are load failures, so
+    /// the reason goes to the panel's `error` state and not to the status row
+    /// (§4.3).
     ///
     /// The whole previous-repository state is dropped up front (U1): the six
     /// receipt lists, both details, the cached client, the resolved remote and
@@ -1033,9 +1078,10 @@ impl App {
         self.reset_github_state();
         self.view = View::Pulls;
         self.clear_error();
+        self.clear_load_error();
 
         let Some(repo) = self.current_repo_path() else {
-            self.set_error(match platform.and_then(platform_display_name) {
+            self.set_load_error(match platform.and_then(platform_display_name) {
                 Some(name) => format!("打开 {name} 回执失败: 未打开仓库"),
                 None => "打开平台回执失败: 未打开仓库".to_string(),
             });
@@ -1049,14 +1095,14 @@ impl App {
                 // `PlatformError`); the two platform failures below do go
                 // through it, so the two error renderings are not
                 // interchangeable but are equally readable.
-                self.set_error(format!("解析远端失败: {e}"));
+                self.set_load_error(format!("解析远端失败: {e}"));
                 return;
             }
         };
         let remote = match crate::platform::parse_remote(&url) {
             Ok(r) => r,
             Err(e) => {
-                self.set_error(crate::platform::render_platform_error(&e));
+                self.set_load_error(crate::platform::render_platform_error(&e));
                 return;
             }
         };
@@ -1069,7 +1115,7 @@ impl App {
         match crate::platform::build_client(&remote) {
             Ok(client) => self.github_state.client = Some(client),
             Err(e) => {
-                self.set_error(crate::platform::render_platform_error(&e));
+                self.set_load_error(crate::platform::render_platform_error(&e));
                 return;
             }
         }
@@ -1330,6 +1376,13 @@ impl App {
     /// remote, so a fetch that was still in flight for the previous
     /// repository has lost its only receiver by the time it answers and never
     /// reaches this function (U1).
+    ///
+    /// The two faces follow §4.3: a settled list (or detail) is an async
+    /// *result* and flashes on the status row, while a fetch that never
+    /// answered is a *load failure* — the receipts did not arrive — so it lands
+    /// on the panel's `error` state with `r` as the retry, exactly like a local
+    /// git load. The running progress it replaces is dropped, since a stalled
+    /// spinner next to a failed load would report work that is over.
     pub fn poll_github(&mut self) {
         let Some(rx) = self.github_rx.as_mut() else {
             return;
@@ -1340,10 +1393,11 @@ impl App {
             Err(mpsc::error::TryRecvError::Disconnected) => {
                 self.github_rx = None;
                 let platform = self.github_state.kind();
-                self.remote_status = Some(RemoteStatus::Error(format!(
+                self.remote_status = None;
+                self.set_load_error(format!(
                     "{} 任务意外退出",
                     platform.map_or("平台", |kind| kind.as_str())
-                )));
+                ));
                 return;
             }
         };
@@ -1353,34 +1407,40 @@ impl App {
                 self.github_state.pulls = v;
                 self.clamp_github_selection();
                 self.remote_status = Some(RemoteStatus::Success);
+                self.clear_load_error();
             }
             GithubMsg::Detail(d) => {
                 self.github_state.detail = Some(d);
                 self.remote_status = Some(RemoteStatus::Success);
+                self.clear_load_error();
             }
             GithubMsg::Checks(v) => {
                 self.github_state.checks = v;
                 self.remote_status = Some(RemoteStatus::Success);
+                self.clear_load_error();
             }
             GithubMsg::Issues(v) => {
                 self.github_state.issues = v;
                 self.remote_status = Some(RemoteStatus::Success);
+                self.clear_load_error();
             }
             GithubMsg::IssueDetail(d) => {
                 self.github_state.issue_detail = Some(d);
                 self.remote_status = Some(RemoteStatus::Success);
+                self.clear_load_error();
             }
             GithubMsg::Notifications(v) => {
                 self.github_state.notifications = v;
                 self.remote_status = Some(RemoteStatus::Success);
+                self.clear_load_error();
             }
             GithubMsg::Error(e) => {
-                self.remote_status = Some(RemoteStatus::Error(
-                    crate::platform::render_platform_error(&e),
-                ));
+                self.remote_status = None;
+                self.set_load_error(crate::platform::render_platform_error(&e));
             }
             GithubMsg::Other(message) => {
-                self.remote_status = Some(RemoteStatus::Error(message));
+                self.remote_status = None;
+                self.set_load_error(message);
             }
         }
     }
@@ -1425,8 +1485,13 @@ impl App {
     fn refresh_repo_status(&mut self, idx: usize) {
         let repo_path = self.repos[idx].path.clone();
         match git::query_status(&repo_path) {
-            Ok(info) => self.repos[idx] = info,
-            Err(e) => self.set_error(format!("刷新状态失败: {e}")),
+            Ok(info) => {
+                self.repos[idx] = info;
+                self.clear_load_error();
+            }
+            // Reading the repository status is a load, not an action the user
+            // triggered, so the panel owns the failure (§4.3).
+            Err(e) => self.set_load_error(format!("刷新状态失败: {e}")),
         }
         if self.current_repo == Some(idx) {
             self.load_file_entries();
@@ -1531,8 +1596,9 @@ impl App {
     /// repository.
     ///
     /// The origin view is recorded so Esc returns there; the branch list is
-    /// loaded immediately, with failures surfacing as an error status rather
-    /// than an empty list masquerading as success (checkpoint 2).
+    /// loaded immediately, with a failure surfacing as the panel's `error`
+    /// state rather than an empty list masquerading as success (§4.3,
+    /// checkpoint 2).
     pub fn enter_branches(&mut self) {
         let origin = self.view;
         let idx = match origin {
@@ -1560,6 +1626,7 @@ impl App {
         self.show_branch_delete_confirm = false;
         self.branch_input.clear();
         self.clear_error();
+        self.clear_load_error();
     }
 
     /// The repository an index into `repos` points at, when that index is
@@ -1597,17 +1664,19 @@ impl App {
     pub fn leave_history(&mut self) {
         self.view = View::Repo;
         self.clear_error();
+        self.clear_load_error();
     }
 
     /// Load the history list for the current repository and select the first
     /// commit, preloading its detail.
     ///
-    /// A failed load clears the list and reports the reason, so a broken
-    /// repository never looks like an empty one (checkpoint 2); an empty
-    /// result is a valid state and keeps the status line clean.
+    /// A failed load clears the list and hands the reason to the panel's
+    /// `error` state, so a broken repository never looks like an empty one
+    /// (§4.3, checkpoint 2); an empty result is a valid state and keeps both
+    /// faces clean.
     pub fn load_history(&mut self) {
         let Some(path) = self.current_repo_path() else {
-            self.set_error(invalid_repo_msg("历史视图"));
+            self.set_load_error(invalid_repo_msg("历史视图"));
             self.history.clear();
             return;
         };
@@ -1617,11 +1686,14 @@ impl App {
                 self.history.set_commits(commits, graph);
                 self.clear_error();
                 // An empty history resolves to `detail == None` below, so
-                // the detail reload is unconditional.
+                // the detail reload is unconditional — and a detail failure
+                // must still reach the panel, so the list's own success clears
+                // the failure only before this call.
+                self.clear_load_error();
                 self.load_history_detail();
             }
             Err(e) => {
-                self.set_error(format!("加载提交历史失败: {e}"));
+                self.set_load_error(format!("加载提交历史失败: {e}"));
                 self.history.clear();
             }
         }
@@ -1629,10 +1701,11 @@ impl App {
 
     /// Load the detail payload of the highlighted commit.
     ///
-    /// Failures (unresolvable object, repository gone) surface on the status
-    /// line instead of panicking; an empty history simply drops the detail.
-    /// The error chain is printed in full (`{e:#}`, H2) so the cause from
-    /// `git::commit_detail`'s context is not swallowed.
+    /// Failures (unresolvable object, repository gone) surface as the history
+    /// panel's `error` state instead of panicking (§4.3: the detail is content
+    /// that did not load, not the result of an action); an empty history simply
+    /// drops the detail. The error chain is printed in full (`{e:#}`, H2) so the
+    /// cause from `git::commit_detail`'s context is not swallowed.
     ///
     /// Known limitation (G38): the whole-tree diff runs synchronously on the
     /// UI thread — a `j`/`k` press pays for it once, and a press that cannot
@@ -1651,17 +1724,18 @@ impl App {
         };
         let Some(path) = self.current_repo_path() else {
             self.history.detail = None;
-            self.set_error(invalid_repo_msg("历史视图"));
+            self.set_load_error(invalid_repo_msg("历史视图"));
             return;
         };
         match git::commit_detail(&path, &id) {
             Ok(detail) => {
                 self.history.detail = Some(detail);
                 self.clear_error();
+                self.clear_load_error();
             }
             Err(e) => {
                 self.history.detail = None;
-                self.set_error(format!("加载提交详情失败: {e:#}"));
+                self.set_load_error(format!("加载提交详情失败: {e:#}"));
             }
         }
     }
@@ -1681,6 +1755,7 @@ impl App {
         // Stale push feedback would outrank the load status below.
         self.clear_finished_push_feedback();
         self.clear_error();
+        self.clear_load_error();
         self.load_tags();
     }
 
@@ -1689,17 +1764,19 @@ impl App {
         self.view = View::Repo;
         self.tags_state.modal = None;
         self.clear_error();
+        self.clear_load_error();
     }
 
     /// Load (or reload) the tag list for the current repository, keeping the
     /// cursor on a still-valid row.
     ///
-    /// A failed load clears the list and reports the reason, so a broken
-    /// repository never looks like an empty one (checkpoint 2); an empty
-    /// result is a valid state and keeps the status line clean.
+    /// A failed load clears the list and hands the reason to the panel's
+    /// `error` state, so a broken repository never looks like an empty one
+    /// (§4.3, checkpoint 2); an empty result is a valid state and keeps both
+    /// faces clean.
     pub fn load_tags(&mut self) {
         let Some(path) = self.current_repo_path() else {
-            self.set_error(invalid_repo_msg("标签面板"));
+            self.set_load_error(invalid_repo_msg("标签面板"));
             self.tags_state.clear();
             return;
         };
@@ -1707,9 +1784,10 @@ impl App {
             Ok(tags) => {
                 self.tags_state.set_tags(tags);
                 self.clear_error();
+                self.clear_load_error();
             }
             Err(e) => {
-                self.set_error(format!("加载标签列表失败: {e}"));
+                self.set_load_error(format!("加载标签列表失败: {e}"));
                 self.tags_state.clear();
             }
         }
@@ -1906,6 +1984,7 @@ impl App {
         // in flight keeps its receiver (G3/G19).
         self.clear_finished_push_feedback();
         self.clear_error();
+        self.clear_load_error();
     }
 
     /// Leave the configuration panel back to the dashboard (`Esc`).
@@ -1914,6 +1993,7 @@ impl App {
         self.cancel_config_add();
         self.show_config_delete_confirm = false;
         self.clear_error();
+        self.clear_load_error();
     }
 
     /// Open the interactive directory picker overlay (config panel `a`).
@@ -1970,9 +2050,9 @@ impl App {
 
     /// Point the picker at `dir` and reload its subdirectory listing.
     ///
-    /// A read failure keeps the previous listing and reports the reason on
-    /// the status line, so an unreadable directory never looks like an
-    /// empty one (checkpoint 2).
+    /// A read failure keeps the previous listing and hands the reason to the
+    /// picker panel's `error` state, so an unreadable directory never looks
+    /// like an empty one (§4.3, checkpoint 2).
     fn set_picker_dir(&mut self, dir: std::path::PathBuf) {
         match read_picker_entries(&dir) {
             Ok(entries) => {
@@ -1980,8 +2060,9 @@ impl App {
                 self.picker_entries = entries;
                 self.picker_state.select(Some(0));
                 self.clear_error();
+                self.clear_load_error();
             }
-            Err(err) => self.set_error(format!("无法读取目录 {}: {err}", show_path(&dir))),
+            Err(err) => self.set_load_error(format!("无法读取目录 {}: {err}", show_path(&dir))),
         }
     }
 
@@ -2184,12 +2265,12 @@ impl App {
     /// Load (or reload) the branch list for the branch panel.
     ///
     /// The cursor keeps its position when still valid and otherwise falls
-    /// back to the HEAD branch. On failure the list is cleared and the error
-    /// is shown so a failed load never looks like an empty repository
-    /// (checkpoint 2).
+    /// back to the HEAD branch. On failure the list is cleared and the reason
+    /// reaches the panel's `error` state, so a failed load never looks like an
+    /// empty repository (§4.3, checkpoint 2).
     pub fn load_branches(&mut self) {
         let Some(path) = self.branch_repo_path() else {
-            self.set_error(invalid_repo_msg("分支面板"));
+            self.set_load_error(invalid_repo_msg("分支面板"));
             self.branches.clear();
             self.branch_state.select(None);
             return;
@@ -2210,9 +2291,10 @@ impl App {
                 self.branches = branches;
                 self.branch_state.select(selected);
                 self.clear_error();
+                self.clear_load_error();
             }
             Err(e) => {
-                self.set_error(format!("加载分支列表失败: {e}"));
+                self.set_load_error(format!("加载分支列表失败: {e}"));
                 self.branches.clear();
                 self.branch_state.select(None);
             }
@@ -2559,8 +2641,16 @@ impl App {
         match self.view {
             // Root screen (stack depth 1): no exit on `Esc`.
             View::Dashboard => self.set_info("已在顶层"),
-            View::Repo => self.view = View::Dashboard,
-            View::Diff => self.view = View::Repo,
+            // Leaving a view drops the load failure it owned: the panel it
+            // described is gone, and the destination must not inherit it (§4.3).
+            View::Repo => {
+                self.view = View::Dashboard;
+                self.clear_load_error();
+            }
+            View::Diff => {
+                self.view = View::Repo;
+                self.clear_load_error();
+            }
             // Defensive: the commit input is an overlay, closed by the trap.
             View::Commit => self.cancel_commit(),
             View::Branches => self.leave_branches(),
@@ -3969,8 +4059,14 @@ mod tests {
         assert_eq!(app.github_state.owner(), None, "titles must fall back");
         assert_eq!(app.github_state.repo(), None, "titles must fall back");
         assert_eq!(app.github_state.kind(), None);
-        let status = app.status.as_ref().expect("the parse failure is reported");
-        assert!(status.is_error, "expected an error status: {status:?}");
+        // §4.3: the hub could not load, so the reason lands on the panel's
+        // `error` state rather than on the status row.
+        let load_error = app
+            .load_error
+            .as_ref()
+            .expect("the parse failure is reported");
+        assert!(!load_error.is_empty(), "an empty reason says nothing");
+        assert!(app.status.is_none(), "the status row stays untouched");
 
         // The gate cached from A must not turn `r` into a fetch against it.
         assert!(app.dispatch_key(key(KeyCode::Char('r'))));
@@ -4023,12 +4119,16 @@ mod tests {
         drop(tx);
         app.github_rx = Some(rx);
         app.poll_github();
+        // §4.3: a fetch that never answered is a load failure, so the panel
+        // owns the reason — but U5 still holds on the wording itself.
         assert_eq!(
-            app.remote_status,
-            Some(RemoteStatus::Error(
-                "未打开仓库，无法获取 HEAD 提交".to_string()
-            )),
+            app.load_error.as_deref(),
+            Some("未打开仓库，无法获取 HEAD 提交"),
             "a git-layer message is shown as written"
+        );
+        assert!(
+            app.remote_status.is_none(),
+            "the status row keeps no receipt error"
         );
     }
 
@@ -4046,7 +4146,10 @@ mod tests {
         drop(tx);
         app.github_rx = Some(rx);
         app.poll_github();
-        assert_eq!(app.remote_status, Some(RemoteStatus::Error(expected)));
+        // §4.3: the panel renders the load failure; the wording still comes
+        // from the shared renderer, once, in `poll_github`.
+        assert_eq!(app.load_error.as_deref(), Some(expected.as_str()));
+        assert!(app.remote_status.is_none());
     }
 
     /// U3: with no repository open there is no remote to name, so the copy stays
@@ -4055,14 +4158,19 @@ mod tests {
     fn enter_github_without_a_repository_names_only_a_known_platform() {
         let mut app = App::new(Config::default());
         app.enter_github();
-        let message = &app.status.as_ref().expect("an error is reported").message;
+        let message = &app
+            .load_error
+            .as_ref()
+            .expect("a load failure is reported")
+            .clone();
         assert!(message.contains("未打开仓库"), "unexpected copy: {message}");
         assert!(message.contains("平台"), "neutral fallback: {message}");
+        assert!(app.status.is_none(), "the status row stays untouched");
 
         app.github_state.remote = Some(crate::ui::github_remote());
         app.enter_github();
         assert_eq!(
-            app.status.as_ref().map(|s| s.message.as_str()),
+            app.load_error.as_deref(),
             Some("打开 GitHub 回执失败: 未打开仓库"),
             "GitHub copy must stay byte-identical to v0.5.0"
         );
@@ -4645,8 +4753,8 @@ mod tests {
         app.poll_github();
         assert!(app.github_rx.is_none(), "the dead receiver is dropped");
         assert_eq!(
-            app.remote_status,
-            Some(RemoteStatus::Error("GitLab 任务意外退出".to_string())),
+            app.load_error.as_deref(),
+            Some("GitLab 任务意外退出"),
             "a GitLab remote must not be reported as GitHub"
         );
 
@@ -4654,18 +4762,12 @@ mod tests {
         app.github_state.remote = Some(crate::ui::github_remote());
         arm_dead_receiver(&mut app);
         app.poll_github();
-        assert_eq!(
-            app.remote_status,
-            Some(RemoteStatus::Error("GitHub 任务意外退出".to_string()))
-        );
+        assert_eq!(app.load_error.as_deref(), Some("GitHub 任务意外退出"));
 
         app.github_state.remote = None;
         arm_dead_receiver(&mut app);
         app.poll_github();
-        assert_eq!(
-            app.remote_status,
-            Some(RemoteStatus::Error("平台 任务意外退出".to_string()))
-        );
+        assert_eq!(app.load_error.as_deref(), Some("平台 任务意外退出"));
     }
 
     // ---------- A: pure state machine ----------
@@ -5003,12 +5105,13 @@ mod tests {
         app.enter_repo();
         assert_eq!(app.file_entries.len(), 1);
 
-        // Untracked files produce no HEAD→workdir diff: error, stay in Repo.
+        // Untracked files produce no HEAD→workdir diff: the diff load fails, so
+        // the panel owns the reason (§4.3) and the view stays in Repo.
         assert!(app.dispatch_key(key(KeyCode::Char('d'))));
         assert_eq!(app.view, View::Repo);
-        let st = app.status.as_ref().unwrap();
-        assert!(st.is_error);
-        assert!(st.message.contains("加载 diff 失败"), "{}", st.message);
+        let load_error = app.load_error.as_ref().expect("a load failure is reported");
+        assert!(load_error.contains("加载 diff 失败"), "{load_error}");
+        assert!(app.status.is_none(), "the status row stays untouched");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5552,9 +5655,11 @@ mod tests {
         );
         assert_eq!(app.picker_entries, vec![child]);
         assert_eq!(app.picker_state.selected(), Some(1));
-        let st = app.status.as_ref().unwrap();
-        assert!(st.is_error);
-        assert!(st.message.contains("无法读取目录"), "{}", st.message);
+        // §4.3: the directory listing is content that did not load, so the
+        // reason belongs to the picker panel, not to the status row.
+        let load_error = app.load_error.as_ref().expect("a load failure is reported");
+        assert!(load_error.contains("无法读取目录"), "{load_error}");
+        assert!(app.status.is_none(), "the status row stays untouched");
     }
 
     #[test]
@@ -6059,13 +6164,14 @@ mod tests {
         let mut app = App::new(Config::default());
         app.branch_repo = Some(0); // stale index: no such repo
         app.load_branches();
-        let st = app.status.as_ref().unwrap();
-        assert!(st.is_error);
+        // A load that never reached the branch list belongs to the panel's
+        // `error` state, not to the status row (§4.3).
+        let load_error = app.load_error.as_ref().expect("a load failure is reported");
         assert!(
-            st.message.contains("分支面板: 仓库索引失效"),
-            "{}",
-            st.message
+            load_error.contains("分支面板: 仓库索引失效"),
+            "{load_error}"
         );
+        assert!(app.status.is_none(), "the status row stays untouched");
         assert!(app.branches.is_empty());
         assert_eq!(app.branch_state.selected(), None);
 
@@ -6151,8 +6257,8 @@ mod tests {
         );
         assert!(app.remote_rx.is_none());
 
-        // Done(Ok) closes the receiver; a refresh failure on a non-repo path
-        // surfaces as a status error.
+        // Done(Ok) closes the receiver; a refresh failure on a non-repo path is a
+        // load failure, so it surfaces on the panel (§4.3).
         let broken = temp_dir("remote-refresh"); // exists but is not a git repo
         let mut app = App::new(Config::default());
         app.repos.push(RepoInfo {
@@ -6171,8 +6277,15 @@ mod tests {
         app.poll_remote();
         assert_eq!(app.remote_status, Some(RemoteStatus::Success));
         assert!(app.remote_rx.is_none());
-        let st = app.status.as_ref().expect("refresh failure must surface");
-        assert!(st.is_error, "{}", st.message);
+        let load_error = app
+            .load_error
+            .as_ref()
+            .expect("refresh failure must surface");
+        assert!(
+            load_error.contains("刷新状态失败") || load_error.contains("加载文件列表失败"),
+            "the refresh reports why it could not read the repository: {load_error}"
+        );
+        assert!(app.status.is_none(), "the status row stays untouched");
         let _ = std::fs::remove_dir_all(&broken);
 
         // Sender dropped without a result: explicit disconnect error.
@@ -6703,10 +6816,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A detail reload against a repository that vanished reports the reason
-    /// on the status line instead of panicking, and the view stays put.
+    /// §4.3: a detail reload against a repository that vanished is a *load*
+    /// failure — the detail never arrived — so it lands on the panel's
+    /// `error` state instead of the status row, and the view stays put.
     #[test]
-    fn history_detail_load_error_reports_on_status_line() {
+    fn history_detail_load_error_lands_on_the_panel_not_the_status_line() {
         // Two commits so `j` really moves the selection: a clamped press
         // (single-row history) deliberately skips the reload and would never
         // reach the failing lookup this test exercises.
@@ -6718,13 +6832,57 @@ mod tests {
         assert!(app.dispatch_key(key(KeyCode::Char('j'))));
         assert_eq!(app.view, View::History);
         assert!(app.history.detail.is_none());
-        let st = app.status.as_ref().unwrap();
-        assert!(st.is_error);
+        let load_error = app.load_error.as_ref().expect("a load failure is reported");
         assert!(
-            st.message.contains("加载提交详情失败"),
-            "unexpected message: {}",
-            st.message
+            load_error.contains("加载提交详情失败"),
+            "unexpected message: {load_error}"
         );
+        assert!(
+            app.status.is_none(),
+            "a load failure never reaches the status row"
+        );
+    }
+
+    /// §4.3: `r` is the `error` state's retry — it reloads the panel's content,
+    /// and a successful reload drops the error state with it. Paired cases:
+    /// the same rule on the local git path (tag list) and the GitHub receipts
+    /// path (PR list).
+    #[test]
+    fn r_retry_reloads_and_clears_the_panel_error_state() {
+        // Local git: a tag load that failed, then `r` against a healthy repo.
+        let (dir, mut app) = app_with_tagged_repo("retry-clears-load-error", &["v1.0"]);
+        enter_tags(&mut app);
+        app.set_load_error("加载标签列表失败: boom");
+        assert!(
+            app.load_error.is_some(),
+            "the panel starts in its error state"
+        );
+
+        assert!(app.dispatch_key(key(KeyCode::Char('r'))));
+        assert!(
+            app.load_error.is_none(),
+            "a successful retry drops the error state"
+        );
+        assert_eq!(app.tags_state.tags.len(), 1, "the content came back");
+        assert!(app.status.is_none(), "the status row stays untouched");
+
+        // GitHub: a receipt fetch that failed, then a retry that answered.
+        let mut app = App::new(Config::default());
+        app.view = View::Pulls;
+        app.set_load_error("GitHub 请求失败: 401");
+        assert!(app.load_error.is_some());
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(GithubMsg::Pulls(Vec::new())).unwrap();
+        drop(tx);
+        app.github_rx = Some(rx);
+        app.poll_github();
+        assert!(
+            app.load_error.is_none(),
+            "an answered retry drops the error state"
+        );
+        assert_eq!(app.remote_status, Some(RemoteStatus::Success));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---------- tags panel ----------

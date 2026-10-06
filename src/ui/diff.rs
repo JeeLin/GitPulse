@@ -8,11 +8,19 @@ use ratatui::{
     Frame,
 };
 
+use super::components::state_panel::{self, PanelState};
 use super::hint;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 
 /// Render the diff content with syntax highlighting for +/- lines.
+///
+/// A failed diff read is a load failure, so the pane shows its `error` state
+/// with `按 r 重试` instead of the patch (§4.3).
 pub fn render_diff(f: &mut Frame, content: Rect, app: &crate::app::App) {
+    if let Some(message) = app.load_error.as_deref() {
+        state_panel::render_state_panel(f, content, "文件差异", &PanelState::Error { message });
+        return;
+    }
     render_diff_content(f, content, &app.diff_content, app.diff_scroll);
 }
 
