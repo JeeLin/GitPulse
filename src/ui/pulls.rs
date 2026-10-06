@@ -14,7 +14,7 @@ use ratatui::{
 use super::{hint, list_highlight, HIGHLIGHT_SYMBOL};
 use crate::app::App;
 use crate::platform::{CheckSummary, PrDetail, PrSummary};
-use crate::ui::components::footer::HintRow;
+use crate::ui::components::footer::{hints as join_hints, HintRow};
 
 /// Empty-state copy of the pull list: zero open pulls is a valid state, not
 /// a failure — the status row below covers failed loads.
@@ -310,7 +310,7 @@ pub(crate) fn receipt_hints(
     if show_enter {
         hints.push(hint("Enter", "详情"));
     }
-    HintRow::new(hints.into_iter().flatten().collect())
+    HintRow::new(join_hints(hints))
 }
 
 /// Footer hint row for the pull-detail panel (§2.3): the receipt hub keys
@@ -325,6 +325,22 @@ pub(crate) fn pull_detail_hints(kind: Option<crate::platform::PlatformKind>) -> 
 /// platform, see [`receipt_hints`].
 pub(crate) fn issue_detail_hints(kind: Option<crate::platform::PlatformKind>) -> HintRow {
     receipt_hints(false, kind)
+}
+
+/// Frame a receipt panel the way `ui::render` does: the panel draws content
+/// only (§2.3) and [`crate::ui::components::footer::draw_frame`] adds the
+/// footer, so a panel test that skips it would assert against a missing
+/// status/hint row.
+#[cfg(test)]
+pub(crate) fn draw_receipt_frame(
+    f: &mut Frame,
+    app: &App,
+    show_enter: bool,
+    content: impl FnOnce(&mut Frame, Rect),
+) {
+    let status = crate::ui::view_status(app);
+    let hints = receipt_hints(show_enter, app.github_state.kind());
+    crate::ui::components::footer::draw_frame(f, status, &hints, content);
 }
 
 /// Readiness-gate client for the panel tests.
@@ -347,30 +363,24 @@ pub(crate) fn offline_client() -> Box<dyn crate::platform::PlatformClient> {
     Box::new(crate::github::GithubClient::new("octo", "demo").expect("offline client"))
 }
 
-/// Vertical split every receipt panel uses: body, status row, hint row.
+/// Vertical split every receipt panel uses: body plus the panel's own status
+/// row. The hint row is **not** among them — §2.3 gives it to the footer.
 pub(crate) fn panel_chunks(area: Rect) -> std::rc::Rc<[Rect]> {
     Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),    // panel body
-            Constraint::Length(1), // status line
-            Constraint::Length(1), // key hints
+            Constraint::Length(1), // status row
         ])
         .split(area)
 }
 
-/// Bottom status and key-hint rows of every receipt panel (convention 3).
+/// Status row of every receipt panel.
 ///
 /// While no client is ready the body already carries the status/error line
 /// (see [`render_disconnected`]), so the row stays blank rather than printing
 /// the same message twice.
-pub(crate) fn render_footer(
-    f: &mut Frame,
-    status_area: Rect,
-    hints_area: Rect,
-    app: &App,
-    show_enter: bool,
-) {
+pub(crate) fn render_panel_status(f: &mut Frame, status_area: Rect, app: &App) {
     if app.github_state.connected() {
         super::render_status_or_remote(
             f,
@@ -380,10 +390,6 @@ pub(crate) fn render_footer(
             app.status.as_ref(),
         );
     }
-    f.render_widget(
-        Paragraph::new(receipt_hints(show_enter, app.github_state.kind()).view),
-        hints_area,
-    );
 }
 
 /// Panel body shown while the platform client is not ready: the platform's own
@@ -434,7 +440,7 @@ pub fn render_pulls(f: &mut Frame, content: Rect, app: &App) {
     let chunks = panel_chunks(content);
     if !app.github_state.connected() {
         render_disconnected(f, chunks[0], "PR 列表", app.github_state.kind(), app);
-        render_footer(f, chunks[1], chunks[2], app, true);
+        render_panel_status(f, chunks[1], app);
         return;
     }
 
@@ -467,7 +473,7 @@ pub fn render_pulls(f: &mut Frame, content: Rect, app: &App) {
             .highlight_symbol(HIGHLIGHT_SYMBOL);
         f.render_stateful_widget(list, chunks[0], &mut state);
     }
-    render_footer(f, chunks[1], chunks[2], app, true);
+    render_panel_status(f, chunks[1], app);
 }
 
 /// One pull row: `#N title (state)` plus a `草稿` badge when the pull is a
@@ -505,7 +511,7 @@ pub fn render_pull_detail(f: &mut Frame, content: Rect, app: &App) {
     let chunks = panel_chunks(content);
     if !app.github_state.connected() {
         render_disconnected(f, chunks[0], "PR 详情", app.github_state.kind(), app);
-        render_footer(f, chunks[1], chunks[2], app, false);
+        render_panel_status(f, chunks[1], app);
         return;
     }
 
@@ -526,14 +532,14 @@ pub fn render_pull_detail(f: &mut Frame, content: Rect, app: &App) {
             .block(block),
             chunks[0],
         );
-        render_footer(f, chunks[1], chunks[2], app, false);
+        render_panel_status(f, chunks[1], app);
         return;
     };
 
     let inner = block.inner(chunks[0]);
     f.render_widget(block, chunks[0]);
     render_detail_panes(f, detail, inner, app.github_state.kind());
-    render_footer(f, chunks[1], chunks[2], app, false);
+    render_panel_status(f, chunks[1], app);
 }
 
 /// Split the detail shell into its three panes — summary head, wrapped
@@ -684,10 +690,25 @@ mod tests {
     }
 
     /// Whitespace-stripped frame text (wide CJK glyphs leave padding cells).
-    fn render_text(app: &App, draw: fn(&mut Frame, Rect, &App)) -> String {
-        let backend = TestBackend::new(80, 24);
+    /// The panel plus its footer, so the hint row the panel no longer draws
+    /// is on the buffer (§2.3). `show_enter` mirrors what the panel passes to
+    /// [`receipt_hints`] in production.
+    fn render_text(app: &App, draw: fn(&mut Frame, Rect, &App), show_enter: bool) -> String {
+        render_text_sized(app, draw, show_enter, 80, 24)
+    }
+
+    fn render_text_sized(
+        app: &App,
+        draw: fn(&mut Frame, Rect, &App),
+        show_enter: bool,
+        width: u16,
+        height: u16,
+    ) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| draw(f, f.area(), app)).unwrap();
+        terminal
+            .draw(|f| draw_receipt_frame(f, app, show_enter, |f, body| draw(f, body, app)))
+            .unwrap();
         let raw: String = terminal
             .backend()
             .buffer()
@@ -703,7 +724,7 @@ mod tests {
         let mut app = connected_app();
         app.github_state.pulls = vec![pull(42, "Fix login bug", false), pull(7, "WIP thing", true)];
         app.github_state.selected = 0;
-        let text = render_text(&app, render_pulls);
+        let text = render_text_sized(&app, render_pulls, true, 120, 24);
         assert!(text.contains("PR列表·octo/demo"), "missing title: {text}");
         assert!(text.contains("#42Fixloginbug(open)"), "missing row: {text}");
         assert!(text.contains("[草稿]"), "missing draft badge: {text}");
@@ -721,7 +742,7 @@ mod tests {
         let mut app = connected_app();
         app.github_state.pulls = vec![pull(1, "one", false), pull(2, "two", false)];
         app.github_state.selected = 99;
-        let text = render_text(&app, render_pulls);
+        let text = render_text(&app, render_pulls, true);
         assert!(text.contains("#2"), "last row must stay selected: {text}");
         assert_eq!(list_cursor(99, 2), Some(1));
         assert_eq!(list_cursor(0, 0), None, "empty list has no cursor");
@@ -731,7 +752,7 @@ mod tests {
     fn pulls_list_truncates_a_long_title_with_ellipsis() {
         let mut app = connected_app();
         app.github_state.pulls = vec![pull(9, &"长".repeat(60), false)];
-        let text = render_text(&app, render_pulls);
+        let text = render_text(&app, render_pulls, true);
         assert!(text.contains('…'), "long title must be cut: {text}");
         // The meta line keeps its head on the second row, truncation or not.
         assert!(text.contains("alice"), "meta line missing: {text}");
@@ -740,7 +761,7 @@ mod tests {
     #[test]
     fn pulls_list_shows_empty_copy_for_zero_rows() {
         let app = connected_app();
-        let text = render_text(&app, render_pulls);
+        let text = render_text(&app, render_pulls, true);
         assert!(text.contains("—（暂无PR）"), "missing empty copy: {text}");
     }
 
@@ -749,7 +770,7 @@ mod tests {
         let mut app = App::new(Config::default());
         app.set_error("打开 GitHub 回执失败: 未打开仓库");
         app.github_state.pulls = vec![pull(1, "ghost", false)];
-        let text = render_text(&app, render_pulls);
+        let text = render_text(&app, render_pulls, true);
         // No remote has been resolved, so the gate copy falls back to GitHub —
         // the platform v0.5.0 knew, and the one this path has always shown.
         assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
@@ -767,7 +788,7 @@ mod tests {
     #[test]
     fn pull_detail_placeholder_waits_for_the_payload() {
         let app = connected_app();
-        let text = render_text(&app, render_pull_detail);
+        let text = render_text(&app, render_pull_detail, false);
         assert!(
             text.contains("按Enter查看详情·Esc返回"),
             "missing placeholder: {text}"
@@ -789,7 +810,7 @@ mod tests {
                 html_url: "https://example.invalid".to_string(),
             }],
         });
-        let text = render_text(&app, render_pull_detail);
+        let text = render_text(&app, render_pull_detail, false);
         assert!(text.contains("PR详情·octo/demo"), "missing title: {text}");
         assert!(
             text.contains("#42Fixloginbug(open)"),
@@ -817,7 +838,7 @@ mod tests {
             mergeable: None,
             checks: Vec::new(),
         });
-        let text = render_text(&app, render_pull_detail);
+        let text = render_text(&app, render_pull_detail, false);
         assert!(text.contains("（无描述）"), "missing body copy: {text}");
         assert!(
             text.contains("—（暂无检查记录）"),
@@ -954,7 +975,7 @@ mod tests {
         for (url, gate, hint, foreign) in cases {
             let mut app = App::new(Config::default());
             app.github_state.remote = Some(crate::platform::parse_remote(url).unwrap());
-            let text = render_text(&app, render_pulls);
+            let text = render_text(&app, render_pulls, true);
             assert!(text.contains(gate), "{url}: wrong gate copy: {text}");
             assert!(text.contains(hint), "{url}: wrong hint: {text}");
             assert!(

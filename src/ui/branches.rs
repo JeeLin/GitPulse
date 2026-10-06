@@ -4,12 +4,12 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState},
     Frame,
 };
 
 use crate::git::BranchInfo;
-use crate::ui::components::footer::HintRow;
+use crate::ui::components::footer::{hints as join_hints, HintRow};
 use crate::ui::status::StatusLine;
 
 use super::{hint, pulls};
@@ -35,8 +35,11 @@ pub struct BranchesState<'a> {
     pub confirm_branch: Option<&'a BranchInfo>,
 }
 
-/// Render the branch list with the bottom status line, key hints, and the
+/// Render the branch list above the footer's status row, plus the
 /// create/confirm overlays when active.
+///
+/// The panel draws its content only (§2.3): the hint row is composed once by
+/// the footer from [`branches_hints`], so nothing here reserves a row for it.
 ///
 /// A failed load arrives as an error [`StatusLine`] with an empty list, so
 /// an empty panel never masquerades as success (checkpoint 2).
@@ -46,19 +49,13 @@ pub fn render_branches(f: &mut Frame, content: Rect, mut state: BranchesState<'_
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),    // branch list
-            Constraint::Length(1), // status line
-            Constraint::Length(1), // key hints
+            Constraint::Length(1), // status row
         ])
         .split(area);
 
     render_branch_list(f, chunks[0], &mut state);
 
     super::render_status_line(f, chunks[1], state.status);
-
-    f.render_widget(
-        Paragraph::new(key_hints(state.show_input, state.show_delete_confirm)),
-        chunks[2],
-    );
 
     if state.show_delete_confirm {
         if let Some(branch) = state.confirm_branch {
@@ -85,7 +82,7 @@ fn key_hints(input_open: bool, confirm_open: bool) -> Line<'static> {
     } else if input_open {
         super::submit_hints("创建")
     } else {
-        [
+        join_hints([
             hint("j/k", "选择"),
             hint("Enter", "切换"),
             hint("n", "新建"),
@@ -93,16 +90,13 @@ fn key_hints(input_open: bool, confirm_open: bool) -> Line<'static> {
             hint("r", "刷新"),
             hint("q", "退出"),
             hint("Esc", "返回"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        ])
     }
 }
 
-/// Footer hint row for the branch panel (§2.3): re-uses the same
-/// [`key_hints`] the panel draws inline so the modal-aware wording never
-/// drifts between the two rows.
+/// Footer hint row for the branch panel (§2.3): the modal-aware wording from
+/// [`key_hints`], joined through [`join_hints`] so every key/desc pair keeps
+/// the two-cell gap the footer composes the row with.
 pub(crate) fn branches_hints(show_input: bool, show_delete_confirm: bool) -> HintRow {
     HintRow::new(key_hints(show_input, show_delete_confirm))
 }
@@ -169,6 +163,7 @@ fn render_delete_dialog(f: &mut Frame, area: Rect, branch: &BranchInfo) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::components::footer::StatusRow;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -202,16 +197,29 @@ mod tests {
     }
 
     /// Taller frame for modal tests: the delete dialog is 8 rows high and
-    /// would otherwise cover the bottom hints row of a 12-row terminal.
+    /// would otherwise cover the bottom hint row of a 12-row terminal.
+    ///
+    /// The panel draws content only (§2.3), so the frame goes through
+    /// [`crate::ui::components::footer::draw_frame`] — the shape
+    /// `ui::render` uses — and the hint row is the bottom row.
     fn render_to_terminal_sized(
         state: BranchesState<'_>,
         width: u16,
         height: u16,
     ) -> Terminal<TestBackend> {
+        let hints = branches_hints(state.show_input, state.show_delete_confirm);
+        let status = state.status;
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render_branches(f, f.area(), state))
+            .draw(|f| {
+                crate::ui::components::footer::draw_frame(
+                    f,
+                    StatusRow::plain(status),
+                    &hints,
+                    |f, body| render_branches(f, body, state),
+                );
+            })
             .unwrap();
         terminal
     }
@@ -229,7 +237,8 @@ mod tests {
         raw.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
-    /// Whitespace-stripped text of one row (the bottom hints row is the last).
+    /// Whitespace-stripped text of one row; `y` defaults to the last row,
+    /// which is the hint row (§2.3).
     fn compact_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
         let buffer = terminal.backend().buffer();
         let raw: String = (0..buffer.area.width)
@@ -289,6 +298,22 @@ mod tests {
         assert!(text.contains("y确认"), "missing confirm key: {text}");
     }
 
+    /// View segment of the hint row: the bottom row without the global
+    /// segment (§2.3), which is fixed on every screen and would otherwise
+    /// answer for words like `刷新` / `返回` in every assertion below.
+    fn view_segment(terminal: &Terminal<TestBackend>) -> String {
+        let row = compact_row(terminal, terminal.backend().buffer().area.height - 1);
+        let global: String = crate::ui::components::footer::global_hints()
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        let global: String = global.chars().filter(|c| !c.is_whitespace()).collect();
+        row.strip_prefix(&global)
+            .unwrap_or(row.as_str())
+            .to_string()
+    }
+
     #[test]
     fn render_hints_line_shows_navigation_keys() {
         let branches = vec![branch("main", true, None)];
@@ -308,7 +333,7 @@ mod tests {
         state.show_delete_confirm = true;
         state.confirm_branch = branches.first();
         let terminal = render_to_terminal_sized(state, 80, 24);
-        let hints = compact_row(&terminal, 23);
+        let hints = view_segment(&terminal);
         for swallowed in ["选择", "切换", "新建", "删除", "刷新", "返回"] {
             assert!(
                 !hints.contains(swallowed),
@@ -331,7 +356,7 @@ mod tests {
         state.show_input = true;
         state.input = "hotfix";
         let terminal = render_to_terminal_sized(state, 80, 24);
-        let hints = compact_row(&terminal, 23);
+        let hints = view_segment(&terminal);
         for swallowed in ["选择", "切换", "新建", "删除", "刷新", "返回"] {
             assert!(
                 !hints.contains(swallowed),

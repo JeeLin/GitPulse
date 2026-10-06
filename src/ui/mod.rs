@@ -183,12 +183,7 @@ pub fn render_confirm_overlay(
 
     let mut lines = body;
     lines.push(Line::from(""));
-    lines.push(
-        [hint("y", "确认"), hint("n", "取消")]
-            .into_iter()
-            .flatten()
-            .collect::<Line>(),
-    );
+    lines.push(join_hints([hint("y", "确认"), hint("n", "取消")]));
 
     let paragraph = Paragraph::new(lines).block(block);
     let paragraph = if wrap {
@@ -334,7 +329,7 @@ pub(crate) fn view_status(app: &App) -> StatusRow<'_> {
 pub(crate) fn view_hints(app: &App) -> HintRow {
     match app.view {
         View::Dashboard => dashboard::dashboard_hints(),
-        View::Repo => repo::repo_hints(app.show_discard_confirm, false),
+        View::Repo => repo::repo_hints(app.show_discard_confirm),
         View::Diff => diff::diff_hints(),
         View::Commit => commit::commit_hints(),
         View::Branches => {
@@ -400,7 +395,6 @@ fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
         confirm_file,
         remote_status: app.remote_status.as_ref(),
         remote_op: app.remote_op,
-        show_commit_input: false,
     };
     repo::render_repo(f, content, state);
 }
@@ -416,7 +410,6 @@ fn render_commit_view(f: &mut Frame, content: Rect, app: &mut App) {
         confirm_file: None,
         remote_status: app.remote_status.as_ref(),
         remote_op: app.remote_op,
-        show_commit_input: true,
     };
     repo::render_repo(f, content, state);
     commit::render_commit_popup(f, &app.commit_message);
@@ -524,6 +517,95 @@ mod tests {
         App::new(Config::default())
     }
 
+    /// Receipt hub connected to `octo/demo`, so the panel under test renders
+    /// its list rather than the readiness gate.
+    fn connected_app() -> App {
+        let mut app = App::new(Config::default());
+        app.github_state.remote = Some(github_remote());
+        app.github_state.client = Some(pulls::offline_client());
+        app
+    }
+
+    /// Render one frame and hand back the buffer, so a test can address
+    /// single rows and their cell styles.
+    fn render_buffer(app: &mut App) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// Display text of one row: ratatui stores a wide (CJK) glyph in two
+    /// cells — the glyph plus a *padding* cell whose symbol is a space — so
+    /// the raw row reads `选 择`. The padding cell is dropped here, which
+    /// keeps the real gap widths (one space inside a pair, two between
+    /// pairs) and lets a test measure the row with `cells::width`.
+    fn row_text(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+        let mut text = String::new();
+        let mut prev_wide = false;
+        for x in 0..buffer.area.width {
+            let symbol = buffer[(x, y)].symbol().to_string();
+            if symbol == " " && prev_wide {
+                prev_wide = false;
+                continue;
+            }
+            prev_wide = crate::ui::components::cells::width(&symbol) == 2;
+            text.push_str(&symbol);
+        }
+        text.trim_end().to_string()
+    }
+
+    /// Whitespace-stripped text of one row.
+    fn compact_row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+        row_text(buffer, y)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    }
+
+    /// Rows whose text carries the global segment — the marker of a hint
+    /// row, wherever a view might be drawing one (§2.3).
+    fn hint_rows(buffer: &ratatui::buffer::Buffer) -> Vec<u16> {
+        (0..buffer.area.height)
+            .filter(|y| {
+                let row = compact_row(buffer, *y);
+                row.contains("q退出") && row.contains("r刷新")
+            })
+            .collect()
+    }
+
+    /// Global segment of the hint row, whitespace-stripped (§2.3).
+    const GLOBAL_SEGMENT: &str = "⏎打开Esc返回r刷新q退出";
+
+    /// The screens the milestone names: the two local-git views and the four
+    /// receipt tabs. Every one of them draws its panel body only, so the
+    /// bottom row is the one and only hint row.
+    fn hint_row_screens() -> Vec<App> {
+        let mut dashboard = base_app();
+        dashboard.file_entries = vec![FileEntry {
+            path: std::path::PathBuf::from("src/main.rs"),
+            state: FileState::Modified,
+        }];
+
+        let mut repo = base_app();
+        repo.view = View::Repo;
+        repo.file_entries = dashboard.file_entries.clone();
+
+        let mut pulls = connected_app();
+        pulls.view = View::Pulls;
+
+        let mut checks = connected_app();
+        checks.view = View::Checks;
+
+        let mut issues = connected_app();
+        issues.view = View::Issues;
+
+        let mut notifications = connected_app();
+        notifications.view = View::Notifications;
+
+        vec![dashboard, repo, pulls, checks, issues, notifications]
+    }
+
     /// Render one frame through the view dispatcher and return the
     /// whitespace-stripped buffer text (wide CJK glyphs leave padding cells).
     fn render_compact(app: &mut App) -> String {
@@ -540,6 +622,108 @@ mod tests {
         raw.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
+    /// §2.3 assertion 1: the hint row appears exactly once per frame, on the
+    /// bottom row, on every screen — no panel keeps a second one in its
+    /// content area.
+    #[test]
+    fn hint_row_appears_once_on_the_bottom_row_of_every_screen() {
+        for mut app in hint_row_screens() {
+            let view = app.view;
+            let buffer = render_buffer(&mut app);
+            let bottom = buffer.area.height - 1;
+            let rows = hint_rows(&buffer);
+            assert_eq!(
+                rows,
+                vec![bottom],
+                "view {view:?} must show the hint row only at the bottom"
+            );
+            assert!(
+                compact_row(&buffer, bottom).starts_with(GLOBAL_SEGMENT),
+                "view {view:?} must lead with the global segment: {}",
+                compact_row(&buffer, bottom)
+            );
+        }
+    }
+
+    /// §2.3 assertion 2: two cells between adjacent key caps, one between a
+    /// key and its action. The glued `j/k 选择g` form must not exist.
+    #[test]
+    fn hint_row_separates_pairs_with_the_canonical_gap_widths() {
+        for mut app in hint_row_screens() {
+            let view = app.view;
+            let buffer = render_buffer(&mut app);
+            let row = row_text(&buffer, buffer.area.height - 1);
+            for (key, action) in [("⏎", "打开"), ("r", "刷新")] {
+                assert!(
+                    row.contains(&format!("{key} {action}")),
+                    "view {view:?} must put one space between key and action: {row:?}"
+                );
+            }
+            assert!(
+                row.contains("打开  Esc"),
+                "view {view:?} must put two spaces between pairs: {row:?}"
+            );
+            for glued in ["打开Esc", "刷新q"] {
+                assert!(
+                    !row.contains(glued),
+                    "view {:?} shows the glued form {:?}: {:?}",
+                    view,
+                    glued,
+                    row
+                );
+            }
+        }
+    }
+
+    /// §2.3 assertion 3: at 80 columns the global segment keeps every pair
+    /// and the row never exceeds the terminal width.
+    #[test]
+    fn hint_row_keeps_the_global_prefix_whole_at_80_columns() {
+        for mut app in hint_row_screens() {
+            let view = app.view;
+            let buffer = render_buffer(&mut app);
+            let row = compact_row(&buffer, buffer.area.height - 1);
+            assert!(
+                row.starts_with(GLOBAL_SEGMENT),
+                "view {view:?} truncates the global segment: {row}"
+            );
+            let width =
+                crate::ui::components::cells::width(&row_text(&buffer, buffer.area.height - 1));
+            assert!(
+                width <= 80,
+                "view {view:?} hint row is {width} columns wide"
+            );
+        }
+    }
+
+    /// §2.3 assertion 4: when the view segment does not fit it is the one
+    /// that goes, and the cut is marked with `…`.
+    #[test]
+    fn hint_row_truncates_the_view_segment_before_the_global_one() {
+        let mut app = base_app();
+        app.view = View::Repo;
+        app.file_entries = (0..12)
+            .map(|i| FileEntry {
+                path: std::path::PathBuf::from(format!("src/module_{i}.rs")),
+                state: FileState::Modified,
+            })
+            .collect();
+        let buffer = render_buffer(&mut app);
+        let row = compact_row(&buffer, buffer.area.height - 1);
+        assert!(
+            row.starts_with(GLOBAL_SEGMENT),
+            "the global segment must survive: {row}"
+        );
+        assert!(
+            row.contains('…'),
+            "the view segment cut must be marked: {row}"
+        );
+        assert!(
+            row.contains("j/k选择"),
+            "the head of the view segment stays: {row}"
+        );
+    }
+
     #[test]
     fn dashboard_view_renders_title_for_empty_repo_list() {
         let mut app = base_app();
@@ -550,8 +734,17 @@ mod tests {
         );
     }
 
+    /// §2.3: every hint row — the dashboard included — takes its key caps
+    /// from `role::key` (bold accent) and its actions from `role::caption`
+    /// (`fg_muted`). The dashboard used to keep a private Cyan/Reset
+    /// dialect for its inline row; with that row gone it uses the canonical
+    /// pair like every other view.
     #[test]
-    fn hint_row_keeps_description_in_default_color() {
+    fn hint_row_styles_key_caps_and_actions_per_theme() {
+        use ratatui::style::Modifier;
+
+        use crate::ui::components::theme::color;
+
         let mut app = base_app();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -559,21 +752,22 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let hint_row = buffer.area.height - 1;
         let mut key_fg = None;
+        let mut key_bold = false;
         let mut desc_fg = None;
         for x in 0..buffer.area.width {
             let cell = &buffer[(x, hint_row)];
             match cell.symbol() {
-                "j" if key_fg.is_none() => key_fg = Some(cell.fg),
+                "j" if key_fg.is_none() => {
+                    key_fg = Some(cell.fg);
+                    key_bold = cell.modifier.contains(Modifier::BOLD);
+                }
                 "选" => desc_fg = Some(cell.fg),
                 _ => {}
             }
         }
-        assert_eq!(key_fg, Some(Color::Cyan), "hint key must stay cyan");
-        assert_eq!(
-            desc_fg,
-            Some(Color::Reset),
-            "hint description must keep the default color"
-        );
+        assert_eq!(key_fg, Some(color::ACCENT), "key caps take the accent");
+        assert!(key_bold, "key caps are bold");
+        assert_eq!(desc_fg, Some(color::FG_MUTED), "actions read muted");
     }
 
     #[test]
@@ -782,7 +976,7 @@ mod tests {
     }
 
     /// §6.11 help overlay (Wave 2): renders the centered modal titled `帮助`
-    /// carrying the footer's global key hints plus the current view's segment.
+    /// carrying its own hint rows (§6.11).
     #[test]
     fn help_overlay_renders_title_and_hints_via_dispatch() {
         let mut app = base_app(); // Dashboard view

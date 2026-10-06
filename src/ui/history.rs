@@ -12,7 +12,7 @@ use crate::git::{CommitDetail, CommitRow, RefKind};
 use crate::ui::status::StatusLine;
 
 use super::{hint, pulls};
-use crate::ui::components::footer::HintRow;
+use crate::ui::components::footer::{hints as join_hints, HintRow};
 
 /// Inner width of the DAG column: one cell per lane, capped at the lanes
 /// `git::layout_graph` ever produces (`git::MAX_LANES`).
@@ -50,7 +50,7 @@ pub struct HistoryRender<'a> {
 }
 
 /// Render the history view: DAG column, commit list and detail pane above
-/// the shared status line and key hints.
+/// the shared status row.
 ///
 /// The list is drawn first so the DAG column can scroll with the offset the
 /// list actually settled on, keeping graph rows and commit rows aligned.
@@ -60,14 +60,12 @@ pub fn render_history(f: &mut Frame, content: Rect, mut state: HistoryRender<'_>
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),    // graph + commit list + detail
-            Constraint::Length(1), // status line
-            Constraint::Length(1), // key hints
+            Constraint::Length(1), // status row
         ])
         .split(area);
 
     let panes_area = chunks[0];
     let status_area = chunks[1];
-    let hints_area = chunks[2];
 
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -87,22 +85,12 @@ pub fn render_history(f: &mut Frame, content: Rect, mut state: HistoryRender<'_>
     render_detail(f, detail_area, &state);
 
     super::render_status_line(f, status_area, state.status);
-    f.render_widget(Paragraph::new(key_hints()), hints_area);
 }
 
-/// Bottom key-hint row: list navigation, then the two keys that return to
-/// the repo view.
-fn key_hints() -> Line<'static> {
-    [hint("j/k", "选择"), hint("q/Esc", "返回")]
-        .into_iter()
-        .flatten()
-        .collect()
-}
-
-/// Footer hint row for the history view (§2.3): re-uses the same
-/// [`key_hints`] the panel draws inline.
+/// Footer hint row for the history view (§2.3): list navigation, then the
+/// two keys that return to the repo view.
 pub(crate) fn history_hints() -> HintRow {
-    HintRow::new(key_hints())
+    HintRow::new(join_hints([hint("j/k", "选择"), hint("q/Esc", "返回")]))
 }
 
 /// Commit list, or the empty-state copy for a repository without history.
@@ -229,6 +217,7 @@ mod tests {
     use super::*;
     use crate::app::HistoryState;
     use crate::git::history::RefMark;
+    use crate::ui::components::footer::StatusRow;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -277,21 +266,30 @@ mod tests {
     /// Render one frame at 120 columns — wide enough for the badges and the
     /// author/time tail to fit on the selected row — and return the
     /// whitespace-stripped buffer text (wide CJK glyphs leave padding cells).
-    fn render_to_text(mut state: HistoryState) -> String {
+    fn render_to_text(state: HistoryState) -> String {
+        let hints = history_hints();
         let backend = TestBackend::new(120, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let render = HistoryRender {
-                    commits: &state.commits,
-                    detail: state.detail.as_ref(),
-                    graph: &state.graph,
-                    list_state: &mut state.list_state,
-                    selected: state.selected,
-                    repo_name: "demo",
-                    status: None,
-                };
-                render_history(f, f.area(), render)
+                let mut state = state;
+                crate::ui::components::footer::draw_frame(
+                    f,
+                    StatusRow::plain(None),
+                    &hints,
+                    |f, body| {
+                        let render = HistoryRender {
+                            commits: &state.commits,
+                            detail: state.detail.as_ref(),
+                            graph: &state.graph,
+                            list_state: &mut state.list_state,
+                            selected: state.selected,
+                            repo_name: "demo",
+                            status: None,
+                        };
+                        render_history(f, body, render)
+                    },
+                );
             })
             .unwrap();
         let raw: String = terminal

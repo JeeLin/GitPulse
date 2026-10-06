@@ -2,13 +2,13 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState},
     Frame,
 };
 
 use super::{hint, pulls, render_confirm_overlay};
 use crate::git::FileEntry;
-use crate::ui::components::footer::HintRow;
+use crate::ui::components::footer::{hints as join_hints, HintRow};
 use crate::ui::status::{RemoteStatus, StatusLine};
 
 /// State for rendering the single-repo view.
@@ -22,26 +22,24 @@ pub struct RepoState<'a> {
     pub remote_status: Option<&'a RemoteStatus>,
     /// Label of the running/last remote operation (`push` / `pull`).
     pub remote_op: &'a str,
-    /// Whether the commit message input is open (`View::Commit`), which
-    /// renders this view as the popup's background.
-    pub show_commit_input: bool,
 }
 
-/// Render the single-repo file status list with a bottom status line and key hints.
+/// Render the single-repo file status list above the footer's status row.
+///
+/// The panel draws its content only (§2.3): the hint row is composed once by
+/// the footer from [`repo_hints`], so nothing here reserves a row for it.
 pub fn render_repo(f: &mut Frame, content: Rect, mut state: RepoState<'_>) {
     let area = content;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),    // file list
-            Constraint::Length(1), // status line
-            Constraint::Length(1), // key hints
+            Constraint::Length(1), // status row
         ])
         .split(area);
 
     let file_list_area = chunks[0];
     let status_area = chunks[1];
-    let hints_area = chunks[2];
 
     // Render file list
     render_file_list(f, file_list_area, &mut state);
@@ -57,16 +55,6 @@ pub fn render_repo(f: &mut Frame, content: Rect, mut state: RepoState<'_>) {
         state.status,
     );
 
-    // Render key hints (single-space separators keep the line under 80 cols)
-    f.render_widget(
-        Paragraph::new(key_hints(
-            state.show_discard_confirm,
-            state.show_commit_input,
-        ))
-        .style(Style::default()),
-        hints_area,
-    );
-
     // Overlay discard confirmation dialog
     if state.show_discard_confirm {
         if let Some(file) = state.confirm_file {
@@ -76,20 +64,17 @@ pub fn render_repo(f: &mut Frame, content: Rect, mut state: RepoState<'_>) {
 }
 
 /// Bottom key-hint row: y/n/Esc while the discard confirmation is open (every
-/// other list key is swallowed then), Enter/Esc while the commit message input
-/// is open (`input_modal_key` eats the buffer keys), the file-list actions
-/// otherwise. Related keys share one hint (`s/u`, `p/l`, `b/h/t`) so the row
-/// — including the panel entry — stays within the 80-column bottom line.
-fn key_hints(discard_confirm_open: bool, commit_input_open: bool) -> Line<'static> {
+/// other list key is swallowed then), the file-list actions otherwise. Related
+/// keys share one hint (`s/u`, `p/l`, `b/h/t`) so the row — including the
+/// panel entry — stays within the 80-column bottom line. The commit message
+/// input owns its own row, see [`crate::ui::commit::commit_hints`].
+fn key_hints(discard_confirm_open: bool) -> Line<'static> {
     if discard_confirm_open {
-        // Shared rows (G5): the y/n/Esc wording of the confirmation, and
-        // `Enter 提交` matching the popup title
-        // `提交信息 (Enter 提交 / Esc 取消)`.
+        // Shared row (G5): the y/n/Esc wording of the confirmation, matching
+        // the popup title `确认丢弃更改`.
         super::confirm_hints()
-    } else if commit_input_open {
-        super::submit_hints("提交")
     } else {
-        [
+        join_hints([
             hint("j/k", "选择"),
             hint("g", "进入"),
             hint("s/u", "暂存切换"),
@@ -98,18 +83,16 @@ fn key_hints(discard_confirm_open: bool, commit_input_open: bool) -> Line<'stati
             hint("p/l", "push/pull"),
             hint("b/h/t", "面板"),
             hint("Esc", "返回"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        ])
     }
 }
 
 /// Footer hint row for the single-repo view (§2.3): the list actions, or the
-/// y/n/Esc / Enter submit row while a modal owns focus — re-using the same
-/// [`key_hints`] the panel draws inline so the two never drift.
-pub(crate) fn repo_hints(show_discard_confirm: bool, show_commit_input: bool) -> HintRow {
-    HintRow::new(key_hints(show_discard_confirm, show_commit_input))
+/// y/n/Esc row while the discard dialog owns focus. The row itself is composed
+/// by [`crate::ui::components::footer::compose_hint_row`] through
+/// [`join_hints`], so the key/desc pairs keep the two-cell gap §2.3 fixes.
+pub(crate) fn repo_hints(show_discard_confirm: bool) -> HintRow {
+    HintRow::new(key_hints(show_discard_confirm))
 }
 
 /// Render file list
@@ -178,6 +161,7 @@ pub fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
 mod tests {
     use super::*;
     use crate::git::FileState;
+    use crate::ui::components::footer::StatusRow;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -201,14 +185,32 @@ mod tests {
             confirm_file: None,
             remote_status: None,
             remote_op: "",
-            show_commit_input: false,
         }
     }
 
+    /// The panel draws content only (§2.3), so the frame goes through
+    /// [`crate::ui::components::footer::draw_frame`] — the shape
+    /// `ui::render` uses — and the footer takes the bottom two rows.
     fn render_to_terminal(state: RepoState<'_>) -> Terminal<TestBackend> {
-        let backend = TestBackend::new(80, 24);
+        render_to_terminal_sized(state, 80, 24)
+    }
+
+    fn render_to_terminal_sized(
+        state: RepoState<'_>,
+        width: u16,
+        height: u16,
+    ) -> Terminal<TestBackend> {
+        let hints = repo_hints(state.show_discard_confirm);
+        let status_row = StatusRow::new(state.status, state.remote_status, state.remote_op);
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_repo(f, f.area(), state)).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::components::footer::draw_frame(f, status_row, &hints, |f, body| {
+                    render_repo(f, body, state)
+                });
+            })
+            .unwrap();
         terminal
     }
 
@@ -224,18 +226,54 @@ mod tests {
         raw.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
-    /// Foreground color of the status-line row (list 22 + status 1 + hints 1 = 24).
+    /// Foreground color of the footer's status row: §4.1 puts it at
+    /// `height - 2`, directly above the hint row.
     fn status_fg(terminal: &Terminal<TestBackend>) -> Color {
-        terminal.backend().buffer()[(0, 22)].fg
+        let buffer = terminal.backend().buffer();
+        buffer[(0, buffer.area.height - 2)].fg
     }
 
-    /// Whitespace-stripped text of a single row (the bottom hints row is 23).
+    /// Whitespace-stripped text of a single row; the hint row is `height-1`.
     fn row_compact(terminal: &Terminal<TestBackend>, y: u16) -> String {
         let buffer = terminal.backend().buffer();
         let raw: String = (0..buffer.area.width)
             .map(|x| buffer[(x, y)].symbol().to_string())
             .collect();
         raw.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// Render a hint row alone into an 80x24 frame, so a test can read the
+    /// view segment the footer would compose from it.
+    fn render_hints_row(row: &HintRow) -> Terminal<TestBackend> {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::components::footer::draw_frame(
+                    f,
+                    StatusRow::plain(None),
+                    row,
+                    |_, _| {},
+                );
+            })
+            .unwrap();
+        terminal
+    }
+
+    /// View segment of the hint row: the bottom row without the global
+    /// segment (§2.3), which is fixed on every screen and would otherwise
+    /// answer for words like `返回` in the assertions below.
+    fn view_segment(terminal: &Terminal<TestBackend>) -> String {
+        let row = row_compact(terminal, terminal.backend().buffer().area.height - 1);
+        let prefix: String = crate::ui::components::footer::global_hints()
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        let prefix: String = prefix.chars().filter(|c| !c.is_whitespace()).collect();
+        row.strip_prefix(&prefix)
+            .unwrap_or(row.as_str())
+            .to_string()
     }
 
     #[test]
@@ -329,7 +367,7 @@ mod tests {
         state.show_discard_confirm = true;
         state.confirm_file = entries.first();
         let terminal = render_to_terminal(state);
-        let hints = row_compact(&terminal, 23);
+        let hints = view_segment(&terminal);
         // The dialog swallows every list key: none of them may be advertised.
         for swallowed in [
             "j/k",
@@ -353,16 +391,13 @@ mod tests {
     }
 
     /// The commit popup routes every press through `input_modal_key`, so the
-    /// list actions behind it may not be advertised either.
+    /// list actions behind it may not be advertised either. The popup is
+    /// drawn by [`crate::ui::commit`] over this panel, so the switched row is
+    /// [`crate::ui::commit::commit_hints`]' own output.
     #[test]
     fn render_commit_input_switches_bottom_key_hints() {
-        let entries = vec![entry("src/lib.rs", FileState::Modified)];
-        let mut list_state = ListState::default();
-        list_state.select(Some(0));
-        let mut state = base_state(&entries, &mut list_state, None);
-        state.show_commit_input = true;
-        let terminal = render_to_terminal(state);
-        let hints = row_compact(&terminal, 23);
+        let terminal = render_hints_row(&crate::ui::commit::commit_hints());
+        let hints = view_segment(&terminal);
         for swallowed in [
             "j/k",
             "diff",
@@ -437,11 +472,15 @@ mod tests {
         assert_eq!(status_fg(&terminal), Color::Red, "error must be red");
     }
 
+    /// A 120-column frame keeps the whole view segment on screen: at 80 the
+    /// footer truncates it (§2.3), which {@link key_hints_fit_within_80_columns}
+    /// pins separately.
     #[test]
     fn render_key_hints_show_action_keys() {
         let entries = vec![entry("src/lib.rs", FileState::Modified)];
         let mut list_state = ListState::default();
-        let terminal = render_to_terminal(base_state(&entries, &mut list_state, None));
+        let terminal =
+            render_to_terminal_sized(base_state(&entries, &mut list_state, None), 120, 24);
         let text = compact(&terminal);
         assert!(text.contains("j/k选择"), "missing select hint: {text}");
         assert!(text.contains("暂存切换"), "missing stage hint: {text}");
@@ -453,13 +492,24 @@ mod tests {
         assert!(text.contains("Esc返回"), "missing back hint: {text}");
     }
 
-    /// The bottom hint row must never overflow the 80-column terminal: the
-    /// panel entry (`b/h/t`) is budgeted together with the action hints, so a
-    /// regression here would silently clip the trailing `Esc 返回`.
+    /// The hint row must never overflow an 80-column terminal. The repo
+    /// view segment alone is wider than the 24 cells the global segment
+    /// keeps, so the row ends in `…` (§2.3) rather than wrapping — and the
+    /// global segment survives whole.
     #[test]
     fn key_hints_fit_within_80_columns() {
-        let width = key_hints(false, false).width();
-        assert!(width <= 80, "hints row is {width} columns wide");
+        let terminal = render_hints_row(&repo_hints(false));
+        let hint = view_segment(&terminal);
+        let hint = format!("⏎打开Esc返回r刷新q退出{hint}");
+        assert!(
+            hint.starts_with("⏎打开Esc返回r刷新q退出"),
+            "global segment must stay whole: {hint}"
+        );
+        assert!(hint.ends_with('…'), "the cut must be marked: {hint}");
+        assert!(
+            hint.contains("j/k选择"),
+            "the head of the view segment stays: {hint}"
+        );
     }
 
     #[test]

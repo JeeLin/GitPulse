@@ -19,7 +19,7 @@ use ratatui::{
 #[cfg(test)]
 use crate::app::SCREENS;
 use crate::app::{App, PaletteTarget, View};
-use crate::ui::components::footer::{global_hints, hint};
+use crate::ui::components::footer::{global_hints, hint, hints as join_hints};
 use crate::ui::components::theme::{color, role};
 use crate::ui::{repo, view_hints, HIGHLIGHT_SYMBOL};
 
@@ -48,10 +48,7 @@ pub fn render_help(f: &mut Frame, app: &App) {
     let block = modal_block("帮助");
 
     let row = view_hints(app);
-    let close: Line = [hint("Esc", "关闭"), hint("q", "关闭")]
-        .into_iter()
-        .flatten()
-        .collect();
+    let close: Line = join_hints([hint("Esc", "关闭"), hint("q", "关闭")]);
 
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled("全局", role::heading())),

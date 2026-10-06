@@ -4,13 +4,13 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{ListItem, ListState, Paragraph},
+    widgets::{ListItem, ListState},
     Frame,
 };
 
 use crate::app::TagsModal;
 use crate::git::TagInfo;
-use crate::ui::components::footer::HintRow;
+use crate::ui::components::footer::{hints as join_hints, HintRow};
 use crate::ui::status::{RemoteStatus, StatusLine};
 
 use super::{hint, pulls};
@@ -41,7 +41,7 @@ pub struct TagsRender<'a> {
     pub repo_name: &'a str,
 }
 
-/// Render the tag list with the bottom status line, key hints, and the
+/// Render the tag list above the footer's status row, plus the
 /// create/confirm overlays when active.
 ///
 /// Push feedback ([`RemoteStatus`]) takes over the status row, exactly like
@@ -56,14 +56,12 @@ pub fn render_tags(f: &mut Frame, content: Rect, mut state: TagsRender<'_>) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),    // tag list
-            Constraint::Length(1), // status line
-            Constraint::Length(1), // key hints
+            Constraint::Length(1), // status row
         ])
         .split(area);
 
     let tag_list_area = chunks[0];
     let status_area = chunks[1];
-    let hints_area = chunks[2];
 
     render_tag_list(f, tag_list_area, &mut state);
 
@@ -76,8 +74,6 @@ pub fn render_tags(f: &mut Frame, content: Rect, mut state: TagsRender<'_>) {
         state.remote_op,
         state.status,
     );
-
-    f.render_widget(Paragraph::new(key_hints(state.modal)), hints_area);
 
     match state.modal {
         Some(TagsModal::Input { buffer }) => render_create_input(f, area, buffer),
@@ -101,23 +97,19 @@ fn key_hints(modal: Option<&TagsModal>) -> Line<'static> {
         // the confirmation, and `Enter 创建` matching the input's own title.
         Some(TagsModal::Confirm { .. }) => super::confirm_hints(),
         Some(TagsModal::Input { .. }) => super::submit_hints("创建"),
-        None => [
+        None => join_hints([
             hint("j/k", "选择"),
             hint("c", "新建"),
             hint("d", "删除"),
             hint("p", "推送"),
             hint("a", "全部推送"),
             hint("q/Esc", "返回"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect(),
+        ]),
     }
 }
 
-/// Footer hint row for the tag panel (§2.3): re-uses the same [`key_hints`]
-/// the panel draws inline, so the picker/input/confirm wording never drifts
-/// between the two rows.
+/// Footer hint row for the tag panel (§2.3): the panel's own verbs, with the
+/// input/confirm wording selected by the modal state.
 pub(crate) fn tags_hints(modal: Option<&crate::app::TagsModal>) -> HintRow {
     HintRow::new(key_hints(modal))
 }
@@ -181,6 +173,7 @@ fn render_delete_dialog(f: &mut Frame, area: Rect, tag_to_delete: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::components::footer::StatusRow;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -196,10 +189,55 @@ mod tests {
 
     /// Render one frame and return the whitespace-stripped buffer text
     /// (wide CJK glyphs leave padding cells).
-    fn render_to_text(state: TagsRender<'_>) -> String {
+    /// Global segment of the hint row, whitespace-stripped (§2.3).
+    const GLOBAL_PREFIX: &str = "⏎打开Esc返回r刷新q退出";
+
+    /// Render the panel through the footer into an 80×24 frame.
+    fn render_to_terminal(state: TagsRender<'_>) -> Terminal<TestBackend> {
+        let hints = tags_hints(state.modal);
+        let status = state.status;
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_tags(f, f.area(), state)).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::components::footer::draw_frame(
+                    f,
+                    StatusRow::plain(status),
+                    &hints,
+                    |f, body| render_tags(f, body, state),
+                );
+            })
+            .unwrap();
+        terminal
+    }
+
+    /// Whitespace-stripped text of one row, `y` from the top.
+    fn compact_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
+        let buffer = terminal.backend().buffer();
+        let raw: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect();
+        raw.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// The panel draws content only (§2.3), so the frame goes through
+    /// [`crate::ui::components::footer::draw_frame`] — the shape
+    /// `ui::render` uses — and the hint row is the bottom row.
+    fn render_to_text(state: TagsRender<'_>) -> String {
+        let hints = tags_hints(state.modal);
+        let status = state.status;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::components::footer::draw_frame(
+                    f,
+                    StatusRow::plain(status),
+                    &hints,
+                    |f, body| render_tags(f, body, state),
+                );
+            })
+            .unwrap();
         let raw: String = terminal
             .backend()
             .buffer()
@@ -255,7 +293,14 @@ mod tests {
         let text = render_to_text(base_state(&[], &mut list_state, None));
         assert!(text.contains("标签[demo](0)"), "missing title: {text}");
         assert!(text.contains("暂无标签"), "missing empty state: {text}");
-        assert!(text.contains("q/Esc返回"), "missing back hint: {text}");
+        // The view segment is right-truncated at 80 columns (§2.3), so the
+        // empty state asserts the global segment still leads the row.
+        let terminal = render_to_terminal(base_state(&[], &mut list_state, None));
+        let hints = compact_row(&terminal, terminal.backend().buffer().area.height - 1);
+        assert!(
+            hints.starts_with(GLOBAL_PREFIX),
+            "hint row must lead with the global segment: {hints}"
+        );
     }
 
     #[test]

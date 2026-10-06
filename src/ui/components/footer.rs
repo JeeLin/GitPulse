@@ -4,6 +4,14 @@
 //! [`split_area`] hands every view the content area above them, so the hint
 //! row has exactly one owner — no panel draws a status line or a key-hint row
 //! of its own any more (des-9: "提示行位置/格式漂移").
+//!
+//! §2.3 makes this module the *only* source of the hint row: [`hint`] builds
+//! one key/desc pair and [`hints`] joins pairs with the two-cell
+//! [`spacing::HINT_GAP`], so a view segment can never collapse into the glued
+//! `j/k 选择g 进入` form. [`global_hints`], the view segment dispatched by
+//! [`crate::ui::view_hints`] and the optional [`tail_hints`] are laid out by
+//! [`compose_hint_row`] in the fixed order global → view → tail, the global
+//! segment never truncated and the other two right-truncated with `…`.
 
 #![allow(dead_code)]
 

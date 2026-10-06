@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use super::hint;
-use crate::ui::components::footer::HintRow;
+use crate::ui::components::footer::{hints as join_hints, HintRow};
 
 /// Render the diff content with syntax highlighting for +/- lines.
 pub fn render_diff(f: &mut Frame, content: Rect, app: &crate::app::App) {
@@ -18,40 +18,28 @@ pub fn render_diff(f: &mut Frame, content: Rect, app: &crate::app::App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),    // diff content
-            Constraint::Length(1), // status line
-            Constraint::Length(1), // key hints
+            Constraint::Length(1), // status row
         ])
         .split(area);
 
     let diff_area = chunks[0];
     let status_area = chunks[1];
-    let hints_area = chunks[2];
 
     // Render diff content
     render_diff_content(f, diff_area, &app.diff_content, app.diff_scroll);
 
-    // Render status line (errors / notices) — the bottom track every other
-    // panel reserves (R4); the title stays `文件差异`.
+    // Status row (errors / notices) — the track every other panel reserves
+    // (R4); the title stays `文件差异`.
     super::render_status_line(f, status_area, app.status.as_ref());
-
-    // Render key hints
-    f.render_widget(
-        Paragraph::new(key_hints()).style(Style::default()),
-        hints_area,
-    );
 }
 
-/// Bottom key-hint row for the diff view: the scroll keys and the way out.
-fn key_hints() -> Line<'static> {
-    [hint("j/k", "滚动"), hint("Esc", "返回"), hint("q", "退出")]
-        .into_iter()
-        .flatten()
-        .collect()
-}
-
-/// Footer hint row for the diff view (§2.3).
+/// Footer hint row for the diff view (§2.3): the scroll keys and the way out.
 pub(crate) fn diff_hints() -> HintRow {
-    HintRow::new(key_hints())
+    HintRow::new(join_hints([
+        hint("j/k", "滚动"),
+        hint("Esc", "返回"),
+        hint("q", "退出"),
+    ]))
 }
 
 fn render_diff_content(f: &mut Frame, area: Rect, content: &str, scroll: u16) {
@@ -95,6 +83,7 @@ mod tests {
     use super::*;
     use crate::app::{App, View};
     use crate::config::Config;
+    use crate::ui::components::footer::StatusRow;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -114,10 +103,22 @@ mod tests {
         app
     }
 
+    /// The panel draws content only (§2.3), so the frame goes through
+    /// [`crate::ui::components::footer::draw_frame`] — the shape
+    /// `ui::render` uses — and the hint row is the bottom row.
     fn render_app(app: &App) -> Terminal<TestBackend> {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_diff(f, f.area(), app)).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::components::footer::draw_frame(
+                    f,
+                    StatusRow::plain(app.status.as_ref()),
+                    &diff_hints(),
+                    |f, body| render_diff(f, body, app),
+                );
+            })
+            .unwrap();
         terminal
     }
 

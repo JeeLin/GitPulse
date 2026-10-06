@@ -14,7 +14,7 @@ use crate::platform::{notifications_label, NotificationSummary};
 
 use super::pulls::{
     cells, ellipsize, list_cursor, meta_budget, panel_chunks, panel_title, render_disconnected,
-    render_footer, row_width, META_GAP,
+    render_panel_status, row_width, META_GAP,
 };
 
 /// Empty-state copy: nothing to review. Zero rows is a valid state — the
@@ -36,7 +36,7 @@ pub fn render_notifications(f: &mut Frame, content: Rect, app: &App) {
     let label = notifications_label(app.github_state.kind());
     if !app.github_state.connected() {
         render_disconnected(f, chunks[0], label, app.github_state.kind(), app);
-        render_footer(f, chunks[1], chunks[2], app, false);
+        render_panel_status(f, chunks[1], app);
         return;
     }
 
@@ -72,7 +72,7 @@ pub fn render_notifications(f: &mut Frame, content: Rect, app: &App) {
             .highlight_symbol(super::HIGHLIGHT_SYMBOL);
         f.render_stateful_widget(list, chunks[0], &mut state);
     }
-    render_footer(f, chunks[1], chunks[2], app, false);
+    render_panel_status(f, chunks[1], app);
 }
 
 /// One notification row: `subject_title [subject_type]` after the unread dot,
@@ -125,7 +125,7 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::config::Config;
-    use crate::ui::pulls::offline_client;
+    use crate::ui::pulls::{draw_receipt_frame, offline_client};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -150,11 +150,16 @@ mod tests {
         }
     }
 
+    /// The panel plus its footer: the hint row the panel no longer draws
+    /// reaches the buffer through [`crate::ui::components::footer`]
+    /// (§2.3), so a test that skipped it would miss the row entirely.
     fn render(app: &App) -> Terminal<TestBackend> {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render_notifications(f, f.area(), app))
+            .draw(|f| {
+                draw_receipt_frame(f, app, false, |f, body| render_notifications(f, body, app))
+            })
             .unwrap();
         terminal
     }

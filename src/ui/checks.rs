@@ -11,7 +11,7 @@ use ratatui::{
 use crate::app::App;
 
 use super::pulls::{
-    check_line, list_cursor, panel_chunks, panel_title, render_disconnected, render_footer,
+    check_line, list_cursor, panel_chunks, panel_title, render_disconnected, render_panel_status,
     row_width,
 };
 
@@ -25,7 +25,7 @@ pub fn render_checks(f: &mut Frame, content: Rect, app: &App) {
     let chunks = panel_chunks(area);
     if !app.github_state.connected() {
         render_disconnected(f, chunks[0], "CI 检查", app.github_state.kind(), app);
-        render_footer(f, chunks[1], chunks[2], app, false);
+        render_panel_status(f, chunks[1], app);
         return;
     }
 
@@ -61,7 +61,7 @@ pub fn render_checks(f: &mut Frame, content: Rect, app: &App) {
             .highlight_symbol(super::HIGHLIGHT_SYMBOL);
         f.render_stateful_widget(list, chunks[0], &mut state);
     }
-    render_footer(f, chunks[1], chunks[2], app, false);
+    render_panel_status(f, chunks[1], app);
 }
 
 #[cfg(test)]
@@ -70,7 +70,7 @@ mod tests {
     use crate::app::App;
     use crate::config::Config;
     use crate::platform::CheckSummary;
-    use crate::ui::pulls::offline_client;
+    use crate::ui::pulls::{draw_receipt_frame, offline_client};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -92,10 +92,19 @@ mod tests {
         }
     }
 
+    /// The panel plus its footer: the hint row the panel no longer draws
+    /// reaches the buffer through [`crate::ui::components::footer`]
+    /// (§2.3), so a test that skipped it would miss the row entirely.
     fn render_text(app: &App) -> String {
-        let backend = TestBackend::new(80, 24);
+        render_text_sized(app, 80)
+    }
+
+    fn render_text_sized(app: &App, width: u16) -> String {
+        let backend = TestBackend::new(width, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_checks(f, f.area(), app)).unwrap();
+        terminal
+            .draw(|f| draw_receipt_frame(f, app, false, |f, body| render_checks(f, body, app)))
+            .unwrap();
         let raw: String = terminal
             .backend()
             .buffer()

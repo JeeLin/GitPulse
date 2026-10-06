@@ -13,7 +13,7 @@ use ratatui::{
 use super::hint;
 use super::repo::centered_rect;
 use crate::git::show_path;
-use crate::ui::components::footer::HintRow;
+use crate::ui::components::footer::{hints as join_hints, HintRow};
 use crate::ui::status::StatusLine;
 
 /// Borrowed render state for the config panel, referencing `App.config.scan_dirs`
@@ -41,19 +41,18 @@ pub struct ConfigState<'a> {
     pub picker_state: &'a mut ListState,
 }
 
-/// Render the scan-dir list with the bottom status line and key hints, plus
-/// the add-scan-dir overlays (directory picker or manual input) when active.
+/// Render the scan-dir list above the footer's status row, plus the
+/// add-scan-dir overlays (directory picker or manual input) when active.
 ///
-/// While an overlay is open the bottom hints switch to its keys; the delete
-/// confirmation renders a `y/n` overlay over the list.
+/// The overlay wording reaches the hint row through [`config_hints`], and the
+/// delete confirmation renders a `y/n` overlay over the list.
 pub fn render_config(f: &mut Frame, content: Rect, mut state: ConfigState<'_>) {
     let area = content;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),    // scan-dir list
-            Constraint::Length(1), // status line
-            Constraint::Length(1), // key hints
+            Constraint::Length(1), // status row
         ])
         .split(area);
 
@@ -61,17 +60,8 @@ pub fn render_config(f: &mut Frame, content: Rect, mut state: ConfigState<'_>) {
 
     super::render_status_line(f, chunks[1], state.status);
 
-    f.render_widget(
-        Paragraph::new(key_hints(
-            state.show_picker,
-            state.show_input,
-            state.show_delete_confirm,
-        )),
-        chunks[2],
-    );
-
-    // The picker renders inside the list area so the status line and key
-    // hints stay visible while browsing (errors surface there).
+    // The picker renders inside the list area so the status row stays
+    // visible while browsing (errors surface there).
     if state.show_picker {
         render_dir_picker(
             f,
@@ -94,7 +84,7 @@ pub fn render_config(f: &mut Frame, content: Rect, mut state: ConfigState<'_>) {
             .and_then(|i| state.scan_dirs.get(i))
             .map(|p| p.as_path());
         // Anchor on the list area, like the picker above, so the taller
-        // wrapped dialog never covers the status line or the y/n/Esc hints.
+        // wrapped dialog never covers the status row or the footer hint row.
         render_delete_confirm(f, chunks[0], dir);
     }
 }
@@ -109,37 +99,30 @@ fn key_hints(picker_open: bool, input_open: bool, confirm_open: bool) -> Line<'s
         // them may be shown.
         super::confirm_hints()
     } else if picker_open {
-        [
+        join_hints([
             hint("j/k", "移动"),
             hint("Enter", "选择"),
             hint("l/h", "进入/上级"),
             hint("i", "手动"),
             hint("Esc", "取消"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        ])
     } else if input_open {
         // Matches the config manual input wording `Enter 确认` (G5).
         super::submit_hints("确认")
     } else {
-        [
+        join_hints([
             hint("j/k", "选择"),
             hint("a", "添加"),
             hint("i", "手动"),
             hint("d", "删除"),
             hint("q", "退出"),
             hint("Esc", "返回"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        ])
     }
 }
 
-/// Footer hint row for the config panel (§2.3): re-uses the same
-/// [`key_hints`] the panel draws inline, so the picker/input/confirm wording
-/// never drifts between the two rows.
+/// Footer hint row for the config panel (§2.3): the panel's own verbs, with
+/// the picker/input/confirm wording selected by the overlay state.
 pub(crate) fn config_hints(
     show_picker: bool,
     show_input: bool,
@@ -318,16 +301,49 @@ fn render_dir_list(f: &mut Frame, area: Rect, state: &mut ConfigState<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::components::footer::StatusRow;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    /// The panel draws content only (§2.3), so the frame goes through
+    /// [`crate::ui::components::footer::draw_frame`] — the shape
+    /// `ui::render` uses — and the hint row is the bottom row.
     fn render_to_text(state: ConfigState<'_>) -> String {
-        let backend = TestBackend::new(80, 12);
+        compact(&render_to_terminal(state, 80, 12))
+    }
+
+    /// The panel draws content only (§2.3), so the frame goes through
+    /// [`crate::ui::components::footer::draw_frame`] — the shape
+    /// `ui::render` uses — and the footer takes the bottom two rows.
+    fn render_to_terminal(
+        state: ConfigState<'_>,
+        width: u16,
+        height: u16,
+    ) -> Terminal<TestBackend> {
+        let hints = config_hints(
+            state.show_picker,
+            state.show_input,
+            state.show_delete_confirm,
+        );
+        let status = state.status;
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render_config(f, f.area(), state))
+            .draw(|f| {
+                crate::ui::components::footer::draw_frame(
+                    f,
+                    StatusRow::plain(status),
+                    &hints,
+                    |f, body| render_config(f, body, state),
+                );
+            })
             .unwrap();
-        // Wide CJK glyphs leave padding cells; compare whitespace-stripped.
+        terminal
+    }
+
+    /// Whitespace-stripped text of the whole buffer: wide CJK glyphs leave
+    /// padding cells.
+    fn compact(terminal: &Terminal<TestBackend>) -> String {
         let raw: String = terminal
             .backend()
             .buffer()
@@ -336,6 +352,27 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         raw.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// View segment of the hint row: the bottom row without the global
+    /// segment (§2.3), which is fixed on every screen and would otherwise
+    /// answer for words like `Esc 返回` in the assertions below.
+    fn view_segment(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let y = buffer.area.height - 1;
+        let raw: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect();
+        let row: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+        let prefix: String = crate::ui::components::footer::global_hints()
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        let prefix: String = prefix.chars().filter(|c| !c.is_whitespace()).collect();
+        row.strip_prefix(&prefix)
+            .unwrap_or(row.as_str())
+            .to_string()
     }
 
     /// Base render state: list mode, no overlays; picker fields inert.
@@ -435,33 +472,37 @@ mod tests {
         let mut picker_state = ListState::default();
         let mut state = base_state(&dirs, None, &mut list_state, &mut picker_state);
         state.show_delete_confirm = true;
-        let text = render_to_text(state);
+        let terminal = render_to_terminal(state, 80, 12);
+        let text = compact(&terminal);
         assert!(text.contains("移除该目录"), "missing prompt: {text}");
         assert!(
             text.contains("/home/user/repos"),
             "missing target dir: {text}"
         );
-        assert!(text.contains("y确认"), "missing confirm key: {text}");
-        assert!(text.contains("n取消"), "missing cancel key: {text}");
+        // The view segment is replaced while the dialog is open: a/d/j/k and
+        // the Esc-returns of the list row are swallowed by
+        // `confirm_modal_key`. The global segment keeps its own `Esc 返回`
+        // (§2.3), so the assertion reads the view segment alone.
+        let hints = view_segment(&terminal);
+        assert!(hints.contains("y确认"), "missing confirm key: {hints}");
+        assert!(hints.contains("n取消"), "missing cancel key: {hints}");
         assert!(
-            text.contains("Esc取消对话框"),
-            "missing dismiss hint on the bottom row: {text}"
+            hints.contains("Esc取消对话框"),
+            "missing dismiss hint on the bottom row: {hints}"
         );
-        // The list hints are replaced while the dialog is open: a/d/j/k and
-        // Esc-returns are swallowed by `confirm_modal_key`.
-        assert!(!text.contains("a添加"), "list hints leaked: {text}");
-        assert!(!text.contains("d删除"), "list hints leaked: {text}");
-        assert!(!text.contains("j/k选择"), "list hints leaked: {text}");
-        assert!(!text.contains("Esc返回"), "list hints leaked: {text}");
+        assert!(!hints.contains("a添加"), "list hints leaked: {hints}");
+        assert!(!hints.contains("d删除"), "list hints leaked: {hints}");
+        assert!(!hints.contains("j/k选择"), "list hints leaked: {hints}");
     }
 
     /// Whitespace-stripped interior of the delete-confirm popup (border
     /// excluded): the wrapped target path lands on consecutive inner rows,
     /// so joining them reassembles the path contiguously.
     fn confirm_inner(terminal: &Terminal<TestBackend>, size: (u16, u16)) -> String {
-        // The popup is anchored inside the list area: the layout's last two
-        // rows belong to the status line and the key hints.
-        let list_area = Rect::new(0, 0, size.0, size.1.saturating_sub(2));
+        // The popup is anchored inside the list area: the footer takes the
+        // bottom two rows (§4.1) and the panel reserves one for its status
+        // row.
+        let list_area = Rect::new(0, 0, size.0, size.1.saturating_sub(3));
         let popup = centered_rect(CONFIRM_PERCENT_X, CONFIRM_HEIGHT, list_area);
         let buffer = terminal.backend().buffer();
         let mut text = String::new();
@@ -490,11 +531,7 @@ mod tests {
             let mut state = base_state(&dirs, None, &mut list_state, &mut picker_state);
             state.show_delete_confirm = true;
 
-            let backend = TestBackend::new(size.0, size.1);
-            let mut terminal = Terminal::new(backend).unwrap();
-            terminal
-                .draw(|f| render_config(f, f.area(), state))
-                .unwrap();
+            let terminal = render_to_terminal(state, size.0, size.1);
 
             let inner = confirm_inner(&terminal, size);
             assert!(
@@ -506,18 +543,12 @@ mod tests {
             assert!(inner.contains("y确认"), "missing confirm key: {inner}");
             assert!(inner.contains("n取消"), "missing cancel key: {inner}");
 
-            let full: String = terminal
-                .backend()
-                .buffer()
-                .content()
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect();
-            let full: String = full.chars().filter(|c| !c.is_whitespace()).collect();
+            let full = compact(&terminal);
             assert!(full.contains("移除该目录"), "missing prompt: {full}");
+            let hints = view_segment(&terminal);
             assert!(
-                full.contains("Esc取消对话框"),
-                "missing dismiss hint: {full}"
+                hints.contains("Esc取消对话框"),
+                "missing dismiss hint: {hints}"
             );
         }
     }
@@ -536,21 +567,26 @@ mod tests {
         state.show_picker = true;
         state.picker_dir = Path::new("/home/user");
         state.picker_entries = &entries;
-        let text = render_to_text(state);
+        let terminal = render_to_terminal(state, 120, 12);
+        let text = compact(&terminal);
         assert!(text.contains("选择扫描目录(2)"), "missing title: {text}");
         assert!(text.contains("↳选择当前目录"), "missing select row: {text}");
         assert!(text.contains("code/"), "missing subdir row: {text}");
         assert!(text.contains("docs/"), "missing subdir row: {text}");
         assert!(text.contains("►"), "missing highlight: {text}");
         assert!(text.contains("/home/user"), "missing path line: {text}");
-        assert!(text.contains("j/k移动"), "missing move hint: {text}");
-        assert!(text.contains("Enter选择"), "missing select hint: {text}");
-        assert!(text.contains("l/h进入/上级"), "missing nav hint: {text}");
-        assert!(text.contains("i手动"), "missing manual hint: {text}");
-        assert!(text.contains("Esc取消"), "missing cancel hint: {text}");
+        // The picker segment is read on the hint row itself: at 80 columns it
+        // is right-truncated (§2.3), so the assertions use a frame wide
+        // enough to show it whole.
+        let hints = view_segment(&terminal);
+        assert!(hints.contains("j/k移动"), "missing move hint: {hints}");
+        assert!(hints.contains("Enter选择"), "missing select hint: {hints}");
+        assert!(hints.contains("l/h进入/上级"), "missing nav hint: {hints}");
+        assert!(hints.contains("i手动"), "missing manual hint: {hints}");
+        assert!(hints.contains("Esc取消"), "missing cancel hint: {hints}");
         // The list hints are replaced while browsing.
-        assert!(!text.contains("j/k选择"), "list hints leaked: {text}");
-        assert!(!text.contains("d删除"), "list hints leaked: {text}");
+        assert!(!hints.contains("j/k选择"), "list hints leaked: {hints}");
+        assert!(!hints.contains("d删除"), "list hints leaked: {hints}");
     }
 
     #[test]

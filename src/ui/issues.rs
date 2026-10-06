@@ -13,7 +13,7 @@ use crate::platform::{IssueDetail, IssueSummary};
 
 use super::pulls::{
     cells, ellipsize, list_cursor, meta_budget, panel_chunks, panel_title, render_disconnected,
-    render_footer, row_width, state_style, META_GAP,
+    render_panel_status, row_width, state_style, META_GAP,
 };
 
 /// Empty-state copy: no open issues. Zero rows is a valid state — the status
@@ -26,7 +26,7 @@ pub fn render_issues(f: &mut Frame, content: Rect, app: &App) {
     let chunks = panel_chunks(area);
     if !app.github_state.connected() {
         render_disconnected(f, chunks[0], "Issues", app.github_state.kind(), app);
-        render_footer(f, chunks[1], chunks[2], app, true);
+        render_panel_status(f, chunks[1], app);
         return;
     }
 
@@ -62,7 +62,7 @@ pub fn render_issues(f: &mut Frame, content: Rect, app: &App) {
             .highlight_symbol(super::HIGHLIGHT_SYMBOL);
         f.render_stateful_widget(list, chunks[0], &mut state);
     }
-    render_footer(f, chunks[1], chunks[2], app, true);
+    render_panel_status(f, chunks[1], app);
 }
 
 /// Placeholder of the issue detail while its payload has not arrived yet.
@@ -80,7 +80,7 @@ pub fn render_issue_detail(f: &mut Frame, content: Rect, app: &App) {
     let chunks = panel_chunks(area);
     if !app.github_state.connected() {
         render_disconnected(f, chunks[0], "Issue 详情", app.github_state.kind(), app);
-        render_footer(f, chunks[1], chunks[2], app, false);
+        render_panel_status(f, chunks[1], app);
         return;
     }
 
@@ -101,14 +101,14 @@ pub fn render_issue_detail(f: &mut Frame, content: Rect, app: &App) {
             .block(block),
             chunks[0],
         );
-        render_footer(f, chunks[1], chunks[2], app, false);
+        render_panel_status(f, chunks[1], app);
         return;
     };
 
     let inner = block.inner(chunks[0]);
     f.render_widget(block, chunks[0]);
     render_detail_panes(f, detail, inner);
-    render_footer(f, chunks[1], chunks[2], app, false);
+    render_panel_status(f, chunks[1], app);
 }
 
 /// Split the issue detail shell into its two panes — the summary head and the
@@ -244,7 +244,7 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::config::Config;
-    use crate::ui::pulls::offline_client;
+    use crate::ui::pulls::{draw_receipt_frame, offline_client};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -269,10 +269,19 @@ mod tests {
         }
     }
 
+    /// The panel plus its footer: the hint row the panel no longer draws
+    /// reaches the buffer through [`crate::ui::components::footer`]
+    /// (§2.3), so a test that skipped it would miss the row entirely.
     fn render_text(app: &App) -> String {
-        let backend = TestBackend::new(80, 24);
+        render_text_sized(app, 80)
+    }
+
+    fn render_text_sized(app: &App, width: u16) -> String {
+        let backend = TestBackend::new(width, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render_issues(f, f.area(), app)).unwrap();
+        terminal
+            .draw(|f| draw_receipt_frame(f, app, true, |f, body| render_issues(f, body, app)))
+            .unwrap();
         let raw: String = terminal
             .backend()
             .buffer()

@@ -13,7 +13,7 @@ use crate::git::RepoInfo;
 use crate::ui::status::StatusLine;
 
 use super::{hint, pulls, render_status_line};
-use crate::ui::components::footer::HintRow;
+use crate::ui::components::footer::{hints as join_hints, HintRow};
 
 /// Borrowed render state for the dashboard, referencing `App.repos` directly
 /// so no mock data source exists (checkpoint 2).
@@ -43,7 +43,7 @@ fn dashboard_title(count: usize) -> String {
 ///
 /// An error status replaces the repository list so a failed load never
 /// masquerades as an empty list (checkpoint 2); any status also prints on
-/// the bottom status line (convention 3).
+/// the panel's status row (convention 3).
 pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState<'_>) {
     // Bottom scrolling batch log (convention 6) takes space only while it
     // has content; the list keeps every remaining row otherwise.
@@ -57,7 +57,6 @@ pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState
         constraints.push(Constraint::Length(batch_rows));
     }
     constraints.push(Constraint::Length(1));
-    constraints.push(Constraint::Length(1)); // key hints
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
@@ -65,11 +64,7 @@ pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState
     let list_area = chunks[0];
     let last = chunks.len();
     let batch_area = (batch_rows > 0).then(|| chunks[1]);
-    let status_area = chunks[last - 2];
-    let hints_area = chunks[last - 1];
-
-    // Key hints stay visible in every state, including the error early-return.
-    render_key_hints(f, hints_area);
+    let status_area = chunks[last - 1];
 
     if let Some(status) = state.status {
         if status.is_error {
@@ -215,9 +210,13 @@ fn render_empty_state(f: &mut Frame, area: Rect) {
     f.render_widget(Paragraph::new(hint).alignment(Alignment::Center), rows[1]);
 }
 
-/// Bottom key-hint row for every dashboard state; `c` opens the config panel.
-fn render_key_hints(f: &mut Frame, area: Rect) {
-    let hints = [
+/// Footer hint row for the dashboard (§2.3): the verbs this panel adds on
+/// top of the global segment. Key caps take [`super::hint`]'s `key` style and
+/// the actions the muted `caption` style, and the pairs are joined by
+/// [`join_hints`] so the gap between two key caps is the two spaces §2.3
+/// prescribes — the dashboard draws no hint row of its own any more.
+pub(crate) fn dashboard_hints() -> HintRow {
+    HintRow::new(join_hints([
         hint("j/k", "选择"),
         hint("Enter", "进入"),
         hint("r", "刷新"),
@@ -226,46 +225,7 @@ fn render_key_hints(f: &mut Frame, area: Rect) {
         hint("b", "分支"),
         hint("c", "配置"),
         hint("q", "退出"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Line>();
-    f.render_widget(Paragraph::new(hints), area);
-}
-
-/// Footer hint row for the dashboard (§2.3): the same eight verbs
-/// [`render_key_hints`] advertises, but with Cyan key caps and a default
-/// (unstyled) description — the dashboard's own accent/muted pair is reserved
-/// for its inline row; the footer keeps its distinct look (G4).
-pub(crate) fn dashboard_hints() -> HintRow {
-    HintRow::new(dashboard_hint_line())
-}
-
-/// Same set as [`render_key_hints`] but Cyan key caps + default descriptions.
-fn dashboard_hint_line() -> Line<'static> {
-    [
-        cyan_hint("j/k", "选择"),
-        cyan_hint("Enter", "进入"),
-        cyan_hint("r", "刷新"),
-        cyan_hint("l", "pull"),
-        cyan_hint("f", "fetch"),
-        cyan_hint("b", "分支"),
-        cyan_hint("c", "配置"),
-        cyan_hint("q", "退出"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
-}
-
-/// Key cap in Cyan with a default (Reset) description — the footer dialect the
-/// dashboard advertises (G4), versus the accent/muted `super::hint`.
-fn cyan_hint(k: &str, desc: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(k.to_string(), Style::default().fg(Color::Cyan)),
-        Span::raw(" "),
-        Span::raw(desc.to_string()),
-    ])
+    ]))
 }
 
 /// Pad `text` to exactly `width` terminal cells by appending spaces, counting
@@ -313,6 +273,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::components::footer::StatusRow;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -328,11 +289,23 @@ mod tests {
         }
     }
 
+    /// The panel draws content only (§2.3), so the frame goes through
+    /// [`crate::ui::components::footer::draw_frame`] — the shape
+    /// `ui::render` uses — and the hint row is the bottom row.
     fn render_to_text(state: &mut DashboardState<'_>) -> String {
+        let hints = dashboard_hints();
+        let status = state.status;
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|f| render_dashboard(f, f.area(), state))
+            .draw(|f| {
+                crate::ui::components::footer::draw_frame(
+                    f,
+                    StatusRow::plain(status),
+                    &hints,
+                    |f, body| render_dashboard(f, body, state),
+                );
+            })
             .expect("draw frame");
         terminal
             .backend()
@@ -540,18 +513,28 @@ mod tests {
         );
     }
 
+    /// §2.3: the dashboard's verbs reach the view segment through
+    /// [`dashboard_hints`], so a frame wide enough to show it whole carries
+    /// the config and navigation entries.
     #[test]
-    fn render_key_hints_include_config_entry() {
-        let mut list_state = ListState::default();
-        let text = render_to_text(&mut DashboardState {
-            repos: &[],
-            status: None,
-            list_state: &mut list_state,
-            batch_log: &[],
-            batch_op: "",
-            batch_running: false,
-        });
-        let compact = compact(&text);
+    fn hint_row_view_segment_includes_config_entry() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|f| {
+                crate::ui::components::footer::draw_frame(
+                    f,
+                    StatusRow::plain(None),
+                    &dashboard_hints(),
+                    |_, _| {},
+                );
+            })
+            .expect("draw frame");
+        let buffer = terminal.backend().buffer();
+        let raw: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, buffer.area.height - 1)].symbol().to_string())
+            .collect();
+        let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(compact.contains("c配置"), "missing config hint: {compact}");
         assert!(compact.contains("j/k选择"), "missing nav hint: {compact}");
     }
