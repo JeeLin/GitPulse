@@ -114,6 +114,23 @@ fn branch_title(repo_name: &str, count: usize) -> String {
 }
 
 fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) {
+    let title = branch_title(state.repo_name, state.branches.len());
+
+    if state.branches.is_empty() {
+        state_panel::render_state_panel_with_focus(
+            f,
+            area,
+            &title,
+            &state_panel::empty_state(
+                "暂无分支",
+                "这个仓库还没有分支",
+                Some(hint("n", "新建第一个分支")),
+            ),
+            state.focused,
+        );
+        return;
+    }
+
     let width = pulls::row_width(area);
     let items: Vec<ListItem> = state
         .branches
@@ -142,7 +159,7 @@ fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) 
         .collect();
 
     let block = Block::default()
-        .title(branch_title(state.repo_name, state.branches.len()))
+        .title(title)
         .borders(Borders::ALL)
         .border_style(role::border(state.focused));
 
@@ -169,7 +186,6 @@ fn render_delete_dialog(f: &mut Frame, area: Rect, branch: &BranchInfo) {
 mod tests {
     use super::*;
     use crate::ui::components::footer::StatusRow;
-    use crate::ui::status::StatusLine;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -267,42 +283,38 @@ mod tests {
         assert!(text.contains("alpha"), "missing repo name: {text}");
     }
 
-    /// §4.1: the panel body draws no status row — a failed load lands on the
-    /// footer's status row and nowhere else, with the empty list untouched.
+    /// §4.3: a branch-list load failure lands on the panel's `error` state, not on
+    /// the footer status row — the message belongs to the panel that failed,
+    /// and `r` retries it.
     #[test]
-    fn render_error_status_shows_reason_on_the_footer_row_only() {
-        let status = StatusLine {
-            message: "加载分支列表失败: boom".to_string(),
-            is_error: true,
-        };
+    fn render_load_error_shows_the_panel_error_state_not_the_status_row() {
         let mut list_state = ListState::default();
-        let state = base_state(&[], &mut list_state);
-        let backend = TestBackend::new(80, 12);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                crate::ui::components::footer::draw_frame(
-                    f,
-                    StatusRow::plain(Some(&status)),
-                    &branches_hints(false, false),
-                    |f, body| render_branches(f, body, state),
-                );
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let rows: Vec<u16> = (0..buffer.area.height)
-            .filter(|y| {
-                let raw: String = (0..buffer.area.width)
-                    .map(|x| buffer[(x, *y)].symbol().to_string())
-                    .collect();
-                let row: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
-                row.contains("boom")
-            })
-            .collect();
-        assert_eq!(
-            rows,
-            vec![buffer.area.height - 2],
-            "the error must land on the footer status row only"
+        let mut state = base_state(&[], &mut list_state);
+        state.load_error = Some("加载分支列表失败: boom");
+        let text = render_to_text(state);
+        assert!(
+            text.contains("加载失败"),
+            "missing the panel error title: {text}"
+        );
+        assert!(text.contains("按r重试"), "missing the retry prompt: {text}");
+        assert!(text.contains("boom"), "missing the failure reason: {text}");
+    }
+
+    /// §3.2: a repository without branches is a valid state, not a failure, so
+    /// the panel shows the three-part `empty` shape — title, one line of why,
+    /// and the key that creates the first branch.
+    #[test]
+    fn render_empty_branch_list_shows_the_three_part_empty_state() {
+        let mut list_state = ListState::default();
+        let text = render_to_text(base_state(&[], &mut list_state));
+        assert!(text.contains("暂无分支"), "missing empty title: {text}");
+        assert!(
+            text.contains("这个仓库还没有分支"),
+            "missing empty description: {text}"
+        );
+        assert!(
+            text.contains("n新建第一个分支"),
+            "missing empty action: {text}"
         );
     }
 

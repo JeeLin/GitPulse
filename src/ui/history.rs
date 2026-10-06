@@ -23,10 +23,21 @@ const GRAPH_WIDTH: usize = crate::git::MAX_LANES;
 /// vertical border on each side costs one cell (G23).
 const GRAPH_BORDER_COLUMNS: u16 = 2;
 
-/// Empty-state copy of a repository without history (G7): an unborn HEAD
+/// Copy the history panel's `empty` state leads with (G7): an unborn HEAD
 /// loads zero commits, which is a valid state rather than a failure, so the
 /// panel says so instead of showing an empty list.
 const EMPTY_HISTORY: &str = "暂无提交记录";
+
+/// The history panel's §3.2 `empty` state: the copy above, one line of why,
+/// and the only key that changes it — the global `r` (§2.3) is the sole verb
+/// an unborn HEAD still answers to.
+fn empty_history_state() -> PanelState<'static> {
+    state_panel::empty_state(
+        EMPTY_HISTORY,
+        "这个仓库还没有提交记录",
+        Some(hint("r", "重新读取")),
+    )
+}
 
 /// Borrowed render state for the history view, referencing `App.history`
 /// directly so no mock data source exists (checkpoint 2).
@@ -122,7 +133,7 @@ fn render_commit_list(f: &mut Frame, area: Rect, state: &mut HistoryRender<'_>) 
         super::NamedPanel {
             label: "提交历史",
             repo_name: state.repo_name,
-            empty: EMPTY_HISTORY,
+            empty: &empty_history_state(),
             focused: state.focused,
         },
         items,

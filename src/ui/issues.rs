@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -12,10 +12,10 @@ use crate::app::App;
 use crate::platform::{IssueDetail, IssueSummary};
 
 use super::pulls::{
-    cells, ellipsize, list_cursor, meta_budget, panel_title, render_disconnected,
-    render_load_error, row_width, state_style, META_GAP,
+    cells, ellipsize, meta_budget, panel_title, render_disconnected, render_load_error,
+    render_receipts_empty, render_receipts_loading, render_receipts_rows, row_width, state_style,
+    META_GAP,
 };
-
 /// Empty-state copy: no open issues. Zero rows is a valid state — a failed load
 /// paints the panel's `error` state.
 const EMPTY_ISSUES: &str = "—（暂无 Issues）";
@@ -42,37 +42,25 @@ pub fn render_issues(f: &mut Frame, content: Rect, app: &App) {
         return;
     }
 
-    let issues = &app.github_state.issues;
-    let block = Block::default()
-        .title(panel_title(
-            "Issues",
-            app.github_state.owner(),
-            app.github_state.repo(),
-        ))
-        .borders(Borders::ALL);
+    if app.github_loading() {
+        render_receipts_loading(f, content, "Issues", app, "正在拉取 Issues…");
+        return;
+    }
 
+    let issues = &app.github_state.issues;
     if issues.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                EMPTY_ISSUES,
-                Style::default().fg(Color::DarkGray),
-            ))
-            .block(block),
+        render_receipts_empty(
+            f,
             content,
+            "Issues",
+            app,
+            EMPTY_ISSUES,
+            "这个仓库没有开放的 Issue",
         );
     } else {
         let width = row_width(content);
-        let items: Vec<ListItem> = issues
-            .iter()
-            .map(|issue| issue_item(issue, width))
-            .collect();
-        let mut state = ListState::default();
-        state.select(list_cursor(app.github_state.selected, issues.len()));
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(super::list_highlight())
-            .highlight_symbol(super::HIGHLIGHT_SYMBOL);
-        f.render_stateful_widget(list, content, &mut state);
+        let items = issues.iter().map(|i| issue_item(i, width)).collect();
+        render_receipts_rows(f, content, "Issues", app, items, app.github_state.selected);
     }
 }
 

@@ -15,10 +15,21 @@ use crate::ui::components::footer::{hints as join_hints, HintRow};
 use super::components::state_panel::{self, PanelState};
 use super::{hint, named_title, pulls};
 
-/// Empty-state copy of a repository that carries no tag (G7): zero tags is a
-/// valid state rather than a failure, so the panel says so instead of
-/// showing an empty list.
+/// Copy the tag panel's `empty` state leads with (G7): zero tags is a valid
+/// state rather than a failure, so the panel says so instead of showing an
+/// empty list.
 const EMPTY_TAGS: &str = "暂无标签";
+
+/// The tag panel's §3.2 `empty` state: the copy above, one line of why the
+/// panel is empty, and the panel's own create key — so a repository without
+/// tags reads as an invitation rather than a bare sentence.
+fn empty_tags_state() -> PanelState<'static> {
+    state_panel::empty_state(
+        EMPTY_TAGS,
+        "这个仓库还没有标签",
+        Some(hint("c", "新建第一个标签")),
+    )
+}
 
 /// Borrowed render state for the tag panel, referencing `App.tags_state`
 /// directly so no mock data source exists (checkpoint 2).
@@ -116,7 +127,7 @@ fn render_tag_list(f: &mut Frame, area: Rect, state: &mut TagsRender<'_>) {
         super::NamedPanel {
             label: "标签",
             repo_name: state.repo_name,
-            empty: EMPTY_TAGS,
+            empty: &empty_tags_state(),
             focused: state.focused,
         },
         items,

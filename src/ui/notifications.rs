@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::ListItem,
     Frame,
 };
 
@@ -13,8 +13,8 @@ use crate::app::App;
 use crate::platform::{notifications_label, NotificationSummary};
 
 use super::pulls::{
-    cells, ellipsize, list_cursor, meta_budget, panel_title, render_disconnected,
-    render_load_error, row_width, META_GAP,
+    cells, ellipsize, meta_budget, render_disconnected, render_load_error, render_receipts_empty,
+    render_receipts_loading, render_receipts_rows, row_width, META_GAP,
 };
 
 /// Empty-state copy: nothing to review. Zero rows is a valid state — a failed
@@ -51,37 +51,28 @@ pub fn render_notifications(f: &mut Frame, content: Rect, app: &App) {
         return;
     }
 
-    let notifications = &app.github_state.notifications;
-    let block = Block::default()
-        .title(panel_title(
-            label,
-            app.github_state.owner(),
-            app.github_state.repo(),
-        ))
-        .borders(Borders::ALL);
+    if app.github_loading() {
+        render_receipts_loading(f, content, label, app, "正在拉取通知…");
+        return;
+    }
 
+    let notifications = &app.github_state.notifications;
     if notifications.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                EMPTY_NOTIFICATIONS,
-                Style::default().fg(Color::DarkGray),
-            ))
-            .block(block),
+        render_receipts_empty(
+            f,
             content,
+            label,
+            app,
+            EMPTY_NOTIFICATIONS,
+            "这个仓库没有新通知",
         );
     } else {
         let width = row_width(content);
-        let items: Vec<ListItem> = notifications
+        let items = notifications
             .iter()
             .map(|note| notification_item(note, width))
             .collect();
-        let mut state = ListState::default();
-        state.select(list_cursor(app.github_state.selected, notifications.len()));
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(super::list_highlight())
-            .highlight_symbol(super::HIGHLIGHT_SYMBOL);
-        f.render_stateful_widget(list, content, &mut state);
+        render_receipts_rows(f, content, label, app, items, app.github_state.selected);
     }
 }
 

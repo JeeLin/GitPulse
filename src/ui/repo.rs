@@ -97,8 +97,28 @@ pub(crate) fn repo_hints(show_discard_confirm: bool) -> HintRow {
     HintRow::new(key_hints(show_discard_confirm))
 }
 
+/// The file panel's §3.2 `empty` state: a clean working tree has no files to
+/// list, and no key can change that — every verb below (`s` / `c` / `p`) acts
+/// on a row that is not there — so the panel states the fact and its `r`.
+fn empty_files_state() -> state_panel::PanelState<'static> {
+    state_panel::empty_state("工作区干净", "所有更改已提交", Some(hint("r", "重新读取")))
+}
+
 /// Render file list
 fn render_file_list(f: &mut Frame, area: Rect, state: &mut RepoState<'_>) {
+    let title = format!("文件状态 ({} 文件)", state.entries.len());
+
+    if state.entries.is_empty() {
+        state_panel::render_state_panel_with_focus(
+            f,
+            area,
+            &title,
+            &empty_files_state(),
+            state.focused,
+        );
+        return;
+    }
+
     let width = pulls::row_width(area);
     let items: Vec<ListItem> = state
         .entries
@@ -115,7 +135,7 @@ fn render_file_list(f: &mut Frame, area: Rect, state: &mut RepoState<'_>) {
         .collect();
 
     let block = Block::default()
-        .title(format!("文件状态 ({} 文件)", state.entries.len()))
+        .title(title)
         .borders(Borders::ALL)
         .border_style(role::border(state.focused));
 
@@ -331,6 +351,23 @@ mod tests {
             text.contains("Uconflict.txt"),
             "missing conflicted symbol: {text}"
         );
+    }
+
+    /// §3.2: a clean working tree has nothing to list, which is a valid state
+    /// rather than a failure — the panel shows the three-part `empty` shape
+    /// (title, one line of why, and the key that re-reads the tree) instead of
+    /// an empty bordered list.
+    #[test]
+    fn render_clean_working_tree_shows_the_three_part_empty_state() {
+        let mut list_state = ListState::default();
+        let terminal = render_to_terminal(base_state(&[], &mut list_state));
+        let text = compact(&terminal);
+        assert!(text.contains("工作区干净"), "missing empty title: {text}");
+        assert!(
+            text.contains("所有更改已提交"),
+            "missing empty description: {text}"
+        );
+        assert!(text.contains("r重新读取"), "missing empty action: {text}");
     }
 
     /// §4.3: a failed load paints the panel's `error` state (`加载失败` + the

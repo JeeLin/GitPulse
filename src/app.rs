@@ -1525,6 +1525,17 @@ impl App {
         }
     }
 
+    /// Whether a receipts fetch is still in flight (§3.2: the signal that a
+    /// GitHub panel is in its `loading` state).
+    ///
+    /// One receiver serves the whole receipts spine, so the answer is about
+    /// the fetch, not about a panel — and it is also exactly when the frame
+    /// has to change: the TUI only repaints on input, so without this flag the
+    /// four receipts panels would never be seen in `loading`.
+    pub fn github_loading(&self) -> bool {
+        self.github_rx.is_some()
+    }
+
     /// Key handler for the GitHub receipts hub and its detail panels.
     ///
     /// `p`/`c`/`i`/`n` switch tabs, `j`/`k` (and arrows / space) navigate and

@@ -6,8 +6,6 @@
 //! type. The panel keeps its border and title in every state — a loading or
 //! failed panel still says which panel it is.
 
-#![allow(dead_code)]
-
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::Style,
@@ -63,10 +61,55 @@ pub enum PanelState<'a> {
     Ready,
     /// `ready` plus the transient success flash — the same green line the
     /// status row shows, kept on the panel while the flash lasts (§3.2).
+    ///
+    /// Not one of the ten panels of §3.3 renders this variant. The table puts
+    /// the flash where it belongs: the *status row* carries the transient
+    /// green result, and the panel itself keeps the rows of `ready` — §4.3
+    /// gives operation results the status row and nothing else. The variant
+    /// stays here as the rendered form of that half of the state, reachable by
+    /// a panel whose flash is not an operation result.
+    ///
+    /// `#[allow(dead_code)]` is confined to this variant because it is the one
+    /// state no panel constructs yet: the flash lives on the status row (§4.3)
+    /// rather than on a green panel line. Keeping the variant present documents
+    /// the full five-state surface of §3.2 without wiring a green line the
+    /// design deliberately keeps off the panel.
+    #[allow(dead_code)]
     Success {
         /// Result of the operation that just completed.
         message: &'a str,
     },
+}
+
+/// Centered title + one-line description + the primary action that resolves
+/// the emptiness — the §3.2 `empty` body, built from the panel's own copy.
+///
+/// The two halves keep the distinction §3.2 draws: `title` is what the panel
+/// would list, `action` is the key that changes it. An empty panel with no key
+/// to act on passes `None`, and the state degrades to title + description.
+pub fn empty_state<'a>(
+    title: &'a str,
+    description: &'a str,
+    action: Option<Line<'a>>,
+) -> PanelState<'a> {
+    PanelState::Empty {
+        title,
+        description,
+        action: action.unwrap_or_else(|| Line::from("")),
+    }
+}
+
+/// The `loading` body of an asynchronous panel (§3.2): the spinner and the
+/// `加载中…` label, plus the sub-label naming what is being read.
+///
+/// Only a panel with a fetch in flight may render it. A load that blocks
+/// synchronously has no frame to draw, so it goes straight from `loading` to
+/// `ready` / `error` and never fabricates this state.
+pub fn loading_state<'a>(sub: Option<&'a str>) -> PanelState<'a> {
+    PanelState::Loading {
+        label: "加载中…",
+        sub,
+    }
 }
 
 /// Draw `area` as a bordered panel titled `title` in state `state` and

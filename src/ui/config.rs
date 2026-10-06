@@ -286,17 +286,32 @@ fn render_delete_confirm(f: &mut Frame, area: Rect, dir: Option<&Path>) {
     );
 }
 
+/// The scan-dir panel's §3.2 `empty` state: the first-run entry point §6.6
+/// names — no directory configured yet, and the one key that adds one.
+fn empty_scan_dirs_state() -> state_panel::PanelState<'static> {
+    state_panel::empty_state(
+        "还没有扫描目录",
+        "配置里还没有扫描目录",
+        Some(hint("n", "添加第一个目录")),
+    )
+}
+
 /// Draw the bordered scan-dir list; the title carries the entry count.
 fn render_dir_list(f: &mut Frame, area: Rect, state: &mut ConfigState<'_>) {
+    let title = format!("扫描目录配置 ({})", state.scan_dirs.len());
+
+    if state.scan_dirs.is_empty() {
+        state_panel::render_state_panel(f, area, &title, &empty_scan_dirs_state());
+        return;
+    }
+
     let items: Vec<ListItem> = state
         .scan_dirs
         .iter()
         .map(|dir| ListItem::new(Line::raw(show_path(dir))))
         .collect();
 
-    let block = Block::default()
-        .title(format!("扫描目录配置 ({})", state.scan_dirs.len()))
-        .borders(Borders::ALL);
+    let block = Block::default().title(title).borders(Borders::ALL);
 
     let list = List::new(items)
         .block(block)

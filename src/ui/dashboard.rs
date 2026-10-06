@@ -1,7 +1,7 @@
 //! Repository dashboard: renders `App.repos` with selection and error state.
 
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
@@ -187,31 +187,21 @@ fn render_batch_log(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// Replace the list body with a centered hint that points at the config panel
-/// (`c`), keeping the usual bordered title and row count. The wording stays
-/// neutral because an empty list has more than one cause.
+/// The dashboard's `empty` state (§3.2): the title, one line of why it is
+/// empty, and the key that fills it — the panel's own `暂无仓库` copy over the
+/// configuration entry point the hint row already advertises as `c`.
 fn render_empty_state(f: &mut Frame, area: Rect, focused: bool) {
-    let block = Block::default()
-        .title(dashboard_title(0))
-        .borders(Borders::ALL)
-        .border_style(role::border(focused));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Length(1),
-            Constraint::Percentage(50),
-        ])
-        .split(inner);
-    let hint = Line::from(vec![
-        Span::raw("暂无仓库 — 按 "),
-        Span::styled("c", Style::default().fg(Color::Cyan)),
-        Span::raw(" 管理扫描目录"),
-    ]);
-    f.render_widget(Paragraph::new(hint).alignment(Alignment::Center), rows[1]);
+    state_panel::render_state_panel_with_focus(
+        f,
+        area,
+        &dashboard_title(0),
+        &state_panel::empty_state(
+            "暂无仓库",
+            "按 c 管理扫描目录，或按 ? 查看帮助",
+            Some(super::hint("c", "管理扫描目录")),
+        ),
+        focused,
+    );
 }
 
 /// Footer hint row for the dashboard (§2.3): the verbs this panel adds on
@@ -515,6 +505,10 @@ mod tests {
         text.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
+    /// §3.2: the dashboard's `empty` state is the three-part shape — the
+    /// title, one line of description and the action that fills it. The
+    /// assertion is on the copy plus the action, not on the old one-liner's
+    /// em-dash phrasing, which the three-part shape replaces.
     #[test]
     fn render_empty_repos_shows_config_hint_and_title() {
         let mut list_state = ListState::default();
@@ -529,8 +523,16 @@ mod tests {
         });
         let compact = compact(&text);
         assert!(
-            compact.contains("暂无仓库—按c管理扫描目录"),
-            "missing empty-state hint: {compact}"
+            compact.contains("暂无仓库"),
+            "missing empty-state title: {compact}"
+        );
+        assert!(
+            compact.contains("按c管理扫描目录，或按?查看帮助"),
+            "missing empty-state description: {compact}"
+        );
+        assert!(
+            compact.contains("c管理扫描目录"),
+            "missing empty-state action: {compact}"
         );
         assert!(
             compact.contains("GitPulse仓库状态(0)"),

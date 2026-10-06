@@ -1,17 +1,12 @@
 //! CI checks receipts panel: the head-commit check runs of the selected pull.
 
-use ratatui::{
-    layout::Rect,
-    style::{Color, Style},
-    text::Span,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-    Frame,
-};
+use ratatui::{layout::Rect, widgets::ListItem, Frame};
 
 use crate::app::App;
 
 use super::pulls::{
-    check_line, list_cursor, panel_title, render_disconnected, render_load_error, row_width,
+    check_line, render_disconnected, render_load_error, render_receipts_empty,
+    render_receipts_loading, render_receipts_rows, row_width,
 };
 
 /// Empty-state copy: no selected pull, or a pull without check runs. Zero
@@ -40,37 +35,28 @@ pub fn render_checks(f: &mut Frame, content: Rect, app: &App) {
         return;
     }
 
-    let checks = &app.github_state.checks;
-    let block = Block::default()
-        .title(panel_title(
-            "CI 检查",
-            app.github_state.owner(),
-            app.github_state.repo(),
-        ))
-        .borders(Borders::ALL);
+    if app.github_loading() {
+        render_receipts_loading(f, content, "CI 检查", app, "正在拉取检查记录…");
+        return;
+    }
 
+    let checks = &app.github_state.checks;
     if checks.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                EMPTY_CHECKS,
-                Style::default().fg(Color::DarkGray),
-            ))
-            .block(block),
+        render_receipts_empty(
+            f,
             content,
+            "CI 检查",
+            app,
+            EMPTY_CHECKS,
+            "选中的 PR 没有检查记录",
         );
     } else {
         let width = row_width(content);
-        let items: Vec<ListItem> = checks
+        let items = checks
             .iter()
-            .map(|check| ListItem::new(check_line(check, width)))
+            .map(|c| ListItem::new(check_line(c, width)))
             .collect();
-        let mut state = ListState::default();
-        state.select(list_cursor(app.github_state.selected, checks.len()));
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(super::list_highlight())
-            .highlight_symbol(super::HIGHLIGHT_SYMBOL);
-        f.render_stateful_widget(list, content, &mut state);
+        render_receipts_rows(f, content, "CI 检查", app, items, app.github_state.selected);
     }
 }
 
@@ -82,6 +68,7 @@ mod tests {
     use crate::platform::CheckSummary;
     use crate::ui::pulls::{draw_receipt_frame, offline_client};
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
     use ratatui::Terminal;
 
     /// Connected app: the `octo/demo` remote resolved and the readiness gate

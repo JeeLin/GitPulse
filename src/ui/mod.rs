@@ -29,6 +29,7 @@ use crate::app::{App, PanelFocus, View};
 use crate::git::{FileState, RepoInfo};
 use crate::ui::components::footer::hints as join_hints;
 use crate::ui::components::footer::{self, HintRow, StatusRow};
+use crate::ui::components::state_panel;
 use crate::ui::components::theme::{self, color};
 use crate::ui::dashboard::DashboardState;
 use crate::ui::status::{RemoteStatus, StatusLine};
@@ -136,14 +137,14 @@ pub(crate) fn named_title(label: &str, repo_name: &str, count: usize) -> String 
 /// Panel skeleton shared by the two named-item lists — the commit history
 /// and the tag list (G7): a bordered block titled `label [repo] (count)`
 /// around either the rows the caller built or, when there are none, the
-/// panel's own empty-state copy.
+/// panel's own `empty` state.
 ///
 /// Zero rows is a valid state of both panels (an unborn HEAD, a repository
-/// without tags) rather than a failure, so the empty copy is rendered as
+/// without tags) rather than a failure, so the empty state is rendered as
 /// data; a failed load is not rendered here at all — it paints the panel's
 /// `error` state instead (§4.3). The rows are handed in already built because
 /// each panel maps its own item type to a [`ListItem`]; only the block, the
-/// border role and the cursor are shared.
+/// border role, the cursor and the empty copy are shared.
 ///
 /// `focused` is the panel's focus per §3.1: it picks the border (`border_focus`
 /// against `border`) and whether the list draws the `▌` / `surface_alt` cursor.
@@ -157,8 +158,11 @@ pub(crate) struct NamedPanel<'a> {
     pub label: &'a str,
     /// Repository shown in the title; empty when the panel is global.
     pub repo_name: &'a str,
-    /// Copy rendered when `items` is empty — a valid state, not a failure.
-    pub empty: &'static str,
+    /// The §3.2 `empty` state shown when `items` is empty — a valid state,
+    /// not a failure. It carries the title, one line of description and the
+    /// key that fills the panel, so a panel with an action to offer cannot
+    /// render a bare sentence.
+    pub empty: &'a state_panel::PanelState<'a>,
     /// Panel focus per §3.1.
     pub focused: bool,
 }
@@ -170,20 +174,17 @@ pub(crate) fn render_named_list(
     items: Vec<ListItem<'static>>,
     list_state: &mut ListState,
 ) {
-    let block = Block::default()
-        .title(named_title(meta.label, meta.repo_name, items.len()))
-        .borders(Borders::ALL)
-        .border_style(theme::role::border(meta.focused));
+    let title = named_title(meta.label, meta.repo_name, items.len());
 
     if items.is_empty() {
-        let paragraph = Paragraph::new(Span::styled(
-            meta.empty,
-            Style::default().fg(Color::DarkGray),
-        ))
-        .block(block);
-        f.render_widget(paragraph, area);
+        state_panel::render_state_panel_with_focus(f, area, &title, meta.empty, meta.focused);
         return;
     }
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(theme::role::border(meta.focused));
 
     let list = with_cursor(List::new(items).block(block), meta.focused);
     f.render_stateful_widget(list, area, list_state);

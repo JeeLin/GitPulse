@@ -11,7 +11,7 @@ use ratatui::{
     Frame,
 };
 
-use super::{hint, list_highlight, HIGHLIGHT_SYMBOL};
+use super::hint;
 use crate::app::App;
 use crate::platform::{CheckSummary, PrDetail, PrSummary};
 use crate::ui::components::footer::{hints as join_hints, HintRow};
@@ -437,6 +437,87 @@ pub(crate) fn render_load_error(
     );
 }
 
+/// Shared `ready` body for the receipts lists (§3.2 + §3.1): the four panels
+/// hand their rows in and get the same focused, bordered shell they'd wear in
+/// `empty` / `error` / `loading` — one geometry instead of four near-copies.
+///
+/// `selected` is the row the cursor lands on (§3.1), and `rows` are already
+/// width-fitted by each caller so they need no padding here.
+pub(crate) fn render_receipts_rows(
+    f: &mut Frame,
+    area: Rect,
+    label: &str,
+    app: &App,
+    rows: Vec<ListItem<'static>>,
+    selected: usize,
+) {
+    let title = panel_title(label, app.github_state.owner(), app.github_state.repo());
+    let inner = crate::ui::components::state_panel::render_state_panel_with_focus(
+        f,
+        area,
+        &title,
+        &crate::ui::components::state_panel::PanelState::Ready,
+        true,
+    );
+    if rows.is_empty() {
+        return;
+    }
+    let mut state = ListState::default();
+    state.select(list_cursor(selected, rows.len()));
+    let list = List::new(rows)
+        .highlight_style(super::list_highlight())
+        .highlight_symbol(super::HIGHLIGHT_SYMBOL);
+    f.render_stateful_widget(list, inner, &mut state);
+}
+
+/// The receipts panels' `loading` state (§3.2), entered whenever the receipts
+/// fetch is still in flight ([`App::github_loading`]).
+///
+/// This is the only honest source of a `loading` frame in the app: the four
+/// receipts lists are the only panels that load asynchronously. The platform
+/// gate is checked by the caller, because a client that was never built can
+/// have no fetch in flight.
+pub(crate) fn render_receipts_loading(
+    f: &mut Frame,
+    area: Rect,
+    label: &str,
+    app: &App,
+    sub: &str,
+) {
+    crate::ui::components::state_panel::render_state_panel(
+        f,
+        area,
+        &panel_title(label, app.github_state.owner(), app.github_state.repo()),
+        &crate::ui::components::state_panel::loading_state(Some(sub)),
+    );
+}
+
+/// The receipts panels' `empty` state (§3.2): the zero-row copy the panel
+/// already printed, one line naming what was read, and the key that re-reads
+/// it — the receipts' own `r` (§6.3).
+///
+/// The action takes the `key` role of §5.3 through [`hint`], so the key cap
+/// reads like every other key in the app.
+pub(crate) fn render_receipts_empty(
+    f: &mut Frame,
+    area: Rect,
+    label: &str,
+    app: &App,
+    empty_copy: &'static str,
+    description: &'static str,
+) {
+    crate::ui::components::state_panel::render_state_panel(
+        f,
+        area,
+        &panel_title(label, app.github_state.owner(), app.github_state.repo()),
+        &crate::ui::components::state_panel::empty_state(
+            empty_copy,
+            description,
+            Some(hint("r", "重新拉取")),
+        ),
+    );
+}
+
 /// Render the open-pull list (the receipts hub entry point).
 pub fn render_pulls(f: &mut Frame, content: Rect, app: &App) {
     if let Some(message) = app.load_error.as_deref() {
@@ -456,34 +537,25 @@ pub fn render_pulls(f: &mut Frame, content: Rect, app: &App) {
         return;
     }
 
-    let pulls = &app.github_state.pulls;
-    let block = Block::default()
-        .title(panel_title(
-            "PR 列表",
-            app.github_state.owner(),
-            app.github_state.repo(),
-        ))
-        .borders(Borders::ALL);
+    if app.github_loading() {
+        render_receipts_loading(f, content, "PR 列表", app, "正在拉取 PR…");
+        return;
+    }
 
+    let pulls = &app.github_state.pulls;
     if pulls.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                EMPTY_PULLS,
-                Style::default().fg(Color::DarkGray),
-            ))
-            .block(block),
+        render_receipts_empty(
+            f,
             content,
+            "PR 列表",
+            app,
+            EMPTY_PULLS,
+            "这个仓库没有开放的 PR",
         );
     } else {
         let width = row_width(content);
         let items: Vec<ListItem> = pulls.iter().map(|pr| pull_item(pr, width)).collect();
-        let mut state = ListState::default();
-        state.select(list_cursor(app.github_state.selected, pulls.len()));
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(list_highlight())
-            .highlight_symbol(HIGHLIGHT_SYMBOL);
-        f.render_stateful_widget(list, content, &mut state);
+        render_receipts_rows(f, content, "PR 列表", app, items, app.github_state.selected);
     }
 }
 
