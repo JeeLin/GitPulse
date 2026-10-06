@@ -10,22 +10,19 @@ use ratatui::{
 
 use crate::app::App;
 
-use super::pulls::{
-    check_line, list_cursor, panel_chunks, panel_title, render_disconnected, render_panel_status,
-    row_width,
-};
+use super::pulls::{check_line, list_cursor, panel_title, render_disconnected, row_width};
 
 /// Empty-state copy: no selected pull, or a pull without check runs. Zero
-/// runs is a valid state — the status row below covers failed loads.
+/// runs is a valid state — the footer's status row covers failed loads.
 const EMPTY_CHECKS: &str = "—（暂无检查记录）";
 
 /// Render the head-commit check runs for the selected pull request.
+///
+/// The panel draws its content only (§4.1): the status row and the hint row
+/// are both painted once by the footer.
 pub fn render_checks(f: &mut Frame, content: Rect, app: &App) {
-    let area = content;
-    let chunks = panel_chunks(area);
     if !app.github_state.connected() {
-        render_disconnected(f, chunks[0], "CI 检查", app.github_state.kind(), app);
-        render_panel_status(f, chunks[1], app);
+        render_disconnected(f, content, "CI 检查", app.github_state.kind(), app);
         return;
     }
 
@@ -45,10 +42,10 @@ pub fn render_checks(f: &mut Frame, content: Rect, app: &App) {
                 Style::default().fg(Color::DarkGray),
             ))
             .block(block),
-            chunks[0],
+            content,
         );
     } else {
-        let width = row_width(chunks[0]);
+        let width = row_width(content);
         let items: Vec<ListItem> = checks
             .iter()
             .map(|check| ListItem::new(check_line(check, width)))
@@ -59,9 +56,8 @@ pub fn render_checks(f: &mut Frame, content: Rect, app: &App) {
             .block(block)
             .highlight_style(super::list_highlight())
             .highlight_symbol(super::HIGHLIGHT_SYMBOL);
-        f.render_stateful_widget(list, chunks[0], &mut state);
+        f.render_stateful_widget(list, content, &mut state);
     }
-    render_panel_status(f, chunks[1], app);
 }
 
 #[cfg(test)]
@@ -100,19 +96,28 @@ mod tests {
     }
 
     fn render_text_sized(app: &App, width: u16) -> String {
+        compact_text(&render_buffer_sized(app, width))
+    }
+
+    /// Whitespace-stripped text of the whole frame (wide CJK glyphs leave
+    /// padding cells).
+    fn compact_text(buffer: &ratatui::buffer::Buffer) -> String {
+        let mut raw = String::new();
+        for cell in buffer.content() {
+            raw.push_str(cell.symbol());
+        }
+        raw.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// The rendered frame, so a test can address the single row an async
+    /// result landed on (§4.1).
+    fn render_buffer_sized(app: &App, width: u16) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(width, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| draw_receipt_frame(f, app, false, |f, body| render_checks(f, body, app)))
             .unwrap();
-        let raw: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        raw.chars().filter(|c| !c.is_whitespace()).collect()
+        terminal.backend().buffer().clone()
     }
 
     #[test]
@@ -165,17 +170,24 @@ mod tests {
         assert!(text.contains("—（暂无检查记录）"), "missing copy: {text}");
     }
 
+    /// §4.1/§4.2: the readiness gate replaces the list, and the reason stays on
+    /// the footer status row — the one landing spot for an async result.
     #[test]
-    fn checks_disconnected_shows_the_status_line_instead() {
+    fn checks_disconnected_keeps_the_reason_on_the_footer_status_row() {
         let mut app = App::new(Config::default());
         app.set_error("解析远端失败: 未配置远端");
         app.github_state.checks = vec![check("unit", "completed", "success")];
-        let text = render_text(&app);
+        let buffer = render_buffer_sized(&app, 80);
+        let text = compact_text(&buffer);
         // No resolved remote means `kind == None`, which falls back to the
         // GitHub gate copy, verbatim as in v0.5.0.
         assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
-        assert!(text.contains("未配置远端"), "status line must show: {text}");
         assert!(!text.contains("unit"), "no rows without a client: {text}");
+        assert_eq!(
+            crate::ui::pulls::rows_with(&buffer, "解析远端失败:未配置远端"),
+            vec![buffer.area.height - 2],
+            "the reason belongs on the footer status row only: {text}"
+        );
     }
 
     /// U4: the gate copy follows the remote's platform — a Gitea remote asks for

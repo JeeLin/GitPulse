@@ -13,12 +13,12 @@ use crate::app::App;
 use crate::platform::{notifications_label, NotificationSummary};
 
 use super::pulls::{
-    cells, ellipsize, list_cursor, meta_budget, panel_chunks, panel_title, render_disconnected,
-    render_panel_status, row_width, META_GAP,
+    cells, ellipsize, list_cursor, meta_budget, panel_title, render_disconnected, row_width,
+    META_GAP,
 };
 
 /// Empty-state copy: nothing to review. Zero rows is a valid state — the
-/// status row below covers failed loads.
+/// footer's status row covers failed loads.
 const EMPTY_NOTIFICATIONS: &str = "—（暂无通知）";
 
 /// Marker of an unread row: the dot is what catches the eye first, so it is
@@ -26,17 +26,17 @@ const EMPTY_NOTIFICATIONS: &str = "—（暂无通知）";
 const UNREAD_MARKER: &str = "● ";
 
 /// Render the repository-scoped notifications list.
+///
+/// The panel draws its content only (§4.1): the status row and the hint row
+/// are both painted once by the footer.
 pub fn render_notifications(f: &mut Frame, content: Rect, app: &App) {
-    let area = content;
-    let chunks = panel_chunks(area);
     // GitHub serves notification threads while GitLab serves To-Dos —
     // different objects sharing one receipt slot, so the title names which one
     // the remote actually has. The word itself comes from `platform` so the
     // footer hint and the command palette row cannot drift from this title.
     let label = notifications_label(app.github_state.kind());
     if !app.github_state.connected() {
-        render_disconnected(f, chunks[0], label, app.github_state.kind(), app);
-        render_panel_status(f, chunks[1], app);
+        render_disconnected(f, content, label, app.github_state.kind(), app);
         return;
     }
 
@@ -56,10 +56,10 @@ pub fn render_notifications(f: &mut Frame, content: Rect, app: &App) {
                 Style::default().fg(Color::DarkGray),
             ))
             .block(block),
-            chunks[0],
+            content,
         );
     } else {
-        let width = row_width(chunks[0]);
+        let width = row_width(content);
         let items: Vec<ListItem> = notifications
             .iter()
             .map(|note| notification_item(note, width))
@@ -70,9 +70,8 @@ pub fn render_notifications(f: &mut Frame, content: Rect, app: &App) {
             .block(block)
             .highlight_style(super::list_highlight())
             .highlight_symbol(super::HIGHLIGHT_SYMBOL);
-        f.render_stateful_widget(list, chunks[0], &mut state);
+        f.render_stateful_widget(list, content, &mut state);
     }
-    render_panel_status(f, chunks[1], app);
 }
 
 /// One notification row: `subject_title [subject_type]` after the unread dot,
@@ -165,13 +164,16 @@ mod tests {
     }
 
     fn render_text(app: &App) -> String {
-        let raw: String = render(app)
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+        compact_text(render(app).backend().buffer())
+    }
+
+    /// Whitespace-stripped text of the whole frame (wide CJK glyphs leave
+    /// padding cells).
+    fn compact_text(buffer: &ratatui::buffer::Buffer) -> String {
+        let mut raw = String::new();
+        for cell in buffer.content() {
+            raw.push_str(cell.symbol());
+        }
         raw.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
@@ -240,18 +242,25 @@ mod tests {
         assert!(text.contains("—（暂无通知）"), "missing copy: {text}");
     }
 
+    /// §4.1/§4.2: the readiness gate replaces the list, and the reason stays on
+    /// the footer status row — the one landing spot for an async result.
     #[test]
-    fn notifications_disconnected_shows_the_status_line_instead() {
+    fn notifications_disconnected_keeps_the_reason_on_the_footer_status_row() {
         let mut app = App::new(Config::default());
         app.set_error("gh 不可用，无法自动获取 token");
         app.github_state.notifications = vec![note("ghost", "Issue", true)];
-        let text = render_text(&app);
+        let buffer = render(&app).backend().buffer().clone();
+        let text = compact_text(&buffer);
         // No resolved remote means `kind == None`, which falls back to the
         // GitHub gate copy, verbatim as in v0.5.0.
         assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
-        assert!(text.contains("gh不可用"), "status must show: {text}");
         assert!(!text.contains("ghost"), "no rows without a client: {text}");
         assert!(!text.contains('●'), "no marker without a client: {text}");
+        assert_eq!(
+            crate::ui::pulls::rows_with(&buffer, "gh不可用，无法自动获取token"),
+            vec![buffer.area.height - 2],
+            "the reason belongs on the footer status row only: {text}"
+        );
     }
 
     /// B6: GitLab's `/todos` are a different object from GitHub's

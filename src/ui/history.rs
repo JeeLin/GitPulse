@@ -9,7 +9,6 @@ use ratatui::{
 };
 
 use crate::git::{CommitDetail, CommitRow, RefKind};
-use crate::ui::status::StatusLine;
 
 use super::{hint, pulls};
 use crate::ui::components::footer::{hints as join_hints, HintRow};
@@ -45,28 +44,14 @@ pub struct HistoryRender<'a> {
     pub selected: usize,
     /// Name of the repository being read (shown in the title).
     pub repo_name: &'a str,
-    /// Current status line, if any; errors render red and persist.
-    pub status: Option<&'a StatusLine>,
 }
 
-/// Render the history view: DAG column, commit list and detail pane above
-/// the shared status row.
+/// Render the history view: DAG column, commit list and detail pane. The
+/// status row and the hint row belong to the footer (§4.1).
 ///
 /// The list is drawn first so the DAG column can scroll with the offset the
 /// list actually settled on, keeping graph rows and commit rows aligned.
 pub fn render_history(f: &mut Frame, content: Rect, mut state: HistoryRender<'_>) {
-    let area = content;
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),    // graph + commit list + detail
-            Constraint::Length(1), // status row
-        ])
-        .split(area);
-
-    let panes_area = chunks[0];
-    let status_area = chunks[1];
-
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -74,7 +59,7 @@ pub fn render_history(f: &mut Frame, content: Rect, mut state: HistoryRender<'_>
             Constraint::Min(24),                                           // commit list
             Constraint::Percentage(40),                                    // detail pane
         ])
-        .split(panes_area);
+        .split(content);
 
     let graph_area = columns[0];
     let list_area = columns[1];
@@ -83,8 +68,6 @@ pub fn render_history(f: &mut Frame, content: Rect, mut state: HistoryRender<'_>
     render_commit_list(f, list_area, &mut state);
     render_graph(f, graph_area, &state);
     render_detail(f, detail_area, &state);
-
-    super::render_status_line(f, status_area, state.status);
 }
 
 /// Footer hint row for the history view (§2.3): list navigation, then the
@@ -285,7 +268,6 @@ mod tests {
                             list_state: &mut state.list_state,
                             selected: state.selected,
                             repo_name: "demo",
-                            status: None,
                         };
                         render_history(f, body, render)
                     },

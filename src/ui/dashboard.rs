@@ -12,7 +12,7 @@ use crate::app::BatchLogLine;
 use crate::git::RepoInfo;
 use crate::ui::status::StatusLine;
 
-use super::{hint, pulls, render_status_line};
+use super::{hint, pulls};
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 
 /// Borrowed render state for the dashboard, referencing `App.repos` directly
@@ -42,8 +42,10 @@ fn dashboard_title(count: usize) -> String {
 /// Render the repository dashboard overview.
 ///
 /// An error status replaces the repository list so a failed load never
-/// masquerades as an empty list (checkpoint 2); any status also prints on
-/// the panel's status row (convention 3).
+/// masquerades as an empty list (checkpoint 2). The panel draws content only:
+/// every status — the batch progress included — reaches the frame through the
+/// footer's status row (§4.1), which `DashboardState::status` only feeds so
+/// this body can pick its error shape.
 pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState<'_>) {
     // Bottom scrolling batch log (convention 6) takes space only while it
     // has content; the list keeps every remaining row otherwise.
@@ -56,15 +58,12 @@ pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState
     if batch_rows > 0 {
         constraints.push(Constraint::Length(batch_rows));
     }
-    constraints.push(Constraint::Length(1));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(content);
     let list_area = chunks[0];
-    let last = chunks.len();
     let batch_area = (batch_rows > 0).then(|| chunks[1]);
-    let status_area = chunks[last - 1];
 
     if let Some(status) = state.status {
         if status.is_error {
@@ -74,7 +73,6 @@ pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState
             let paragraph =
                 Paragraph::new(status.message.clone()).style(Style::default().fg(Color::Red));
             f.render_widget(paragraph.block(block), list_area);
-            render_status_line(f, status_area, Some(status));
             return;
         }
     }
@@ -92,8 +90,6 @@ pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState
     if let Some(batch_area) = batch_area {
         render_batch_log(f, batch_area, state);
     }
-
-    render_status_line(f, status_area, state.status);
 }
 
 /// Draw the bordered repository list: name, branch, dirty count, ahead /
@@ -293,9 +289,20 @@ mod tests {
     /// [`crate::ui::components::footer::draw_frame`] — the shape
     /// `ui::render` uses — and the hint row is the bottom row.
     fn render_to_text(state: &mut DashboardState<'_>) -> String {
+        compact_text(&render_to_terminal(state))
+    }
+
+    /// Frame height the panel tests draw: the content area plus the two footer
+    /// rows, so a test can address `FRAME_ROWS - 2` (§4.1).
+    const FRAME_ROWS: u16 = 12;
+
+    /// The panel draws content only (§4.1), so the frame goes through
+    /// [`crate::ui::components::footer::draw_frame`] — the shape
+    /// `ui::render` uses — and the footer takes the bottom two rows.
+    fn render_to_terminal(state: &mut DashboardState<'_>) -> Terminal<TestBackend> {
         let hints = dashboard_hints();
         let status = state.status;
-        let backend = TestBackend::new(80, 12);
+        let backend = TestBackend::new(80, FRAME_ROWS);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
             .draw(|f| {
@@ -308,11 +315,30 @@ mod tests {
             })
             .expect("draw frame");
         terminal
+    }
+
+    fn compact_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
             .backend()
             .buffer()
             .content()
             .iter()
             .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    /// Rows whose whitespace-stripped text contains `needle` — how a test
+    /// counts how often one async result reached the screen (§4.1).
+    fn rows_with(terminal: &Terminal<TestBackend>, needle: &str) -> Vec<u16> {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .filter(|y| {
+                let raw: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, *y)].symbol().to_string())
+                    .collect();
+                let row: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+                row.contains(needle)
+            })
             .collect()
     }
 
@@ -355,8 +381,10 @@ mod tests {
         assert!(!text.contains("alpha"), "repo list leaked: {text}");
     }
 
+    /// §4.1: a non-error status keeps the list and reaches the footer status
+    /// row — once, and nowhere in the content area.
     #[test]
-    fn render_status_line_shows_message_below_list() {
+    fn render_status_reaches_the_footer_status_row_only() {
         let status = StatusLine {
             message: "refreshed: 3 repos".to_string(),
             is_error: false,
@@ -364,7 +392,7 @@ mod tests {
         let repos = vec![make_repo("alpha", "main")];
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let text = render_to_text(&mut DashboardState {
+        let terminal = render_to_terminal(&mut DashboardState {
             repos: &repos,
             status: Some(&status),
             list_state: &mut list_state,
@@ -372,23 +400,27 @@ mod tests {
             batch_op: "",
             batch_running: false,
         });
-        // Non-error status keeps the list and appends the status line.
+        let text = compact(&compact_text(&terminal));
+        // Non-error status keeps the list and reaches the status row only.
         assert!(text.contains("alpha"), "list hidden: {text}");
-        assert!(
-            text.contains("refreshed: 3 repos"),
-            "missing status: {text}"
+        assert_eq!(
+            rows_with(&terminal, "refreshed:3repos"),
+            vec![FRAME_ROWS - 2],
+            "the status must land on the footer status row only: {text}"
         );
     }
 
+    /// §4.1: a failed load replaces the list body *and* reaches the footer
+    /// status row — once, not twice.
     #[test]
-    fn render_error_also_appears_on_status_line() {
+    fn render_error_reaches_the_footer_status_row_once() {
         let status = StatusLine {
             message: "error: scan failed".to_string(),
             is_error: true,
         };
         let repos = vec![make_repo("alpha", "main")];
         let mut list_state = ListState::default();
-        let text = render_to_text(&mut DashboardState {
+        let terminal = render_to_terminal(&mut DashboardState {
             repos: &repos,
             status: Some(&status),
             list_state: &mut list_state,
@@ -396,8 +428,14 @@ mod tests {
             batch_op: "",
             batch_running: false,
         });
+        let text = compact(&compact_text(&terminal));
         assert!(text.contains("error"), "missing error: {text}");
         assert!(!text.contains("alpha"), "repo list leaked: {text}");
+        assert_eq!(
+            rows_with(&terminal, "error:scanfailed"),
+            vec![1, FRAME_ROWS - 2],
+            "the error body and the footer status row are the only two renderings"
+        );
     }
 
     #[test]

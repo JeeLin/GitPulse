@@ -343,6 +343,22 @@ pub(crate) fn draw_receipt_frame(
     crate::ui::components::footer::draw_frame(f, status, &hints, content);
 }
 
+/// Rows of a rendered frame whose whitespace-stripped text contains `needle`
+/// — how a receipt test checks that one async result landed on the footer
+/// status row (`height - 2`) and nowhere else (§4.1).
+#[cfg(test)]
+pub(crate) fn rows_with(buffer: &ratatui::buffer::Buffer, needle: &str) -> Vec<u16> {
+    (0..buffer.area.height)
+        .filter(|y| {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, *y)].symbol().to_string())
+                .collect();
+            let row: String = row.chars().filter(|c| !c.is_whitespace()).collect();
+            row.contains(needle)
+        })
+        .collect()
+}
+
 /// Readiness-gate client for the panel tests.
 ///
 /// `GithubClient::new` only resolves a token (the environment wins) and
@@ -363,38 +379,10 @@ pub(crate) fn offline_client() -> Box<dyn crate::platform::PlatformClient> {
     Box::new(crate::github::GithubClient::new("octo", "demo").expect("offline client"))
 }
 
-/// Vertical split every receipt panel uses: body plus the panel's own status
-/// row. The hint row is **not** among them — §2.3 gives it to the footer.
-pub(crate) fn panel_chunks(area: Rect) -> std::rc::Rc<[Rect]> {
-    Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),    // panel body
-            Constraint::Length(1), // status row
-        ])
-        .split(area)
-}
-
-/// Status row of every receipt panel.
-///
-/// While no client is ready the body already carries the status/error line
-/// (see [`render_disconnected`]), so the row stays blank rather than printing
-/// the same message twice.
-pub(crate) fn render_panel_status(f: &mut Frame, status_area: Rect, app: &App) {
-    if app.github_state.connected() {
-        super::render_status_or_remote(
-            f,
-            status_area,
-            app.remote_status.as_ref(),
-            app.receipt_op_label(),
-            app.status.as_ref(),
-        );
-    }
-}
-
 /// Panel body shown while the platform client is not ready: the platform's own
-/// gate copy plus the status or error line promoted into the content area,
-/// above the retry guidance, instead of a list that could never load.
+/// gate copy above the retry guidance, instead of a list that could never
+/// load. The reason the client is missing is the footer's status row — the
+/// one landing spot for it (§4.1) — so the body never repeats it.
 pub(crate) fn render_disconnected(
     f: &mut Frame,
     area: Rect,
@@ -411,7 +399,7 @@ pub(crate) fn render_disconnected(
         .borders(Borders::ALL);
 
     let copy = disconnected_copy(kind);
-    let mut lines = vec![
+    let lines = vec![
         Line::from(Span::styled(
             copy.title,
             Style::default()
@@ -422,25 +410,14 @@ pub(crate) fn render_disconnected(
             copy.hint,
             Style::default().fg(Color::DarkGray),
         )),
-        Line::from(""),
     ];
-    if let Some(status) = &app.status {
-        let style = if status.is_error {
-            Style::default().fg(Color::Red)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        lines.push(Line::from(Span::styled(status.message.clone(), style)));
-    }
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// Render the open-pull list (the receipts hub entry point).
 pub fn render_pulls(f: &mut Frame, content: Rect, app: &App) {
-    let chunks = panel_chunks(content);
     if !app.github_state.connected() {
-        render_disconnected(f, chunks[0], "PR 列表", app.github_state.kind(), app);
-        render_panel_status(f, chunks[1], app);
+        render_disconnected(f, content, "PR 列表", app.github_state.kind(), app);
         return;
     }
 
@@ -460,10 +437,10 @@ pub fn render_pulls(f: &mut Frame, content: Rect, app: &App) {
                 Style::default().fg(Color::DarkGray),
             ))
             .block(block),
-            chunks[0],
+            content,
         );
     } else {
-        let width = row_width(chunks[0]);
+        let width = row_width(content);
         let items: Vec<ListItem> = pulls.iter().map(|pr| pull_item(pr, width)).collect();
         let mut state = ListState::default();
         state.select(list_cursor(app.github_state.selected, pulls.len()));
@@ -471,9 +448,8 @@ pub fn render_pulls(f: &mut Frame, content: Rect, app: &App) {
             .block(block)
             .highlight_style(list_highlight())
             .highlight_symbol(HIGHLIGHT_SYMBOL);
-        f.render_stateful_widget(list, chunks[0], &mut state);
+        f.render_stateful_widget(list, content, &mut state);
     }
-    render_panel_status(f, chunks[1], app);
 }
 
 /// One pull row: `#N title (state)` plus a `草稿` badge when the pull is a
@@ -508,10 +484,8 @@ fn pull_item(pr: &PrSummary, width: usize) -> ListItem<'static> {
 /// Render the detail of the highlighted pull request: the bordered shell,
 /// the placeholder while its payload has not arrived, and the three panes.
 pub fn render_pull_detail(f: &mut Frame, content: Rect, app: &App) {
-    let chunks = panel_chunks(content);
     if !app.github_state.connected() {
-        render_disconnected(f, chunks[0], "PR 详情", app.github_state.kind(), app);
-        render_panel_status(f, chunks[1], app);
+        render_disconnected(f, content, "PR 详情", app.github_state.kind(), app);
         return;
     }
 
@@ -530,16 +504,14 @@ pub fn render_pull_detail(f: &mut Frame, content: Rect, app: &App) {
                 Style::default().fg(Color::DarkGray),
             ))
             .block(block),
-            chunks[0],
+            content,
         );
-        render_panel_status(f, chunks[1], app);
         return;
     };
 
-    let inner = block.inner(chunks[0]);
-    f.render_widget(block, chunks[0]);
+    let inner = block.inner(content);
+    f.render_widget(block, content);
     render_detail_panes(f, detail, inner, app.github_state.kind());
-    render_panel_status(f, chunks[1], app);
 }
 
 /// Split the detail shell into its three panes — summary head, wrapped
@@ -704,18 +676,34 @@ mod tests {
         width: u16,
         height: u16,
     ) -> String {
+        let terminal = render_terminal(app, draw, show_enter, width, height);
+        compact_frame(terminal.backend().buffer())
+    }
+
+    /// The frame the panel plus its footer produced, so a test can address a
+    /// single row of it (§4.1).
+    fn render_terminal(
+        app: &App,
+        draw: fn(&mut Frame, Rect, &App),
+        show_enter: bool,
+        width: u16,
+        height: u16,
+    ) -> Terminal<TestBackend> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| draw_receipt_frame(f, app, show_enter, |f, body| draw(f, body, app)))
             .unwrap();
-        let raw: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+        terminal
+    }
+
+    /// Whitespace-stripped text of the whole frame (wide CJK glyphs leave
+    /// padding cells).
+    fn compact_frame(buffer: &ratatui::buffer::Buffer) -> String {
+        let mut raw = String::new();
+        for cell in buffer.content() {
+            raw.push_str(cell.symbol());
+        }
         raw.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
@@ -765,24 +753,29 @@ mod tests {
         assert!(text.contains("—（暂无PR）"), "missing empty copy: {text}");
     }
 
+    /// §4.1/§4.2: while the platform client is missing the panel shows the gate
+    /// copy and nothing else — the reason stays on the footer status row, the
+    /// one landing spot for an async result.
     #[test]
-    fn pulls_disconnected_promotes_the_status_line_into_the_body() {
+    fn pulls_disconnected_keeps_the_reason_on_the_footer_status_row() {
         let mut app = App::new(Config::default());
         app.set_error("打开 GitHub 回执失败: 未打开仓库");
         app.github_state.pulls = vec![pull(1, "ghost", false)];
-        let text = render_text(&app, render_pulls, true);
+        let terminal = render_terminal(&app, render_pulls, true, 80, 24);
+        let buffer = terminal.backend().buffer().clone();
+        let text = compact_frame(&buffer);
         // No remote has been resolved, so the gate copy falls back to GitHub —
         // the platform v0.5.0 knew, and the one this path has always shown.
         assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
         assert!(
-            text.contains("未打开仓库"),
-            "status line must be prominent: {text}"
-        );
-        assert!(
             !text.contains("#1ghost"),
             "content must not render without a client: {text}"
         );
-        assert!(text.contains("r刷新"), "hints must stay: {text}");
+        assert_eq!(
+            rows_with(&buffer, "打开GitHub回执失败:未打开仓库"),
+            vec![buffer.area.height - 2],
+            "the reason belongs on the footer status row only: {text}"
+        );
     }
 
     #[test]

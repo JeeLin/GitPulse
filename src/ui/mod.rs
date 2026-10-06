@@ -285,37 +285,30 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// Footer status row for the current view (§4.2).
+/// Footer status row for the current view (§4.2) — the one place an async
+/// result reaches the screen: local git messages and GitHub receipts alike
+/// land on this row, whether or not a remote is connected.
 ///
-/// Receipt views without a GitHub client omit the local status from the row
-/// because their body — [`pulls::render_disconnected`] — already promotes it
-/// into the content area; every other receipt paints the full status plus any
-/// in-flight remote feedback. `Repo` / `Tags` are local-git views that own
-/// remote feedback, so they always carry the remote triple. Everything else
-/// (dashboard / branches / history / config / diffs / commit) takes the plain
-/// status line.
+/// `Repo` / `Tags` / `Commit` and every receipt tab own remote feedback, so
+/// they carry the remote triple and label it with their own operation name;
+/// the rest (dashboard / branches / history / config / diffs) take the plain
+/// status line. No panel reads these fields any more (§4.1).
 pub(crate) fn view_status(app: &App) -> StatusRow<'_> {
     match app.view {
+        View::Repo | View::Tags | View::Commit => StatusRow::new(
+            app.status.as_ref(),
+            app.remote_status.as_ref(),
+            app.remote_op,
+        ),
         View::Pulls
         | View::PullDetail
         | View::Issues
         | View::IssueDetail
         | View::Checks
-        | View::Notifications => {
-            if app.github_state.connected() {
-                StatusRow::new(
-                    app.status.as_ref(),
-                    app.remote_status.as_ref(),
-                    app.receipt_op_label(),
-                )
-            } else {
-                StatusRow::plain(None)
-            }
-        }
-        View::Repo | View::Tags | View::Commit => StatusRow::new(
+        | View::Notifications => StatusRow::new(
             app.status.as_ref(),
             app.remote_status.as_ref(),
-            app.remote_op,
+            app.receipt_op_label(),
         ),
         _ => StatusRow::plain(app.status.as_ref()),
     }
@@ -389,12 +382,9 @@ fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
     };
     let state = repo::RepoState {
         entries: &app.file_entries,
-        status: app.status.as_ref(),
         list_state: &mut app.file_state,
         show_discard_confirm: app.show_discard_confirm,
         confirm_file,
-        remote_status: app.remote_status.as_ref(),
-        remote_op: app.remote_op,
     };
     repo::render_repo(f, content, state);
 }
@@ -404,12 +394,9 @@ fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
 fn render_commit_view(f: &mut Frame, content: Rect, app: &mut App) {
     let state = repo::RepoState {
         entries: &app.file_entries,
-        status: app.status.as_ref(),
         list_state: &mut app.file_state,
         show_discard_confirm: false,
         confirm_file: None,
-        remote_status: app.remote_status.as_ref(),
-        remote_op: app.remote_op,
     };
     repo::render_repo(f, content, state);
     commit::render_commit_popup(f, &app.commit_message);
@@ -431,7 +418,6 @@ fn render_branches_view(f: &mut Frame, content: Rect, app: &mut App) {
     let repo_name = app.branch_repo_name().to_string();
     let state = branches::BranchesState {
         branches: &app.branches,
-        status: app.status.as_ref(),
         list_state: &mut app.branch_state,
         repo_name: &repo_name,
         show_input: app.show_branch_input,
@@ -448,7 +434,6 @@ fn render_config_view(f: &mut Frame, content: Rect, app: &mut App) {
     // `&mut app.config_state` below (disjoint fields).
     let state = config::ConfigState {
         scan_dirs: &app.config.scan_dirs,
-        status: app.status.as_ref(),
         list_state: &mut app.config_state,
         show_input: app.show_config_input,
         input: &app.config_input,
@@ -463,8 +448,8 @@ fn render_config_view(f: &mut Frame, content: Rect, app: &mut App) {
 
 /// History arm of [`render`].
 ///
-/// Field-level borrows of `app.history` (data vs. cursor), `app.repos` (the
-/// title) and the status line coexist (disjoint fields of `App`).
+/// Field-level borrows of `app.history` (data vs. cursor) and `app.repos`
+/// (the title) coexist as disjoint fields of `App`.
 fn render_history_view(f: &mut Frame, content: Rect, app: &mut App) {
     let repo_name = repo_name_of(&app.repos, app.current_repo);
     let state = history::HistoryRender {
@@ -474,24 +459,20 @@ fn render_history_view(f: &mut Frame, content: Rect, app: &mut App) {
         list_state: &mut app.history.list_state,
         selected: app.history.selected,
         repo_name,
-        status: app.status.as_ref(),
     };
     history::render_history(f, content, state);
 }
 
 /// Tags arm of [`render`].
 ///
-/// Field-level borrows of `app.tags_state` (cursor vs. list), `app.repos`
-/// (the title) and the status fields coexist (disjoint fields of `App`).
+/// Field-level borrows of `app.tags_state` (cursor vs. list) and `app.repos`
+/// (the title) coexist as disjoint fields of `App`.
 fn render_tags_view(f: &mut Frame, content: Rect, app: &mut App) {
     let repo_name = repo_name_of(&app.repos, app.current_repo);
     let state = tags::TagsRender {
         tags: &app.tags_state.tags,
         list_state: &mut app.tags_state.list_state,
         modal: app.tags_state.modal.as_ref(),
-        status: app.status.as_ref(),
-        remote_status: app.remote_status.as_ref(),
-        remote_op: app.remote_op,
         repo_name,
     };
     tags::render_tags(f, content, state);
@@ -722,6 +703,128 @@ mod tests {
             row.contains("j/k选择"),
             "the head of the view segment stays: {row}"
         );
+    }
+
+    /// Whitespace-stripped text of the whole frame, row after row — how a
+    /// test counts how often one message reached the screen (§4.1).
+    fn compact_frame(buffer: &ratatui::buffer::Buffer) -> String {
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            text.push_str(&compact_row(buffer, y));
+        }
+        text
+    }
+
+    /// Rows whose whitespace-stripped text contains `needle` — the row a
+    /// message landed on (§4.1: the status row at `height - 2` and nothing
+    /// else).
+    fn rows_with(buffer: &ratatui::buffer::Buffer, needle: &str) -> Vec<u16> {
+        (0..buffer.area.height)
+            .filter(|y| compact_row(buffer, *y).contains(needle))
+            .collect()
+    }
+
+    /// Message used to trace where one async result lands; a CJK run with no
+    /// spaces so the whitespace-stripped comparison is exact.
+    const STATUS_SENTINEL: &str = "异步回执落点";
+
+    /// Every screen the footer serves: the six of the hint-row sweep plus the
+    /// panel views that carry their own list state. The commit view is left
+    /// out on purpose — its input popup is a centered overlay (§2.4), not a
+    /// panel body.
+    fn footer_row_screens() -> Vec<App> {
+        let mut screens = hint_row_screens();
+        for view in [
+            View::Diff,
+            View::Branches,
+            View::Config,
+            View::History,
+            View::Tags,
+        ] {
+            let mut app = base_app();
+            app.view = view;
+            screens.push(app);
+        }
+        screens
+    }
+
+    /// §4.1 assertion 2: one async result, one rendering. A message reaches
+    /// the frame exactly once — on the footer status row — never beside a
+    /// second copy inside the panel body.
+    #[test]
+    fn async_result_reaches_the_frame_exactly_once() {
+        for mut app in footer_row_screens() {
+            let view = app.view;
+            app.status = Some(StatusLine {
+                message: STATUS_SENTINEL.to_string(),
+                is_error: false,
+            });
+            let buffer = render_buffer(&mut app);
+            assert_eq!(
+                compact_frame(&buffer).matches(STATUS_SENTINEL).count(),
+                1,
+                "view {view:?} renders its async result more than once"
+            );
+        }
+    }
+
+    /// §4.1 assertion 3: the footer is always the last two rows — the status
+    /// row at `height - 2`, the hint row at `height - 1` — whatever the view
+    /// draws above them. The split itself is pinned by
+    /// `footer::split_area_reserves_the_bottom_two_rows_for_the_footer`.
+    #[test]
+    fn footer_holds_the_status_row_and_the_hint_row_on_the_last_two_rows() {
+        for mut app in footer_row_screens() {
+            let view = app.view;
+            app.status = Some(StatusLine {
+                message: STATUS_SENTINEL.to_string(),
+                is_error: false,
+            });
+            let buffer = render_buffer(&mut app);
+            let height = buffer.area.height;
+            assert_eq!(
+                rows_with(&buffer, STATUS_SENTINEL),
+                vec![height - 2],
+                "view {view:?} moved its status off `height - 2`"
+            );
+            assert_eq!(
+                hint_rows(&buffer),
+                vec![height - 1],
+                "view {view:?} moved its hint row off `height - 1`"
+            );
+        }
+    }
+
+    /// §4.1 assertion 4: each `RemoteStatus` shape renders once, on the status
+    /// row, and the focus panel keeps the data it already had (§4.4: a long
+    /// async operation must not blank the panel).
+    #[test]
+    fn remote_status_shapes_land_on_the_status_row_only() {
+        let shapes = [
+            (RemoteStatus::Running("正在 pull…".to_string()), "正在pull…"),
+            (RemoteStatus::Success, "pull成功"),
+            (RemoteStatus::Error("未配置远端".to_string()), "未配置远端"),
+        ];
+        for (remote_status, needle) in shapes {
+            let mut app = base_app();
+            app.view = View::Repo;
+            app.file_entries = vec![FileEntry {
+                path: std::path::PathBuf::from("src/main.rs"),
+                state: FileState::Modified,
+            }];
+            app.remote_op = "pull";
+            app.remote_status = Some(remote_status);
+            let buffer = render_buffer(&mut app);
+            assert_eq!(
+                rows_with(&buffer, needle),
+                vec![buffer.area.height - 2],
+                "{needle:?} must render once, on the status row"
+            );
+            assert!(
+                compact_frame(&buffer).contains("src/main.rs"),
+                "{needle:?} must not blank the file list (§4.4)"
+            );
+        }
     }
 
     #[test]

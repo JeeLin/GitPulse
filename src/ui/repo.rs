@@ -9,56 +9,31 @@ use ratatui::{
 use super::{hint, pulls, render_confirm_overlay};
 use crate::git::FileEntry;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
-use crate::ui::status::{RemoteStatus, StatusLine};
 
 /// State for rendering the single-repo view.
+///
+/// The panel draws its content only (§4.1): the status row and the hint row
+/// are both painted once by the footer, so no async result is read here.
 pub struct RepoState<'a> {
+    /// Working-tree entries to list.
     pub entries: &'a [FileEntry],
-    pub status: Option<&'a StatusLine>,
+    /// Selection cursor shared across frames.
     pub list_state: &'a mut ListState,
+    /// Whether the discard confirmation is open.
     pub show_discard_confirm: bool,
+    /// File the confirmation targets, when open.
     pub confirm_file: Option<&'a FileEntry>,
-    /// Push/pull feedback; takes over the status line while present.
-    pub remote_status: Option<&'a RemoteStatus>,
-    /// Label of the running/last remote operation (`push` / `pull`).
-    pub remote_op: &'a str,
 }
 
-/// Render the single-repo file status list above the footer's status row.
-///
-/// The panel draws its content only (§2.3): the hint row is composed once by
-/// the footer from [`repo_hints`], so nothing here reserves a row for it.
+/// Render the single-repo file status list, plus the discard confirmation
+/// overlay when it is open.
 pub fn render_repo(f: &mut Frame, content: Rect, mut state: RepoState<'_>) {
-    let area = content;
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),    // file list
-            Constraint::Length(1), // status row
-        ])
-        .split(area);
-
-    let file_list_area = chunks[0];
-    let status_area = chunks[1];
-
-    // Render file list
-    render_file_list(f, file_list_area, &mut state);
-
-    // Render status line: remote push/pull feedback takes precedence, and a
-    // notice written while it runs shares the row with it (F1). The
-    // branch itself is shared with the tag panel (G6).
-    super::render_status_or_remote(
-        f,
-        status_area,
-        state.remote_status,
-        state.remote_op,
-        state.status,
-    );
+    render_file_list(f, content, &mut state);
 
     // Overlay discard confirmation dialog
     if state.show_discard_confirm {
         if let Some(file) = state.confirm_file {
-            render_discard_dialog(f, area, file);
+            render_discard_dialog(f, content, file);
         }
     }
 }
@@ -162,6 +137,7 @@ mod tests {
     use super::*;
     use crate::git::FileState;
     use crate::ui::components::footer::StatusRow;
+    use crate::ui::status::{RemoteStatus, StatusLine};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -172,41 +148,34 @@ mod tests {
         }
     }
 
-    fn base_state<'a>(
-        entries: &'a [FileEntry],
-        list_state: &'a mut ListState,
-        status: Option<&'a StatusLine>,
-    ) -> RepoState<'a> {
+    fn base_state<'a>(entries: &'a [FileEntry], list_state: &'a mut ListState) -> RepoState<'a> {
         RepoState {
             entries,
-            status,
             list_state,
             show_discard_confirm: false,
             confirm_file: None,
-            remote_status: None,
-            remote_op: "",
         }
     }
 
-    /// The panel draws content only (§2.3), so the frame goes through
+    /// The panel draws content only (§4.1), so the frame goes through
     /// [`crate::ui::components::footer::draw_frame`] — the shape
     /// `ui::render` uses — and the footer takes the bottom two rows.
     fn render_to_terminal(state: RepoState<'_>) -> Terminal<TestBackend> {
-        render_to_terminal_sized(state, 80, 24)
+        render_with_footer(state, StatusRow::plain(None), 80, 24)
     }
 
-    fn render_to_terminal_sized(
+    fn render_with_footer(
         state: RepoState<'_>,
+        status: StatusRow<'_>,
         width: u16,
         height: u16,
     ) -> Terminal<TestBackend> {
         let hints = repo_hints(state.show_discard_confirm);
-        let status_row = StatusRow::new(state.status, state.remote_status, state.remote_op);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                crate::ui::components::footer::draw_frame(f, status_row, &hints, |f, body| {
+                crate::ui::components::footer::draw_frame(f, status, &hints, |f, body| {
                     render_repo(f, body, state)
                 });
             })
@@ -276,8 +245,10 @@ mod tests {
             .to_string()
     }
 
+    /// §4.1: the file list and the footer status row, the panel body keeping
+    /// no status row of its own.
     #[test]
-    fn render_file_list_shows_paths_states_and_status_line() {
+    fn render_file_list_shows_paths_states_and_status_row() {
         let entries = vec![
             entry("src/lib.rs", FileState::Modified),
             entry("notes.txt", FileState::Untracked),
@@ -288,7 +259,12 @@ mod tests {
         };
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let terminal = render_to_terminal(base_state(&entries, &mut list_state, Some(&status)));
+        let terminal = render_with_footer(
+            base_state(&entries, &mut list_state),
+            StatusRow::plain(Some(&status)),
+            80,
+            24,
+        );
         let text = compact(&terminal);
         assert!(text.contains("文件状态(2文件)"), "missing title: {text}");
         assert!(
@@ -300,6 +276,11 @@ mod tests {
             "missing untracked path: {text}"
         );
         assert!(text.contains("工作区有2处变更"), "missing status: {text}");
+        assert_eq!(
+            rows_with(&terminal, "工作区有2处变更"),
+            vec![22],
+            "the status must land on the footer status row only"
+        );
         // Non-error status renders with the default (unstyled) foreground.
         assert_eq!(status_fg(&terminal), Color::Reset, "status must be plain");
     }
@@ -313,7 +294,7 @@ mod tests {
         ];
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let terminal = render_to_terminal(base_state(&entries, &mut list_state, None));
+        let terminal = render_to_terminal(base_state(&entries, &mut list_state));
         let text = compact(&terminal);
         assert!(text.contains("Aadded.txt"), "missing added symbol: {text}");
         assert!(
@@ -326,16 +307,28 @@ mod tests {
         );
     }
 
+    /// §4.1: the failed load lands on the footer's status row, once, and
+    /// the panel body keeps no row of its own for it.
     #[test]
-    fn render_error_status_line_shows_reason_in_red() {
+    fn render_error_status_row_shows_reason_in_red() {
         let status = StatusLine {
             message: "加载文件列表失败: boom".to_string(),
             is_error: true,
         };
         let mut list_state = ListState::default();
-        let terminal = render_to_terminal(base_state(&[], &mut list_state, Some(&status)));
+        let terminal = render_with_footer(
+            base_state(&[], &mut list_state),
+            StatusRow::plain(Some(&status)),
+            80,
+            24,
+        );
         let text = compact(&terminal);
         assert!(text.contains("boom"), "missing error: {text}");
+        assert_eq!(
+            rows_with(&terminal, "boom"),
+            vec![22],
+            "the error must land on the footer status row only"
+        );
         assert_eq!(status_fg(&terminal), Color::Red, "error must render red");
     }
 
@@ -344,7 +337,7 @@ mod tests {
         let entries = vec![entry("src/lib.rs", FileState::Modified)];
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let mut state = base_state(&entries, &mut list_state, None);
+        let mut state = base_state(&entries, &mut list_state);
         state.show_discard_confirm = true;
         state.confirm_file = entries.first();
         let terminal = render_to_terminal(state);
@@ -363,7 +356,7 @@ mod tests {
         let entries = vec![entry("src/lib.rs", FileState::Modified)];
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let mut state = base_state(&entries, &mut list_state, None);
+        let mut state = base_state(&entries, &mut list_state);
         state.show_discard_confirm = true;
         state.confirm_file = entries.first();
         let terminal = render_to_terminal(state);
@@ -423,18 +416,23 @@ mod tests {
     /// message keeps its own cell and the status renders beside it — and
     /// with no progress source left (G1), the row carries the message
     /// rather than a frozen percentage.
+    /// §4.1: a running push takes the status row over while the panel keeps
+    /// its rows — the old data stays and no progress source is frozen.
     #[test]
-    fn render_remote_running_shows_message_and_pending_status_line() {
+    fn render_remote_running_shows_message_and_pending_status_row() {
         let status = StatusLine {
             message: "底层状态行".to_string(),
             is_error: false,
         };
         let running = RemoteStatus::Running("正在 push…".to_string());
         let mut list_state = ListState::default();
-        let mut state = base_state(&[], &mut list_state, Some(&status));
-        state.remote_status = Some(&running);
-        state.remote_op = "push";
-        let terminal = render_to_terminal(state);
+        let state = base_state(&[], &mut list_state);
+        let terminal = render_with_footer(
+            state,
+            StatusRow::new(Some(&status), Some(&running), "push"),
+            80,
+            24,
+        );
         let text = compact(&terminal);
         assert!(text.contains("正在push"), "missing running message: {text}");
         assert!(
@@ -445,15 +443,23 @@ mod tests {
             text.contains("底层状态行"),
             "pending status hidden by the running line: {text}"
         );
+        assert_eq!(
+            rows_with(&terminal, "正在push"),
+            vec![22],
+            "the running message must appear once, on the status row"
+        );
     }
 
     #[test]
     fn render_remote_success_names_operation_in_green() {
         let mut list_state = ListState::default();
-        let mut state = base_state(&[], &mut list_state, None);
-        state.remote_status = Some(&RemoteStatus::Success);
-        state.remote_op = "push";
-        let terminal = render_to_terminal(state);
+        let state = base_state(&[], &mut list_state);
+        let terminal = render_with_footer(
+            state,
+            StatusRow::new(None, Some(&RemoteStatus::Success), "push"),
+            80,
+            24,
+        );
         let text = compact(&terminal);
         assert!(text.contains("push成功"), "missing success text: {text}");
         assert_eq!(status_fg(&terminal), Color::Green, "success must be green");
@@ -463,13 +469,21 @@ mod tests {
     fn render_remote_error_shows_reason_in_red() {
         let error = RemoteStatus::Error("pull 失败: diverged".to_string());
         let mut list_state = ListState::default();
-        let mut state = base_state(&[], &mut list_state, None);
-        state.remote_status = Some(&error);
-        state.remote_op = "pull";
-        let terminal = render_to_terminal(state);
+        let state = base_state(&[], &mut list_state);
+        let terminal =
+            render_with_footer(state, StatusRow::new(None, Some(&error), "pull"), 80, 24);
         let text = compact(&terminal);
         assert!(text.contains("diverged"), "missing reason: {text}");
         assert_eq!(status_fg(&terminal), Color::Red, "error must be red");
+    }
+
+    /// Rows whose whitespace-stripped text contains `needle` — how a test
+    /// counts how often one async result reached the screen (§4.1).
+    fn rows_with(terminal: &Terminal<TestBackend>, needle: &str) -> Vec<u16> {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .filter(|y| row_compact(terminal, *y).contains(needle))
+            .collect()
     }
 
     /// A 120-column frame keeps the whole view segment on screen: at 80 the
@@ -479,8 +493,12 @@ mod tests {
     fn render_key_hints_show_action_keys() {
         let entries = vec![entry("src/lib.rs", FileState::Modified)];
         let mut list_state = ListState::default();
-        let terminal =
-            render_to_terminal_sized(base_state(&entries, &mut list_state, None), 120, 24);
+        let terminal = render_with_footer(
+            base_state(&entries, &mut list_state),
+            StatusRow::plain(None),
+            120,
+            24,
+        );
         let text = compact(&terminal);
         assert!(text.contains("j/k选择"), "missing select hint: {text}");
         assert!(text.contains("暂存切换"), "missing stage hint: {text}");

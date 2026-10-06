@@ -1,7 +1,7 @@
 //! Tag panel: local tag list with create / delete overlays and push feedback.
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
     widgets::{ListItem, ListState},
@@ -11,7 +11,6 @@ use ratatui::{
 use crate::app::TagsModal;
 use crate::git::TagInfo;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
-use crate::ui::status::{RemoteStatus, StatusLine};
 
 use super::{hint, pulls};
 
@@ -29,56 +28,24 @@ pub struct TagsRender<'a> {
     pub list_state: &'a mut ListState,
     /// Open overlay, when any: the create input or the delete confirmation.
     pub modal: Option<&'a TagsModal>,
-    /// Current status line, if any; errors render red and persist. While a
-    /// remote operation runs it renders beside that feedback instead of
-    /// being hidden.
-    pub status: Option<&'a StatusLine>,
-    /// Push feedback; takes over the status line while present.
-    pub remote_status: Option<&'a RemoteStatus>,
-    /// Label of the running/last remote operation (`push`).
-    pub remote_op: &'a str,
     /// Name of the repository the panel edits (shown in the title).
     pub repo_name: &'a str,
 }
 
-/// Render the tag list above the footer's status row, plus the
-/// create/confirm overlays when active.
+/// Render the tag list, plus the create/confirm overlays when active.
 ///
-/// Push feedback ([`RemoteStatus`]) takes over the status row, exactly like
-/// the single-repo view, so a running push shows its running line and a
-/// failed one keeps its red reason until the next operation. A notice
-/// recorded while that operation runs — `已有远端操作进行中` on a rejected
-/// second push — is not dropped: it shares the row on the feedback's right,
-/// see [`super::remote::render_remote_status`].
+/// The panel draws its content only (§4.1): the status row and the hint row
+/// are both painted once by the footer — the hint row from [`tags_hints`] —
+/// so no async result is read here. Push feedback ([`RemoteStatus`]) takes
+/// over that row, and a notice recorded while it runs shares it, see
+/// [`super::remote::render_remote_status`].
 pub fn render_tags(f: &mut Frame, content: Rect, mut state: TagsRender<'_>) {
-    let area = content;
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),    // tag list
-            Constraint::Length(1), // status row
-        ])
-        .split(area);
-
-    let tag_list_area = chunks[0];
-    let status_area = chunks[1];
-
-    render_tag_list(f, tag_list_area, &mut state);
-
-    // Remote feedback takes over the status row; a notice written while it
-    // runs shares it (F1/G2). Shared branch with the repo panel (G6).
-    super::render_status_or_remote(
-        f,
-        status_area,
-        state.remote_status,
-        state.remote_op,
-        state.status,
-    );
+    render_tag_list(f, content, &mut state);
 
     match state.modal {
-        Some(TagsModal::Input { buffer }) => render_create_input(f, area, buffer),
+        Some(TagsModal::Input { buffer }) => render_create_input(f, content, buffer),
         Some(TagsModal::Confirm { tag_to_delete }) => {
-            render_delete_dialog(f, area, tag_to_delete);
+            render_delete_dialog(f, content, tag_to_delete);
         }
         None => {}
     }
@@ -174,6 +141,7 @@ fn render_delete_dialog(f: &mut Frame, area: Rect, tag_to_delete: &str) {
 mod tests {
     use super::*;
     use crate::ui::components::footer::StatusRow;
+    use crate::ui::status::StatusLine;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -195,14 +163,13 @@ mod tests {
     /// Render the panel through the footer into an 80×24 frame.
     fn render_to_terminal(state: TagsRender<'_>) -> Terminal<TestBackend> {
         let hints = tags_hints(state.modal);
-        let status = state.status;
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
                 crate::ui::components::footer::draw_frame(
                     f,
-                    StatusRow::plain(status),
+                    StatusRow::plain(None),
                     &hints,
                     |f, body| render_tags(f, body, state),
                 );
@@ -220,19 +187,18 @@ mod tests {
         raw.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
-    /// The panel draws content only (§2.3), so the frame goes through
+    /// The panel draws content only (§4.1), so the frame goes through
     /// [`crate::ui::components::footer::draw_frame`] — the shape
-    /// `ui::render` uses — and the hint row is the bottom row.
+    /// `ui::render` uses — and the footer takes the bottom two rows.
     fn render_to_text(state: TagsRender<'_>) -> String {
         let hints = tags_hints(state.modal);
-        let status = state.status;
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
                 crate::ui::components::footer::draw_frame(
                     f,
-                    StatusRow::plain(status),
+                    StatusRow::plain(None),
                     &hints,
                     |f, body| render_tags(f, body, state),
                 );
@@ -248,18 +214,11 @@ mod tests {
         raw.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
-    fn base_state<'a>(
-        tags: &'a [TagInfo],
-        list_state: &'a mut ListState,
-        status: Option<&'a StatusLine>,
-    ) -> TagsRender<'a> {
+    fn base_state<'a>(tags: &'a [TagInfo], list_state: &'a mut ListState) -> TagsRender<'a> {
         TagsRender {
             tags,
             list_state,
             modal: None,
-            status,
-            remote_status: None,
-            remote_op: "",
             repo_name: "demo",
         }
     }
@@ -272,7 +231,7 @@ mod tests {
         ];
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let text = render_to_text(base_state(&tags, &mut list_state, None));
+        let text = render_to_text(base_state(&tags, &mut list_state));
         assert!(text.contains("v-light"), "missing tag name: {text}");
         assert!(text.contains("v-annotated"), "missing tag name: {text}");
         assert!(text.contains("abc1234"), "missing short hash: {text}");
@@ -290,12 +249,12 @@ mod tests {
     #[test]
     fn render_empty_tag_list_shows_empty_state() {
         let mut list_state = ListState::default();
-        let text = render_to_text(base_state(&[], &mut list_state, None));
+        let text = render_to_text(base_state(&[], &mut list_state));
         assert!(text.contains("标签[demo](0)"), "missing title: {text}");
         assert!(text.contains("暂无标签"), "missing empty state: {text}");
         // The view segment is right-truncated at 80 columns (§2.3), so the
         // empty state asserts the global segment still leads the row.
-        let terminal = render_to_terminal(base_state(&[], &mut list_state, None));
+        let terminal = render_to_terminal(base_state(&[], &mut list_state));
         let hints = compact_row(&terminal, terminal.backend().buffer().area.height - 1);
         assert!(
             hints.starts_with(GLOBAL_PREFIX),
@@ -303,22 +262,50 @@ mod tests {
         );
     }
 
+    /// §4.1: a failed load lands on the footer's status row and nowhere
+    /// else, so the panel body keeps drawing the empty state.
     #[test]
-    fn render_error_status_shows_reason_not_just_empty_list() {
+    fn render_error_status_shows_reason_on_the_footer_row_only() {
         let status = StatusLine {
             message: "加载标签列表失败: boom".to_string(),
             is_error: true,
         };
         let mut list_state = ListState::default();
-        let text = render_to_text(base_state(&[], &mut list_state, Some(&status)));
-        assert!(text.contains("boom"), "missing error: {text}");
+        let state = base_state(&[], &mut list_state);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::components::footer::draw_frame(
+                    f,
+                    StatusRow::plain(Some(&status)),
+                    &tags_hints(None),
+                    |f, body| render_tags(f, body, state),
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<u16> = (0..buffer.area.height)
+            .filter(|y| {
+                let raw: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, *y)].symbol().to_string())
+                    .collect();
+                let row: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+                row.contains("boom")
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![buffer.area.height - 2],
+            "the error must land on the footer status row only"
+        );
     }
 
     #[test]
     fn render_create_input_shows_title_and_typed_name() {
         let tags = vec![tag("v1.0", "abc1234", false)];
         let mut list_state = ListState::default();
-        let mut state = base_state(&tags, &mut list_state, None);
+        let mut state = base_state(&tags, &mut list_state);
         let modal = TagsModal::Input {
             buffer: "v3".to_string(),
         };
@@ -334,7 +321,7 @@ mod tests {
     fn render_delete_confirm_shows_tag_name_and_keys() {
         let tags = vec![tag("v2.0", "abc1234", false)];
         let mut list_state = ListState::default();
-        let mut state = base_state(&tags, &mut list_state, None);
+        let mut state = base_state(&tags, &mut list_state);
         let modal = TagsModal::Confirm {
             tag_to_delete: "v2.0".to_string(),
         };
@@ -357,7 +344,7 @@ mod tests {
     fn render_delete_confirm_wraps_long_tag_name() {
         let tags = vec![tag("v1.2.3-rc.1+build.20261001", "abc1234", false)];
         let mut list_state = ListState::default();
-        let mut state = base_state(&tags, &mut list_state, None);
+        let mut state = base_state(&tags, &mut list_state);
         let modal = TagsModal::Confirm {
             tag_to_delete: "v1.2.3-rc.1+build.20261001".to_string(),
         };

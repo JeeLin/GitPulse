@@ -12,21 +12,21 @@ use crate::app::App;
 use crate::platform::{IssueDetail, IssueSummary};
 
 use super::pulls::{
-    cells, ellipsize, list_cursor, meta_budget, panel_chunks, panel_title, render_disconnected,
-    render_panel_status, row_width, state_style, META_GAP,
+    cells, ellipsize, list_cursor, meta_budget, panel_title, render_disconnected, row_width,
+    state_style, META_GAP,
 };
 
-/// Empty-state copy: no open issues. Zero rows is a valid state — the status
-/// row below covers failed loads.
+/// Empty-state copy: no open issues. Zero rows is a valid state — the footer's
+/// status row covers failed loads.
 const EMPTY_ISSUES: &str = "—（暂无 Issues）";
 
 /// Render the open-issues list (excluding pull requests).
+///
+/// The panel draws its content only (§4.1): the status row and the hint row
+/// are both painted once by the footer.
 pub fn render_issues(f: &mut Frame, content: Rect, app: &App) {
-    let area = content;
-    let chunks = panel_chunks(area);
     if !app.github_state.connected() {
-        render_disconnected(f, chunks[0], "Issues", app.github_state.kind(), app);
-        render_panel_status(f, chunks[1], app);
+        render_disconnected(f, content, "Issues", app.github_state.kind(), app);
         return;
     }
 
@@ -46,10 +46,10 @@ pub fn render_issues(f: &mut Frame, content: Rect, app: &App) {
                 Style::default().fg(Color::DarkGray),
             ))
             .block(block),
-            chunks[0],
+            content,
         );
     } else {
-        let width = row_width(chunks[0]);
+        let width = row_width(content);
         let items: Vec<ListItem> = issues
             .iter()
             .map(|issue| issue_item(issue, width))
@@ -60,15 +60,14 @@ pub fn render_issues(f: &mut Frame, content: Rect, app: &App) {
             .block(block)
             .highlight_style(super::list_highlight())
             .highlight_symbol(super::HIGHLIGHT_SYMBOL);
-        f.render_stateful_widget(list, chunks[0], &mut state);
+        f.render_stateful_widget(list, content, &mut state);
     }
-    render_panel_status(f, chunks[1], app);
 }
 
 /// Placeholder of the issue detail while its payload has not arrived yet.
 const ISSUE_DETAIL_PLACEHOLDER: &str = "—（暂无 Issue 详情）";
 
-/// Render the selected issue's detail (summary head + wrapped body + hints).
+/// Render the selected issue's detail (summary head + wrapped body).
 ///
 /// Mirrors the pull detail panel (`render_pull_detail`): a disconnected gate
 /// while the GitHub client is not ready, the placeholder while the detail
@@ -76,11 +75,8 @@ const ISSUE_DETAIL_PLACEHOLDER: &str = "—（暂无 Issue 详情）";
 /// (identification + metadata) and a soft-wrapped body. Issues carry no
 /// check sub-list, so there is no third pane.
 pub fn render_issue_detail(f: &mut Frame, content: Rect, app: &App) {
-    let area = content;
-    let chunks = panel_chunks(area);
     if !app.github_state.connected() {
-        render_disconnected(f, chunks[0], "Issue 详情", app.github_state.kind(), app);
-        render_panel_status(f, chunks[1], app);
+        render_disconnected(f, content, "Issue 详情", app.github_state.kind(), app);
         return;
     }
 
@@ -99,16 +95,14 @@ pub fn render_issue_detail(f: &mut Frame, content: Rect, app: &App) {
                 Style::default().fg(Color::DarkGray),
             ))
             .block(block),
-            chunks[0],
+            content,
         );
-        render_panel_status(f, chunks[1], app);
         return;
     };
 
-    let inner = block.inner(chunks[0]);
-    f.render_widget(block, chunks[0]);
+    let inner = block.inner(content);
+    f.render_widget(block, content);
     render_detail_panes(f, detail, inner);
-    render_panel_status(f, chunks[1], app);
 }
 
 /// Split the issue detail shell into its two panes — the summary head and the
@@ -277,19 +271,28 @@ mod tests {
     }
 
     fn render_text_sized(app: &App, width: u16) -> String {
+        compact_text(&render_buffer_sized(app, width))
+    }
+
+    /// Whitespace-stripped text of the whole frame (wide CJK glyphs leave
+    /// padding cells).
+    fn compact_text(buffer: &ratatui::buffer::Buffer) -> String {
+        let mut raw = String::new();
+        for cell in buffer.content() {
+            raw.push_str(cell.symbol());
+        }
+        raw.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// The rendered frame, so a test can address the single row an async
+    /// result landed on (§4.1).
+    fn render_buffer_sized(app: &App, width: u16) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(width, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| draw_receipt_frame(f, app, true, |f, body| render_issues(f, body, app)))
             .unwrap();
-        let raw: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        raw.chars().filter(|c| !c.is_whitespace()).collect()
+        terminal.backend().buffer().clone()
     }
 
     #[test]
@@ -345,19 +348,26 @@ mod tests {
         assert!(text.contains("—（暂无Issues）"), "missing copy: {text}");
     }
 
+    /// §4.1/§4.2: the readiness gate replaces the list, and the reason stays on
+    /// the footer status row — the one landing spot for an async result.
     #[test]
-    fn issues_disconnected_shows_the_status_line_instead() {
+    fn issues_disconnected_keeps_the_reason_on_the_footer_status_row() {
         let mut app = App::new(Config::default());
         app.set_error("GitHub 认证失败");
         app.github_state.issues = vec![issue(1, "ghost", "open", &[])];
-        let text = render_text(&app);
+        let buffer = render_buffer_sized(&app, 80);
+        let text = compact_text(&buffer);
         // No resolved remote means `kind == None`, which falls back to the
         // GitHub gate copy, verbatim as in v0.5.0.
         assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
-        assert!(text.contains("GitHub认证失败"), "status must show: {text}");
         assert!(
             !text.contains("#1ghost"),
             "no rows without a client: {text}"
+        );
+        assert_eq!(
+            crate::ui::pulls::rows_with(&buffer, "GitHub认证失败"),
+            vec![buffer.area.height - 2],
+            "the reason belongs on the footer status row only: {text}"
         );
     }
 

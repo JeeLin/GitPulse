@@ -1,7 +1,7 @@
 //! Diff viewer for single file.
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -13,24 +13,7 @@ use crate::ui::components::footer::{hints as join_hints, HintRow};
 
 /// Render the diff content with syntax highlighting for +/- lines.
 pub fn render_diff(f: &mut Frame, content: Rect, app: &crate::app::App) {
-    let area = content;
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),    // diff content
-            Constraint::Length(1), // status row
-        ])
-        .split(area);
-
-    let diff_area = chunks[0];
-    let status_area = chunks[1];
-
-    // Render diff content
-    render_diff_content(f, diff_area, &app.diff_content, app.diff_scroll);
-
-    // Status row (errors / notices) — the track every other panel reserves
-    // (R4); the title stays `文件差异`.
-    super::render_status_line(f, status_area, app.status.as_ref());
+    render_diff_content(f, content, &app.diff_content, app.diff_scroll);
 }
 
 /// Footer hint row for the diff view (§2.3): the scroll keys and the way out.

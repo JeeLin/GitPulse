@@ -1,7 +1,7 @@
 //! Branch panel: local branch list with create / switch / delete overlays.
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState},
@@ -10,7 +10,6 @@ use ratatui::{
 
 use crate::git::BranchInfo;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
-use crate::ui::status::StatusLine;
 
 use super::{hint, pulls};
 
@@ -19,8 +18,6 @@ use super::{hint, pulls};
 pub struct BranchesState<'a> {
     /// Live branch snapshots from `App.branches`.
     pub branches: &'a [BranchInfo],
-    /// Current status line, if any; errors render red and persist.
-    pub status: Option<&'a StatusLine>,
     /// Selection cursor shared across frames.
     pub list_state: &'a mut ListState,
     /// Name of the repository the panel edits (shown in the title).
@@ -35,35 +32,25 @@ pub struct BranchesState<'a> {
     pub confirm_branch: Option<&'a BranchInfo>,
 }
 
-/// Render the branch list above the footer's status row, plus the
-/// create/confirm overlays when active.
+/// Render the branch list, plus the create/confirm overlays when active.
 ///
-/// The panel draws its content only (§2.3): the hint row is composed once by
-/// the footer from [`branches_hints`], so nothing here reserves a row for it.
+/// The panel draws its content only (§4.1): the status row and the hint row
+/// are both drawn once by the footer — the hint row from
+/// [`branches_hints`] — so nothing here reserves a row for either.
 ///
-/// A failed load arrives as an error [`StatusLine`] with an empty list, so
-/// an empty panel never masquerades as success (checkpoint 2).
+/// A failed load arrives as an error [`crate::ui::status::StatusLine`] the
+/// footer paints with an empty list, so an empty panel never masquerades as
+/// success (checkpoint 2).
 pub fn render_branches(f: &mut Frame, content: Rect, mut state: BranchesState<'_>) {
-    let area = content;
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),    // branch list
-            Constraint::Length(1), // status row
-        ])
-        .split(area);
-
-    render_branch_list(f, chunks[0], &mut state);
-
-    super::render_status_line(f, chunks[1], state.status);
+    render_branch_list(f, content, &mut state);
 
     if state.show_delete_confirm {
         if let Some(branch) = state.confirm_branch {
-            render_delete_dialog(f, area, branch);
+            render_delete_dialog(f, content, branch);
         }
     }
     if state.show_input {
-        render_create_input(f, area, state.input);
+        render_create_input(f, content, state.input);
     }
 }
 
@@ -164,6 +151,7 @@ fn render_delete_dialog(f: &mut Frame, area: Rect, branch: &BranchInfo) {
 mod tests {
     use super::*;
     use crate::ui::components::footer::StatusRow;
+    use crate::ui::status::StatusLine;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -178,11 +166,9 @@ mod tests {
     fn base_state<'a>(
         branches: &'a [BranchInfo],
         list_state: &'a mut ListState,
-        status: Option<&'a StatusLine>,
     ) -> BranchesState<'a> {
         BranchesState {
             branches,
-            status,
             list_state,
             repo_name: "alpha",
             show_input: false,
@@ -208,14 +194,13 @@ mod tests {
         height: u16,
     ) -> Terminal<TestBackend> {
         let hints = branches_hints(state.show_input, state.show_delete_confirm);
-        let status = state.status;
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
                 crate::ui::components::footer::draw_frame(
                     f,
-                    StatusRow::plain(status),
+                    StatusRow::plain(None),
                     &hints,
                     |f, body| render_branches(f, body, state),
                 );
@@ -255,29 +240,57 @@ mod tests {
         ];
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let text = render_to_text(base_state(&branches, &mut list_state, None));
+        let text = render_to_text(base_state(&branches, &mut list_state));
         assert!(text.contains("*main"), "missing head marker: {text}");
         assert!(text.contains("→origin/main"), "missing upstream: {text}");
         assert!(text.contains("feature"), "missing branch: {text}");
         assert!(text.contains("alpha"), "missing repo name: {text}");
     }
 
+    /// §4.1: the panel body draws no status row — a failed load lands on the
+    /// footer's status row and nowhere else, with the empty list untouched.
     #[test]
-    fn render_error_status_shows_reason_not_just_empty_list() {
+    fn render_error_status_shows_reason_on_the_footer_row_only() {
         let status = StatusLine {
             message: "加载分支列表失败: boom".to_string(),
             is_error: true,
         };
         let mut list_state = ListState::default();
-        let text = render_to_text(base_state(&[], &mut list_state, Some(&status)));
-        assert!(text.contains("boom"), "missing error: {text}");
+        let state = base_state(&[], &mut list_state);
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::components::footer::draw_frame(
+                    f,
+                    StatusRow::plain(Some(&status)),
+                    &branches_hints(false, false),
+                    |f, body| render_branches(f, body, state),
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<u16> = (0..buffer.area.height)
+            .filter(|y| {
+                let raw: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, *y)].symbol().to_string())
+                    .collect();
+                let row: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+                row.contains("boom")
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![buffer.area.height - 2],
+            "the error must land on the footer status row only"
+        );
     }
 
     #[test]
     fn render_create_input_shows_title_and_typed_name() {
         let branches = vec![branch("main", true, None)];
         let mut list_state = ListState::default();
-        let mut state = base_state(&branches, &mut list_state, None);
+        let mut state = base_state(&branches, &mut list_state);
         state.show_input = true;
         state.input = "hotfix";
         let text = render_to_text(state);
@@ -289,7 +302,7 @@ mod tests {
     fn render_delete_confirm_shows_branch_and_keys() {
         let branches = vec![branch("feature", false, None)];
         let mut list_state = ListState::default();
-        let mut state = base_state(&branches, &mut list_state, None);
+        let mut state = base_state(&branches, &mut list_state);
         state.show_delete_confirm = true;
         state.confirm_branch = branches.first();
         let text = render_to_text(state);
@@ -318,7 +331,7 @@ mod tests {
     fn render_hints_line_shows_navigation_keys() {
         let branches = vec![branch("main", true, None)];
         let mut list_state = ListState::default();
-        let text = render_to_text(base_state(&branches, &mut list_state, None));
+        let text = render_to_text(base_state(&branches, &mut list_state));
         assert!(text.contains("Esc返回"), "missing hints: {text}");
         assert!(text.contains("n新建"), "missing create hint: {text}");
     }
@@ -329,7 +342,7 @@ mod tests {
     fn render_delete_confirm_switches_bottom_key_hints() {
         let branches = vec![branch("feature", false, None)];
         let mut list_state = ListState::default();
-        let mut state = base_state(&branches, &mut list_state, None);
+        let mut state = base_state(&branches, &mut list_state);
         state.show_delete_confirm = true;
         state.confirm_branch = branches.first();
         let terminal = render_to_terminal_sized(state, 80, 24);
@@ -352,7 +365,7 @@ mod tests {
     fn render_create_input_switches_bottom_key_hints() {
         let branches = vec![branch("main", true, None)];
         let mut list_state = ListState::default();
-        let mut state = base_state(&branches, &mut list_state, None);
+        let mut state = base_state(&branches, &mut list_state);
         state.show_input = true;
         state.input = "hotfix";
         let terminal = render_to_terminal_sized(state, 80, 24);

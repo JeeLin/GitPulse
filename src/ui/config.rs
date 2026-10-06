@@ -14,15 +14,12 @@ use super::hint;
 use super::repo::centered_rect;
 use crate::git::show_path;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
-use crate::ui::status::StatusLine;
 
 /// Borrowed render state for the config panel, referencing `App.config.scan_dirs`
 /// directly so no mock data source exists (checkpoint 2).
 pub struct ConfigState<'a> {
     /// Live scan-dir list from `App.config.scan_dirs`.
     pub scan_dirs: &'a [PathBuf],
-    /// Current status line, if any; errors render red and persist.
-    pub status: Option<&'a StatusLine>,
     /// Selection cursor shared across frames.
     pub list_state: &'a mut ListState,
     /// Whether the add-scan-dir input overlay is shown.
@@ -41,31 +38,19 @@ pub struct ConfigState<'a> {
     pub picker_state: &'a mut ListState,
 }
 
-/// Render the scan-dir list above the footer's status row, plus the
-/// add-scan-dir overlays (directory picker or manual input) when active.
+/// Render the scan-dir list plus the add-scan-dir overlays (directory picker
+/// or manual input) when active.
 ///
-/// The overlay wording reaches the hint row through [`config_hints`], and the
-/// delete confirmation renders a `y/n` overlay over the list.
+/// The panel draws its content only (§4.1): the status row and the hint row
+/// are both painted once by the footer — the hint row from [`config_hints`] —
+/// so nothing here reserves a row for either.
 pub fn render_config(f: &mut Frame, content: Rect, mut state: ConfigState<'_>) {
-    let area = content;
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),    // scan-dir list
-            Constraint::Length(1), // status row
-        ])
-        .split(area);
+    render_dir_list(f, content, &mut state);
 
-    render_dir_list(f, chunks[0], &mut state);
-
-    super::render_status_line(f, chunks[1], state.status);
-
-    // The picker renders inside the list area so the status row stays
-    // visible while browsing (errors surface there).
     if state.show_picker {
         render_dir_picker(
             f,
-            chunks[0],
+            content,
             state.picker_dir,
             state.picker_entries,
             state.picker_state,
@@ -74,8 +59,8 @@ pub fn render_config(f: &mut Frame, content: Rect, mut state: ConfigState<'_>) {
     if state.show_input {
         // Single-line add-scan-dir input (convention 9): typed path plus
         // cursor, titled 添加扫描目录; Enter confirms, Esc cancels via the
-        // bottom hints.
-        super::render_input_overlay(f, area, "添加扫描目录", state.input, true);
+        // footer's hint row.
+        super::render_input_overlay(f, content, "添加扫描目录", state.input, true);
     }
     if state.show_delete_confirm {
         let dir = state
@@ -84,8 +69,8 @@ pub fn render_config(f: &mut Frame, content: Rect, mut state: ConfigState<'_>) {
             .and_then(|i| state.scan_dirs.get(i))
             .map(|p| p.as_path());
         // Anchor on the list area, like the picker above, so the taller
-        // wrapped dialog never covers the status row or the footer hint row.
-        render_delete_confirm(f, chunks[0], dir);
+        // wrapped dialog never covers the footer.
+        render_delete_confirm(f, content, dir);
     }
 }
 
@@ -302,6 +287,7 @@ fn render_dir_list(f: &mut Frame, area: Rect, state: &mut ConfigState<'_>) {
 mod tests {
     use super::*;
     use crate::ui::components::footer::StatusRow;
+    use crate::ui::status::StatusLine;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -325,14 +311,13 @@ mod tests {
             state.show_input,
             state.show_delete_confirm,
         );
-        let status = state.status;
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
                 crate::ui::components::footer::draw_frame(
                     f,
-                    StatusRow::plain(status),
+                    StatusRow::plain(None),
                     &hints,
                     |f, body| render_config(f, body, state),
                 );
@@ -354,16 +339,21 @@ mod tests {
         raw.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
+    /// Whitespace-stripped text of one row, `y` from the top.
+    fn row_compact(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+        let raw: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect();
+        raw.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
     /// View segment of the hint row: the bottom row without the global
     /// segment (§2.3), which is fixed on every screen and would otherwise
     /// answer for words like `Esc 返回` in the assertions below.
     fn view_segment(terminal: &Terminal<TestBackend>) -> String {
         let buffer = terminal.backend().buffer();
         let y = buffer.area.height - 1;
-        let raw: String = (0..buffer.area.width)
-            .map(|x| buffer[(x, y)].symbol().to_string())
-            .collect();
-        let row: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+        let row = row_compact(buffer, y);
         let prefix: String = crate::ui::components::footer::global_hints()
             .spans
             .iter()
@@ -378,13 +368,11 @@ mod tests {
     /// Base render state: list mode, no overlays; picker fields inert.
     fn base_state<'a>(
         scan_dirs: &'a [PathBuf],
-        status: Option<&'a StatusLine>,
         list_state: &'a mut ListState,
         picker_state: &'a mut ListState,
     ) -> ConfigState<'a> {
         ConfigState {
             scan_dirs,
-            status,
             list_state,
             show_input: false,
             input: "",
@@ -405,7 +393,7 @@ mod tests {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
         let mut picker_state = ListState::default();
-        let text = render_to_text(base_state(&dirs, None, &mut list_state, &mut picker_state));
+        let text = render_to_text(base_state(&dirs, &mut list_state, &mut picker_state));
         assert!(text.contains("扫描目录配置(2)"), "missing title: {text}");
         assert!(
             text.contains("/home/user/repos"),
@@ -423,26 +411,45 @@ mod tests {
     fn render_empty_list_keeps_title_and_hints() {
         let mut list_state = ListState::default();
         let mut picker_state = ListState::default();
-        let text = render_to_text(base_state(&[], None, &mut list_state, &mut picker_state));
+        let text = render_to_text(base_state(&[], &mut list_state, &mut picker_state));
         assert!(text.contains("扫描目录配置(0)"), "missing title: {text}");
         assert!(text.contains("Esc返回"), "missing back hint: {text}");
     }
 
+    /// §4.1: the panel body draws no status row of its own — the footer is
+    /// the one landing spot for an async result, so a message appears there
+    /// and nowhere else, and the list keeps its own rows.
     #[test]
-    fn render_error_status_shows_reason_on_status_line() {
+    fn render_error_status_reaches_the_footer_status_row_only() {
         let status = StatusLine {
             message: "目录不能为空".to_string(),
             is_error: true,
         };
         let mut list_state = ListState::default();
         let mut picker_state = ListState::default();
-        let text = render_to_text(base_state(
-            &[],
-            Some(&status),
-            &mut list_state,
-            &mut picker_state,
-        ));
-        assert!(text.contains("目录不能为空"), "missing error: {text}");
+        let state = base_state(&[], &mut list_state, &mut picker_state);
+        let hints = config_hints(false, false, false);
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::components::footer::draw_frame(
+                    f,
+                    StatusRow::plain(Some(&status)),
+                    &hints,
+                    |f, body| render_config(f, body, state),
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<u16> = (0..buffer.area.height)
+            .filter(|y| row_compact(buffer, *y).contains("目录不能为空"))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![buffer.area.height - 2],
+            "the error must land on the footer status row only"
+        );
     }
 
     #[test]
@@ -451,7 +458,7 @@ mod tests {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
         let mut picker_state = ListState::default();
-        let mut state = base_state(&dirs, None, &mut list_state, &mut picker_state);
+        let mut state = base_state(&dirs, &mut list_state, &mut picker_state);
         state.show_input = true;
         state.input = "/home/user";
         let text = render_to_text(state);
@@ -470,7 +477,7 @@ mod tests {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
         let mut picker_state = ListState::default();
-        let mut state = base_state(&dirs, None, &mut list_state, &mut picker_state);
+        let mut state = base_state(&dirs, &mut list_state, &mut picker_state);
         state.show_delete_confirm = true;
         let terminal = render_to_terminal(state, 80, 12);
         let text = compact(&terminal);
@@ -499,10 +506,9 @@ mod tests {
     /// excluded): the wrapped target path lands on consecutive inner rows,
     /// so joining them reassembles the path contiguously.
     fn confirm_inner(terminal: &Terminal<TestBackend>, size: (u16, u16)) -> String {
-        // The popup is anchored inside the list area: the footer takes the
-        // bottom two rows (§4.1) and the panel reserves one for its status
-        // row.
-        let list_area = Rect::new(0, 0, size.0, size.1.saturating_sub(3));
+        // The popup is anchored inside the list area: the panel fills the
+        // content area, so only the footer's two rows (§4.1) are left out.
+        let list_area = Rect::new(0, 0, size.0, size.1.saturating_sub(2));
         let popup = centered_rect(CONFIRM_PERCENT_X, CONFIRM_HEIGHT, list_area);
         let buffer = terminal.backend().buffer();
         let mut text = String::new();
@@ -528,7 +534,7 @@ mod tests {
             let mut list_state = ListState::default();
             list_state.select(Some(0));
             let mut picker_state = ListState::default();
-            let mut state = base_state(&dirs, None, &mut list_state, &mut picker_state);
+            let mut state = base_state(&dirs, &mut list_state, &mut picker_state);
             state.show_delete_confirm = true;
 
             let terminal = render_to_terminal(state, size.0, size.1);
@@ -563,7 +569,7 @@ mod tests {
             PathBuf::from("/home/user/code"),
             PathBuf::from("/home/user/docs"),
         ];
-        let mut state = base_state(&dirs, None, &mut list_state, &mut picker_state);
+        let mut state = base_state(&dirs, &mut list_state, &mut picker_state);
         state.show_picker = true;
         state.picker_dir = Path::new("/home/user");
         state.picker_entries = &entries;
@@ -597,7 +603,7 @@ mod tests {
         let mut list_state = ListState::default();
         let mut picker_state = ListState::default();
         picker_state.select(Some(0));
-        let mut state = base_state(&dirs, None, &mut list_state, &mut picker_state);
+        let mut state = base_state(&dirs, &mut list_state, &mut picker_state);
         state.show_picker = true;
         state.picker_dir = Path::new(&long);
         let text = render_to_text(state);
