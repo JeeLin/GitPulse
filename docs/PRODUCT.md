@@ -35,35 +35,44 @@
 
 ### 做什么
 
+> 功能状态标记（由 `mdflow-planner` 唯一维护，缺省无标记 = `[待规划]`）：
+> `[待规划]` 未纳入任何里程碑 · `[已规划]` 已纳入且对应里程碑未完成 · `[x]` 已交付 · `[已放弃]` 决定不做
+
 **M1 本地核心闭环**
 
-- 项目骨架与配置管理（统一 `~/.gitpulse/` 单一路径来源）
-- 仓库发现与状态查询，在 TUI 启动时真实加载
-- 状态仪表盘渲染真数据，并可进入单仓库视图
-- 单仓库视图：文件状态列表、diff 查看、stage/unstage、discard（带确认框）、commit、push/pull（fast-forward only）
-- 批量 pull/fetch
-- 分支面板：分支列表、创建、切换、删除
-- 提交历史视图：提交列表 + 分支/tag/HEAD 标记 + DAG 拓扑 + 提交详情
-- tag 管理：列表、创建、删除（确认框）、推送到远端
+- [x] 项目骨架与配置管理（统一 `~/.gitpulse/` 单一路径来源）
+- [x] 仓库发现与状态查询，在 TUI 启动时真实加载
+- [x] 状态仪表盘渲染真数据，并可进入单仓库视图
+- [x] 单仓库视图：文件状态列表、diff 查看、stage/unstage、discard（带确认框）、commit、push/pull（fast-forward only）
+- [x] 批量 pull/fetch
+- [x] 分支面板：分支列表、创建、切换、删除
+- [x] 提交历史视图：提交列表 + 分支/tag/HEAD 标记 + DAG 拓扑 + 提交详情
+- [x] tag 管理：列表、创建、删除（确认框）、推送到远端
 
 **M2 单平台远端回执**
 
-- PR 列表与详情
-- CI checks 状态
-- Issues
-- 通知
-- 全部使用真实 API，禁止 mock（GitHub 先行）
+- [x] PR 列表与详情
+- [x] CI checks 状态
+- [x] Issues
+- [x] 通知
+- [x] 全部使用真实 API，禁止 mock（GitHub 先行）
 
 **M3 交互改版落地 (Adopt Interaction Design)**
 
-- 完成从头的交互设计规范 `docs/DESIGN.md`（统一 q/Esc/Enter 文法、五态面板、2 行页脚、视觉 Token、≤80 列 CJK 裁剪）
-- 把 v0.4.0 现有实现逐视图对齐规范；覆盖 dashboard/repo/diff/history/branches/tags/config/Hub 及 PR/checks/issues/通知详情
+- [x] 完成从头的交互设计规范 `docs/DESIGN.md`（统一 q/Esc/Enter 文法、五态面板、2 行页脚、视觉 Token、≤80 列 CJK 裁剪）
+- [已规划] 把 v0.4.0 现有实现逐视图对齐规范；覆盖 dashboard/repo/diff/history/branches/tags/config/Hub 及 PR/checks/issues/通知详情
+  - ⚠️ v0.5.0 里程碑按自身验收判 ✅，但用户复核发现实现未严格遵循规范（提示行 `j/k 选择g 进入` 段间无分隔、状态行在面板体与全局页脚双重渲染、仓库列表未固定左侧）→ 该功能项**未真正交付**，留待 v0.7.0 补齐
 
 **M4 多平台与收尾**
 
-- Gitea / GitLab 适配层
-- token 按 remote URL 自动匹配
+- [x] Gitea / GitLab 适配层
+- [x] token 按 remote URL 自动匹配
 - 按需补 worktree / 分组
+
+**后续里程碑候选**（已裁决移出 M4 的收尾项，尚未纳入任何里程碑）
+
+- [待规划] 项目级切换用户：按仓库查看/切换提交身份（user.name/email）
+  - ⚠️ 与多平台适配无耦合；`DEVELOPMENT.md` 曾列为 M4 子任务 3、本文档 M4 未列（三方口径不一致），v0.6.0 未实现。经裁决移出 M4、在此登记为候选，待后续里程碑规划时选入
 
 ### 不做什么
 
