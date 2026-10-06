@@ -582,8 +582,6 @@ pub struct App {
     pub branch_state: ListState,
     /// Index into `repos` whose branches the branch panel edits.
     branch_repo: Option<usize>,
-    /// View the branch panel returns to on Esc.
-    branches_from: View,
     /// Single-line branch name being typed in create mode.
     pub branch_input: String,
     /// Whether the branch-create input overlay is shown.
@@ -655,7 +653,6 @@ impl App {
             branches: Vec::new(),
             branch_state: ListState::default(),
             branch_repo: None,
-            branches_from: View::Dashboard,
             branch_input: String::new(),
             show_branch_input: false,
             show_branch_delete_confirm: false,
@@ -716,6 +713,44 @@ impl App {
             .unwrap_or(0);
         let step = if forward { 1 } else { panels.len() - 1 };
         self.focus = panels[(at + step) % panels.len()];
+    }
+
+    /// `<` / `>`: cycle the repo-workspace context tabs in place (DESIGN §6.2).
+    ///
+    /// The four contexts — `Repo` (工作区), `Branches`, `History`, `Tags` — are
+    /// siblings, so switching never enters the navigation stack: only
+    /// [`App::view`] changes and the target context's loader is re-run. Outside
+    /// the workspace (`<`/`>` on the dashboard, the receipts hub, config, …) the
+    /// keys are inert, matching the "reserved for the workspace" reading.
+    fn cycle_repo_context(&mut self, forward: bool) {
+        if !matches!(
+            self.view,
+            View::Repo | View::Branches | View::History | View::Tags
+        ) {
+            return;
+        }
+        let next = match (self.view, forward) {
+            (View::Repo, true) => View::Branches,
+            (View::Branches, true) => View::History,
+            (View::History, true) => View::Tags,
+            (View::Tags, true) => View::Repo,
+            (View::Repo, false) => View::Tags,
+            (View::Branches, false) => View::Repo,
+            (View::History, false) => View::Branches,
+            (View::Tags, false) => View::History,
+            _ => return,
+        };
+        self.view = next;
+        match next {
+            View::Branches => self.load_branches(),
+            View::History => self.load_history(),
+            View::Tags => self.load_tags(),
+            View::Repo => {
+                self.clear_error();
+                self.clear_load_error();
+            }
+            _ => {}
+        }
     }
 
     /// Record the result of an operation the user triggered on the status row
@@ -1686,13 +1721,19 @@ impl App {
     /// Enter the branch panel for the selected (dashboard) or current (repo)
     /// repository.
     ///
-    /// The origin view is recorded so Esc returns there; the branch list is
-    /// loaded immediately, with a failure surfacing as the panel's `error`
-    /// state rather than an empty list masquerading as success (§4.3,
-    /// checkpoint 2).
+    /// The panel always acts on one specific repository: from the dashboard
+    /// that is the selected row, from the repo view it is `current_repo`. The
+    /// chosen index is recorded on `branch_repo` so this is also the panel the
+    /// `<`/`>` context cycling resolves against; the branch list is loaded
+    /// immediately, with a failure surfacing as the panel's `error` state
+    /// rather than an empty list masquerading as success (§4.3, checkpoint 2).
+    ///
+    /// Design note: branches is a context tab of the repo workspace (DESIGN
+    /// §6.2), not a stacked screen, so Esc returns to the repo view rather than
+    /// to whatever screen opened the panel — there is no origin view to
+    /// remember.
     pub fn enter_branches(&mut self) {
-        let origin = self.view;
-        let idx = match origin {
+        let idx = match self.view {
             View::Dashboard => self.dashboard_state.selected(),
             View::Repo => self.current_repo,
             _ => return,
@@ -1701,7 +1742,6 @@ impl App {
             return;
         };
         self.branch_repo = Some(idx);
-        self.branches_from = origin;
         self.branch_state.select(None);
         self.branch_input.clear();
         self.show_branch_input = false;
@@ -1710,9 +1750,13 @@ impl App {
         self.load_branches();
     }
 
-    /// Return from the branch panel to the view it was opened from.
+    /// Leave the branch panel.
+    ///
+    /// Branches is a sibling context tab of the repo workspace (DESIGN §6.2),
+    /// so `Esc` lands on the repo view — the workspace's default context —
+    /// rather than retracing how the panel was opened.
     pub fn leave_branches(&mut self) {
-        self.view = self.branches_from;
+        self.view = View::Repo;
         self.show_branch_input = false;
         self.show_branch_delete_confirm = false;
         self.branch_input.clear();
@@ -1733,6 +1777,19 @@ impl App {
         self.repo_of(self.current_repo).map(|r| r.path.clone())
     }
 
+    /// Path of the repository the open workspace context acts on.
+    ///
+    /// A repo-scoped context reaches the open repo through `current_repo`; the
+    /// branch panel remembers the repo it was opened from as `branch_repo`,
+    /// because the dashboard can enter branches before a repo is opened
+    /// (dashboard `b`). `branch_repo` wins while it is set; otherwise the open
+    /// repo answers. `None` when neither index is valid (§4.3: callers render
+    /// the panel's `error` state rather than guessing a path).
+    fn repo_workspace_path(&self) -> Option<std::path::PathBuf> {
+        let idx = self.branch_repo.or(self.current_repo);
+        self.repo_of(idx).map(|r| r.path.clone())
+    }
+
     /// Enter the commit-history view for the current repository (repo `h`).
     ///
     /// The list loads immediately with the first commit selected and its
@@ -1740,7 +1797,7 @@ impl App {
     /// No-op when no valid repository is open, so a stale cursor can never
     /// open the view against the wrong path.
     pub fn enter_history(&mut self) {
-        if self.current_repo_path().is_none() {
+        if self.repo_workspace_path().is_none() {
             return;
         }
         self.view = View::History;
@@ -1766,7 +1823,7 @@ impl App {
     /// (§4.3, checkpoint 2); an empty result is a valid state and keeps both
     /// faces clean.
     pub fn load_history(&mut self) {
-        let Some(path) = self.current_repo_path() else {
+        let Some(path) = self.repo_workspace_path() else {
             self.set_load_error(invalid_repo_msg("历史视图"));
             self.history.clear();
             return;
@@ -1813,7 +1870,7 @@ impl App {
             self.history.detail = None;
             return;
         };
-        let Some(path) = self.current_repo_path() else {
+        let Some(path) = self.repo_workspace_path() else {
             self.history.detail = None;
             self.set_load_error(invalid_repo_msg("历史视图"));
             return;
@@ -1838,7 +1895,7 @@ impl App {
     /// open, so a stale cursor can never open the panel against the wrong
     /// path.
     pub fn enter_tags(&mut self) {
-        if self.current_repo_path().is_none() {
+        if self.repo_workspace_path().is_none() {
             return;
         }
         self.view = View::Tags;
@@ -1866,7 +1923,7 @@ impl App {
     /// (§4.3, checkpoint 2); an empty result is a valid state and keeps both
     /// faces clean.
     pub fn load_tags(&mut self) {
-        let Some(path) = self.current_repo_path() else {
+        let Some(path) = self.repo_workspace_path() else {
             self.set_load_error(invalid_repo_msg("标签面板"));
             self.tags_state.clear();
             return;
@@ -2340,11 +2397,6 @@ impl App {
         self.repo_of(self.branch_repo).map_or("", |r| &r.name)
     }
 
-    /// Path of the repository the branch panel edits, when still valid.
-    fn branch_repo_path(&self) -> Option<std::path::PathBuf> {
-        self.repo_of(self.branch_repo).map(|r| r.path.clone())
-    }
-
     /// Name of the currently selected branch, if any.
     fn selected_branch(&self) -> Option<String> {
         self.branch_state
@@ -2360,7 +2412,7 @@ impl App {
     /// reaches the panel's `error` state, so a failed load never looks like an
     /// empty repository (§4.3, checkpoint 2).
     pub fn load_branches(&mut self) {
-        let Some(path) = self.branch_repo_path() else {
+        let Some(path) = self.repo_workspace_path() else {
             self.set_load_error(invalid_repo_msg("分支面板"));
             self.branches.clear();
             self.branch_state.select(None);
@@ -2395,7 +2447,7 @@ impl App {
     /// Switch to the selected branch, then refresh the affected views
     /// (convention 5).
     pub fn switch_to_selected_branch(&mut self) {
-        let (Some(path), Some(name)) = (self.branch_repo_path(), self.selected_branch()) else {
+        let (Some(path), Some(name)) = (self.repo_workspace_path(), self.selected_branch()) else {
             return;
         };
         match git::switch_branch(&path, &name) {
@@ -2409,7 +2461,7 @@ impl App {
 
     /// Open the single-line branch name input (convention 9).
     pub fn start_branch_create(&mut self) {
-        if self.branch_repo_path().is_none() {
+        if self.repo_workspace_path().is_none() {
             return;
         }
         self.branch_input.clear();
@@ -2432,7 +2484,7 @@ impl App {
     /// [`App::submit_name_create`]; the panel-specific refresh stays here.
     pub fn submit_branch_create(&mut self) {
         let name = self.branch_input.trim().to_string();
-        let path = self.branch_repo_path();
+        let path = self.repo_workspace_path();
         // `false`: the branch panel never renders push feedback, so it keeps
         // its historical no-op and leaves a settled remote result alone.
         let created = self.submit_name_create(&name, "分支", path, false, |path| {
@@ -2501,7 +2553,7 @@ impl App {
     /// Open the delete confirmation for the selected branch (discard-style
     /// confirmation, convention 8).
     pub fn start_branch_delete(&mut self) {
-        if self.branch_repo_path().is_some() && self.selected_branch().is_some() {
+        if self.repo_workspace_path().is_some() && self.selected_branch().is_some() {
             self.show_branch_delete_confirm = true;
             self.show_branch_input = false;
         }
@@ -2516,7 +2568,7 @@ impl App {
     /// (convention 5).
     pub fn confirm_branch_delete(&mut self) {
         self.show_branch_delete_confirm = false;
-        let (Some(path), Some(name)) = (self.branch_repo_path(), self.selected_branch()) else {
+        let (Some(path), Some(name)) = (self.repo_workspace_path(), self.selected_branch()) else {
             return;
         };
         match git::delete_branch(&path, &name) {
@@ -2593,10 +2645,11 @@ impl App {
             // so `Esc` keeps its single meaning afterwards (§3.1).
             KeyCode::Tab => self.cycle_panel_focus(true),
             KeyCode::BackTab => self.cycle_panel_focus(false),
-            // Context tags are the sibling navigation dimension and stay
-            // reserved for the repo-workspace tabs (DESIGN §6.2).
-            KeyCode::Char('<') if is_plain(key) => {}
-            KeyCode::Char('>') if is_plain(key) => {}
+            // Context tags are the sibling navigation dimension — `<`/`>` cycle
+            // the repo-workspace contexts (DESIGN §6.2: 工作区 · 分支 · 历史 · 标签)
+            // in place without entering the stack. No-op outside the workspace.
+            KeyCode::Char('<') if is_plain(key) => self.cycle_repo_context(true),
+            KeyCode::Char('>') if is_plain(key) => self.cycle_repo_context(false),
             KeyCode::Char('r') if is_plain(key) => self.refresh_current_view(),
             // Search/filter state lands with the view subtasks; owning the
             // key here keeps it from ever falling through to a view verb.
@@ -3939,13 +3992,9 @@ mod tests {
         app.dashboard_state.select(Some(0));
         app.enter_repo();
 
-        for code in [
-            KeyCode::Tab,
-            KeyCode::BackTab,
-            KeyCode::Char('<'),
-            KeyCode::Char('>'),
-            KeyCode::Char('/'),
-        ] {
+        // `Tab`/`BackTab`/`/` stay on the screen — focus and search never enter
+        // the stack, so a single `Esc` reaches the dashboard.
+        for code in [KeyCode::Tab, KeyCode::BackTab, KeyCode::Char('/')] {
             assert!(app.dispatch_key(key(code)));
             assert_eq!(app.view, View::Repo, "{code:?} must stay on the screen");
             assert!(app.status.is_none());
@@ -3958,6 +4007,82 @@ mod tests {
             app.enter_repo();
             assert_eq!(app.view, View::Repo);
         }
+
+        // `<`/`>` are the workspace context tags (DESIGN §6.2): they switch the
+        // context in place — `Repo -> Branches -> History -> Tags -> Repo` (and
+        // the reverse for `>`) — without pushing a stack level. `Esc` from any
+        // context returns to the workspace, not the dashboard, so popping the
+        // workspace still takes exactly the one `Esc` it always did.
+        assert!(app.dispatch_key(key(KeyCode::Char('<'))));
+        assert_eq!(app.view, View::Branches, "`<` moves one context forward");
+        assert!(app.status.is_none());
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Repo, "context switch is not a stack level");
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
+        assert_eq!(
+            app.view,
+            View::Dashboard,
+            "only the workspace push is popped by `Esc`"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §1.1/§6.2: `<`/`>` are the repo-workspace context tabs — they cycle
+    /// `Repo -> Branches -> History -> Tags -> Repo` (and the reverse) in place
+    /// without changing stack depth, and are inert outside the workspace.
+    #[test]
+    fn ctx_cycle_switches_workspace_tabs_in_place_and_is_inert_off_screen() {
+        let dir = temp_dir("ctx-cycle");
+        init_repo_with_commit(&dir);
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert_eq!(app.view, View::Repo);
+
+        // Forward: Repo -> Branches -> History -> Tags -> Repo
+        for want in [View::Branches, View::History, View::Tags, View::Repo] {
+            assert!(app.dispatch_key(key(KeyCode::Char('<'))));
+            assert_eq!(app.view, want, "forward cycle through {want:?}");
+        }
+
+        // Backward from Repo: Repo -> Tags -> History -> Branches -> Repo
+        for want in [View::Tags, View::History, View::Branches, View::Repo] {
+            assert!(app.dispatch_key(key(KeyCode::Char('>'))));
+            assert_eq!(app.view, want, "backward cycle through {want:?}");
+        }
+
+        // A context switch is not a stack level: Esc from a context returns to
+        // the workspace, and only escaping the workspace itself reaches the
+        // dashboard.
+        assert!(app.dispatch_key(key(KeyCode::Char('<'))));
+        assert_eq!(app.view, View::Branches);
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
+        assert_eq!(
+            app.view,
+            View::Repo,
+            "Esc from a context lands on the workspace"
+        );
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
+        assert_eq!(
+            app.view,
+            View::Dashboard,
+            "escaping the workspace pops the stack"
+        );
+
+        // Off-workspace keys are inert: `<`/`>` stay put on the dashboard.
+        assert!(app.dispatch_key(key(KeyCode::Char('<'))));
+        assert_eq!(
+            app.view,
+            View::Dashboard,
+            "`<` is inert outside the workspace"
+        );
+        assert!(app.dispatch_key(key(KeyCode::Char('>'))));
+        assert_eq!(
+            app.view,
+            View::Dashboard,
+            "`>` is inert outside the workspace"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -6094,10 +6219,16 @@ mod tests {
         let sel = app.branch_state.selected().unwrap();
         assert!(app.branches[sel].is_head);
         assert_eq!(app.branch_repo, Some(0));
-        assert_eq!(app.branches_from, View::Dashboard);
+        // `branches_from` is gone: the repo the dashboard selected is now
+        // remembered on `branch_repo` (DESIGN §6.2: branches is a workspace
+        // context tab, not a stacked screen that needs its origin recorded).
+        assert_eq!(app.branch_repo, app.dashboard_state.selected());
 
         assert!(app.dispatch_key(key(KeyCode::Esc)));
-        assert_eq!(app.view, View::Dashboard);
+        // Esc leaves the branch context for the repo workspace (§6.2), so it
+        // lands on `View::Repo` — the workspace default context — rather than
+        // back on the dashboard.
+        assert_eq!(app.view, View::Repo);
         assert!(app.status.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -6155,10 +6286,11 @@ mod tests {
         assert!(!app.show_branch_input);
         assert_eq!(app.view, View::Branches);
 
-        // q exits from the list; Esc leaves the panel back to the dashboard.
+        // q exits from the list; Esc leaves the panel for the repo workspace
+        // (branches is a context tab, so Esc lands on the repo view).
         assert!(!app.dispatch_key(key(KeyCode::Char('q'))));
         assert!(app.dispatch_key(key(KeyCode::Esc)));
-        assert_eq!(app.view, View::Dashboard);
+        assert_eq!(app.view, View::Repo);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
