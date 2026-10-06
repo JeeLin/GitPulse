@@ -645,7 +645,7 @@ mod tests {
         assert!(text.contains("↳选择当前目录"), "missing select row: {text}");
         assert!(text.contains("code/"), "missing subdir row: {text}");
         assert!(text.contains("docs/"), "missing subdir row: {text}");
-        assert!(text.contains("►"), "missing highlight: {text}");
+        assert!(text.contains("▌"), "missing highlight: {text}");
         assert!(text.contains("/home/user"), "missing path line: {text}");
         // The picker segment is read on the hint row itself: at 80 columns it
         // is right-truncated (§2.3), so the assertions use a frame wide

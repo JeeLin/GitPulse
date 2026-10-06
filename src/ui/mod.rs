@@ -19,16 +19,17 @@ pub mod tags;
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
-use crate::app::{App, View};
+use crate::app::{App, PanelFocus, View};
 use crate::git::{FileState, RepoInfo};
 use crate::ui::components::footer::hints as join_hints;
 use crate::ui::components::footer::{self, HintRow, StatusRow};
+use crate::ui::components::theme::{self, color};
 use crate::ui::dashboard::DashboardState;
 use crate::ui::status::{RemoteStatus, StatusLine};
 
@@ -36,16 +37,32 @@ use crate::ui::status::{RemoteStatus, StatusLine};
 /// views keep building their segments through `super::hint`.
 pub(crate) use crate::ui::components::footer::hint;
 
-/// Shared selection style for every list: dark background + bold keeps the
-/// cursor row readable on any block style.
+/// Shared selection style of the focused list's cursor row (§3.1): the
+/// canonical `surface_alt` background, and nothing else — the design picked
+/// the background over an accent foreground for the cursor.
 pub(crate) fn list_highlight() -> Style {
-    Style::default()
-        .bg(Color::DarkGray)
-        .add_modifier(Modifier::BOLD)
+    Style::default().bg(color::SURFACE_ALT)
 }
 
-/// Marker rendered before the selected list row.
-pub(crate) const HIGHLIGHT_SYMBOL: &str = "► ";
+/// Marker rendered at the row start of the focused list's selected row
+/// (§3.1: 行首 `▌` + `surface_alt` 底色). One cell wide, so a selected row
+/// keeps every column the unselected rows use.
+pub(crate) const HIGHLIGHT_SYMBOL: &str = "▌";
+
+/// Wire the §3.1 cursor onto a list panel: when `focused`, the selected row
+/// carries `▌` over the `surface_alt` background; otherwise the list shows
+/// neither, because the cursor exists only in the focused list panel.
+///
+/// One place, so every list in the app draws the same cursor — a panel cannot
+/// keep a private marker or a private highlight.
+pub(crate) fn with_cursor(list: List<'static>, focused: bool) -> List<'static> {
+    if focused {
+        list.highlight_style(list_highlight())
+            .highlight_symbol(HIGHLIGHT_SYMBOL)
+    } else {
+        list.highlight_symbol("")
+    }
+}
 
 /// Bottom hint row of every y/n confirmation overlay (convention 8): the
 /// `y` / `n` wording of the overlay itself plus the dismiss key. Every panel
@@ -126,31 +143,49 @@ pub(crate) fn named_title(label: &str, repo_name: &str, count: usize) -> String 
 /// data; a failed load is not rendered here at all — it paints the panel's
 /// `error` state instead (§4.3). The rows are handed in already built because
 /// each panel maps its own item type to a [`ListItem`]; only the block, the
-/// highlight style and the highlight symbol are shared.
+/// border role and the cursor are shared.
+///
+/// `focused` is the panel's focus per §3.1: it picks the border (`border_focus`
+/// against `border`) and whether the list draws the `▌` / `surface_alt` cursor.
+///
+/// The four descriptor fields travel together as [`NamedPanel`] so the call
+/// stays within the argument budget and one panel's identity — what it is
+/// called, which repository it reads, what it says when empty, and whether it
+/// holds focus — is visible at a glance.
+pub(crate) struct NamedPanel<'a> {
+    /// Panel title prefix, e.g. `提交历史` / `标签`.
+    pub label: &'a str,
+    /// Repository shown in the title; empty when the panel is global.
+    pub repo_name: &'a str,
+    /// Copy rendered when `items` is empty — a valid state, not a failure.
+    pub empty: &'static str,
+    /// Panel focus per §3.1.
+    pub focused: bool,
+}
+
 pub(crate) fn render_named_list(
     f: &mut Frame,
     area: Rect,
-    label: &str,
-    repo_name: &str,
-    empty: &'static str,
+    meta: NamedPanel<'_>,
     items: Vec<ListItem<'static>>,
     list_state: &mut ListState,
 ) {
     let block = Block::default()
-        .title(named_title(label, repo_name, items.len()))
-        .borders(Borders::ALL);
+        .title(named_title(meta.label, meta.repo_name, items.len()))
+        .borders(Borders::ALL)
+        .border_style(theme::role::border(meta.focused));
 
     if items.is_empty() {
-        let paragraph =
-            Paragraph::new(Span::styled(empty, Style::default().fg(Color::DarkGray))).block(block);
+        let paragraph = Paragraph::new(Span::styled(
+            meta.empty,
+            Style::default().fg(Color::DarkGray),
+        ))
+        .block(block);
         f.render_widget(paragraph, area);
         return;
     }
 
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(list_highlight())
-        .highlight_symbol(HIGHLIGHT_SYMBOL);
+    let list = with_cursor(List::new(items).block(block), meta.focused);
     f.render_stateful_widget(list, area, list_state);
 }
 
@@ -370,6 +405,9 @@ fn repo_name_of(repos: &[RepoInfo], index: Option<usize>) -> &str {
 /// Dashboard arm of [`render`].
 fn render_dashboard_view(f: &mut Frame, content: Rect, app: &mut App) {
     let batch_running = app.batch_running();
+    // Read the focus flag before the cursor borrow below: the accessor takes
+    // `&App`, which cannot coexist with `&mut app.dashboard_state` (§3.1).
+    let focused = app.panel_is_focused(PanelFocus::Primary);
     let mut state = DashboardState {
         repos: &app.repos,
         load_error: app.load_error.as_deref(),
@@ -377,6 +415,7 @@ fn render_dashboard_view(f: &mut Frame, content: Rect, app: &mut App) {
         batch_log: &app.batch_log,
         batch_op: app.batch_op,
         batch_running,
+        focused,
     };
     dashboard::render_dashboard(f, content, &mut state);
 }
@@ -384,6 +423,7 @@ fn render_dashboard_view(f: &mut Frame, content: Rect, app: &mut App) {
 /// Repo arm of [`render`]: the file list plus the discard confirmation.
 fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
     let sel = app.file_state.selected();
+    let focused = app.panel_is_focused(PanelFocus::Primary);
     let confirm_file = if app.show_discard_confirm {
         sel.and_then(|i| app.file_entries.get(i))
     } else {
@@ -395,6 +435,7 @@ fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
         show_discard_confirm: app.show_discard_confirm,
         confirm_file,
         load_error: app.load_error.as_deref(),
+        focused,
     };
     repo::render_repo(f, content, state);
 }
@@ -402,12 +443,14 @@ fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
 /// Commit arm of [`render`]: repo view as background, commit input popup on
 /// top.
 fn render_commit_view(f: &mut Frame, content: Rect, app: &mut App) {
+    let focused = app.panel_is_focused(PanelFocus::Primary);
     let state = repo::RepoState {
         entries: &app.file_entries,
         list_state: &mut app.file_state,
         show_discard_confirm: false,
         confirm_file: None,
         load_error: app.load_error.as_deref(),
+        focused,
     };
     repo::render_repo(f, content, state);
     commit::render_commit_popup(f, &app.commit_message);
@@ -427,6 +470,7 @@ fn render_branches_view(f: &mut Frame, content: Rect, app: &mut App) {
     // the `&mut` cursor borrow below. Unlike the history/tags arms the copy
     // cannot be dropped without exposing the private index (G25).
     let repo_name = app.branch_repo_name().to_string();
+    let focused = app.panel_is_focused(PanelFocus::Primary);
     let state = branches::BranchesState {
         branches: &app.branches,
         list_state: &mut app.branch_state,
@@ -436,6 +480,7 @@ fn render_branches_view(f: &mut Frame, content: Rect, app: &mut App) {
         show_delete_confirm: app.show_branch_delete_confirm,
         confirm_branch: confirm,
         load_error: app.load_error.as_deref(),
+        focused,
     };
     branches::render_branches(f, content, state);
 }
@@ -465,6 +510,7 @@ fn render_config_view(f: &mut Frame, content: Rect, app: &mut App) {
 /// (the title) coexist as disjoint fields of `App`.
 fn render_history_view(f: &mut Frame, content: Rect, app: &mut App) {
     let repo_name = repo_name_of(&app.repos, app.current_repo);
+    let focused = app.panel_is_focused(PanelFocus::Primary);
     let state = history::HistoryRender {
         commits: &app.history.commits,
         detail: app.history.detail.as_ref(),
@@ -473,6 +519,7 @@ fn render_history_view(f: &mut Frame, content: Rect, app: &mut App) {
         selected: app.history.selected,
         repo_name,
         load_error: app.load_error.as_deref(),
+        focused,
     };
     history::render_history(f, content, state);
 }
@@ -483,12 +530,14 @@ fn render_history_view(f: &mut Frame, content: Rect, app: &mut App) {
 /// (the title) coexist as disjoint fields of `App`.
 fn render_tags_view(f: &mut Frame, content: Rect, app: &mut App) {
     let repo_name = repo_name_of(&app.repos, app.current_repo);
+    let focused = app.panel_is_focused(PanelFocus::Primary);
     let state = tags::TagsRender {
         tags: &app.tags_state.tags,
         list_state: &mut app.tags_state.list_state,
         modal: app.tags_state.modal.as_ref(),
         repo_name,
         load_error: app.load_error.as_deref(),
+        focused,
     };
     tags::render_tags(f, content, state);
 }
@@ -1182,5 +1231,114 @@ mod tests {
         assert!(text.contains("命令面板"), "missing palette title: {text}");
         assert!(text.contains("仪表盘"), "missing dashboard target: {text}");
         assert!(text.contains("分支"), "missing branch target: {text}");
+    }
+
+    /// §3.1 assertion 2: the cursor is the canonical `▌` at the row start over
+    /// the `surface_alt` background — one shape for every list, drawn only by
+    /// the focused panel.
+    #[test]
+    fn the_focused_list_cursor_is_the_bar_over_surface_alt() {
+        let mut app = base_app();
+        app.repos = vec![RepoInfo {
+            name: "alpha".to_string(),
+            path: std::path::PathBuf::from("/tmp/alpha"),
+            branch: "main".to_string(),
+            dirty: Default::default(),
+            ahead: 0,
+            behind: 0,
+            last_commit: Default::default(),
+        }];
+        app.dashboard_state.select(Some(0));
+
+        let buffer = render_buffer(&mut app);
+        let cursor = cursor_cells(&buffer);
+        assert_eq!(
+            cursor.len(),
+            1,
+            "exactly one focused panel draws the cursor: {cursor:?}"
+        );
+
+        let (x, y) = cursor[0];
+        assert_eq!(
+            buffer[(x, y)].symbol(),
+            HIGHLIGHT_SYMBOL,
+            "the cursor marker must be `▌` at the row start"
+        );
+        assert_eq!(
+            buffer[(x, y)].bg,
+            color::SURFACE_ALT,
+            "the cursor row must wear the `surface_alt` background"
+        );
+
+        // The whole selected row shares that background, not just the marker
+        // cell — §3.1 calls for a 底色 on the cursor row. Only the panel's own
+        // border glyphs are exempt: they are chrome, not cursor-row content.
+        let stray: Vec<_> = (0..buffer.area.width)
+            .filter(|col| !matches!(buffer[(*col, y)].symbol(), "│" | "┌" | "┐" | "└" | "┘"))
+            .map(|col| (col, buffer[(col, y)].bg))
+            .filter(|(_, bg)| *bg != color::SURFACE_ALT)
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "every content cell of the cursor row must be `surface_alt`: {stray:?}"
+        );
+    }
+
+    /// §3.1 assertion 1: exactly one panel wears `border_focus` at a time, every
+    /// other panel keeps the muted `border`, and `Tab` moves which panel that
+    /// is. The history screen is the one that draws a preview pane beside its
+    /// commit list, so it is where the two are both on screen.
+    #[test]
+    fn one_focused_panel_wears_border_focus_and_the_rest_keep_the_muted_border() {
+        let mut app = base_app();
+        app.view = View::History;
+        app.history.list_state.select(Some(0));
+
+        let on_list = render_buffer(&mut app);
+        app.cycle_panel_focus(true);
+        let on_preview = render_buffer(&mut app);
+
+        let focused_cells = |buffer: &ratatui::buffer::Buffer| -> Vec<(u16, u16)> {
+            (0..buffer.area.height)
+                .flat_map(|y| {
+                    (0..buffer.area.width)
+                        .filter(move |x| buffer[(*x, y)].fg == color::BORDER_FOCUS)
+                        .map(move |x| (x, y))
+                })
+                .collect()
+        };
+        let muted_cells = |buffer: &ratatui::buffer::Buffer| -> usize {
+            (0..buffer.area.height)
+                .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+                .filter(|(x, y)| buffer[(*x, *y)].fg == color::BORDER)
+                .count()
+        };
+
+        let list_focus = focused_cells(&on_list);
+        let preview_focus = focused_cells(&on_preview);
+        assert!(
+            !list_focus.is_empty() && !preview_focus.is_empty(),
+            "the focused panel must wear `border_focus` on both panes"
+        );
+        assert_ne!(
+            list_focus, preview_focus,
+            "`Tab` must move the `border_focus` border to another panel (§3.1)"
+        );
+        assert!(
+            muted_cells(&on_list) > 0 && muted_cells(&on_preview) > 0,
+            "every unfocused panel must keep the muted `border`"
+        );
+    }
+
+    /// Positions of every `▌` in the frame, so a test can assert the cursor
+    /// exists exactly once and sits at a row start.
+    fn cursor_cells(buffer: &ratatui::buffer::Buffer) -> Vec<(u16, u16)> {
+        (0..buffer.area.height)
+            .flat_map(|y| {
+                (0..buffer.area.width)
+                    .filter(move |x| buffer[(*x, y)].symbol() == HIGHLIGHT_SYMBOL)
+                    .map(move |x| (x, y))
+            })
+            .collect()
     }
 }

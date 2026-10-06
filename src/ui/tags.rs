@@ -34,6 +34,10 @@ pub struct TagsRender<'a> {
     /// Load failure of the tag list (§4.3): the panel shows its `error` state
     /// instead of the list.
     pub load_error: Option<&'a str>,
+    /// Whether the tag list holds the screen's panel focus (§3.1): it picks
+    /// the border (`border_focus` against `border`) and whether the list
+    /// draws the `▌` / `surface_alt` cursor.
+    pub focused: bool,
 }
 
 /// Render the tag list, plus the create/confirm overlays when active.
@@ -109,9 +113,12 @@ fn render_tag_list(f: &mut Frame, area: Rect, state: &mut TagsRender<'_>) {
     super::render_named_list(
         f,
         area,
-        "标签",
-        state.repo_name,
-        EMPTY_TAGS,
+        super::NamedPanel {
+            label: "标签",
+            repo_name: state.repo_name,
+            empty: EMPTY_TAGS,
+            focused: state.focused,
+        },
         items,
         state.list_state,
     );
@@ -238,6 +245,7 @@ mod tests {
             modal: None,
             repo_name: "demo",
             load_error: None,
+            focused: true,
         }
     }
 

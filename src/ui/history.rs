@@ -13,6 +13,7 @@ use crate::git::{CommitDetail, CommitRow, RefKind};
 use super::components::state_panel::{self, PanelState};
 use super::{hint, named_title, pulls};
 use crate::ui::components::footer::{hints as join_hints, HintRow};
+use crate::ui::components::theme::role;
 
 /// Inner width of the DAG column: one cell per lane, capped at the lanes
 /// `git::layout_graph` ever produces (`git::MAX_LANES`).
@@ -48,6 +49,10 @@ pub struct HistoryRender<'a> {
     /// Load failure of the commit list or of the detail payload (§4.3): the
     /// commit-list panel shows its `error` state instead of the list.
     pub load_error: Option<&'a str>,
+    /// Whether the commit list holds the screen's panel focus (§3.1): it
+    /// picks the border (`border_focus` against `border`) and whether the
+    /// list draws the `▌` / `surface_alt` cursor.
+    pub focused: bool,
 }
 
 /// Render the history view: DAG column, commit list and detail pane. The
@@ -114,9 +119,12 @@ fn render_commit_list(f: &mut Frame, area: Rect, state: &mut HistoryRender<'_>) 
     super::render_named_list(
         f,
         area,
-        "提交历史",
-        state.repo_name,
-        EMPTY_HISTORY,
+        super::NamedPanel {
+            label: "提交历史",
+            repo_name: state.repo_name,
+            empty: EMPTY_HISTORY,
+            focused: state.focused,
+        },
         items,
         state.list_state,
     );
@@ -165,8 +173,15 @@ fn render_graph(f: &mut Frame, area: Rect, state: &HistoryRender<'_>) {
         .map(|row| Line::from(row.iter().collect::<String>()))
         .collect();
 
+    // The DAG column is a context pane, never the focus target, so it wears
+    // the muted border unconditionally (§3.1).
     let paragraph = Paragraph::new(lines)
-        .block(Block::default().title("DAG").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("DAG")
+                .borders(Borders::ALL)
+                .border_style(role::border(false)),
+        )
         .scroll((state.list_state.offset() as u16, 0));
     f.render_widget(paragraph, area);
 }
@@ -174,9 +189,12 @@ fn render_graph(f: &mut Frame, area: Rect, state: &HistoryRender<'_>) {
 /// Detail pane: the complete commit message soft-wrapped, followed by the
 /// list of paths the commit changed.
 fn render_detail(f: &mut Frame, area: Rect, state: &HistoryRender<'_>) {
+    // The detail pane is the screen's preview panel, so it wears
+    // `border_focus` exactly while it holds the focus (§3.1).
     let block = Block::default()
         .title(detail_pane_title(state))
-        .borders(Borders::ALL);
+        .borders(Borders::ALL)
+        .border_style(role::border(state.focused));
 
     let paragraph = match state.detail {
         None => Paragraph::new(Span::styled(
@@ -307,6 +325,7 @@ mod tests {
                             selected: state.selected,
                             repo_name: "demo",
                             load_error,
+                            focused: true,
                         };
                         render_history(f, body, render)
                     },

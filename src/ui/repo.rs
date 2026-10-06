@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use super::components::state_panel::{self, PanelState};
+use super::components::theme::role;
 use super::{hint, pulls, render_confirm_overlay};
 use crate::git::FileEntry;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
@@ -29,6 +30,9 @@ pub struct RepoState<'a> {
     /// Load failure of the file list / repository status (§4.3): the panel
     /// shows its `error` state instead of the list.
     pub load_error: Option<&'a str>,
+    /// Whether this panel holds the screen's focus (§3.1): it picks the
+    /// border color and whether the list draws the `▌` / `surface_alt` cursor.
+    pub focused: bool,
 }
 
 /// Render the single-repo file status list, plus the discard confirmation
@@ -38,7 +42,16 @@ pub struct RepoState<'a> {
 /// an operation failure leaves the list exactly as it was.
 pub fn render_repo(f: &mut Frame, content: Rect, mut state: RepoState<'_>) {
     if let Some(message) = state.load_error {
-        state_panel::render_state_panel(f, content, "文件状态", &PanelState::Error { message });
+        // §4.3: the failure replaces the list. §3.1 still holds — the failed
+        // panel keeps the focus border, only the cursor is gone (an `error`
+        // state has none).
+        state_panel::render_state_panel_with_focus(
+            f,
+            content,
+            "文件状态",
+            &PanelState::Error { message },
+            state.focused,
+        );
         return;
     }
 
@@ -103,13 +116,10 @@ fn render_file_list(f: &mut Frame, area: Rect, state: &mut RepoState<'_>) {
 
     let block = Block::default()
         .title(format!("文件状态 ({} 文件)", state.entries.len()))
-        .borders(Borders::ALL);
+        .borders(Borders::ALL)
+        .border_style(role::border(state.focused));
 
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(super::list_highlight())
-        .highlight_symbol(super::HIGHLIGHT_SYMBOL);
-
+    let list = super::with_cursor(List::new(items).block(block), state.focused);
     f.render_stateful_widget(list, area, state.list_state);
 }
 
@@ -169,6 +179,7 @@ mod tests {
             show_discard_confirm: false,
             confirm_file: None,
             load_error: None,
+            focused: true,
         }
     }
 

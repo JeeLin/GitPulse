@@ -105,6 +105,17 @@ pub mod role {
         Style::default().fg(color::FG_MUTED)
     }
 
+    /// Panel border: `border_focus` for the one panel that holds focus,
+    /// `border` for every other (§3.1). Exactly one panel is focused at a
+    /// time, so this pair is how the focus becomes visible.
+    pub fn border(focused: bool) -> Style {
+        Style::default().fg(if focused {
+            color::BORDER_FOCUS
+        } else {
+            color::BORDER
+        })
+    }
+
     /// Key cap in the hint row: bold accent (§2.3).
     pub fn key() -> Style {
         Style::default()
@@ -175,5 +186,14 @@ mod tests {
         assert!(role::title().add_modifier.contains(Modifier::BOLD));
         assert!(role::heading().add_modifier.contains(Modifier::BOLD));
         assert_eq!(role::body().fg, None);
+    }
+
+    /// §3.1: the focus is visible — the focused panel's border is
+    /// `border_focus`, every other panel's is `border`.
+    #[test]
+    fn border_role_separates_the_focused_panel_from_the_rest() {
+        assert_eq!(role::border(true).fg, Some(color::BORDER_FOCUS));
+        assert_eq!(role::border(false).fg, Some(color::BORDER));
+        assert_ne!(color::BORDER_FOCUS, color::BORDER);
     }
 }

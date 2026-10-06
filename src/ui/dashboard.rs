@@ -14,6 +14,7 @@ use crate::git::RepoInfo;
 use super::{hint, pulls};
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 use crate::ui::components::state_panel::{self, PanelState};
+use crate::ui::components::theme::role;
 
 /// Borrowed render state for the dashboard, referencing `App.repos` directly
 /// so no mock data source exists (checkpoint 2).
@@ -31,6 +32,10 @@ pub struct DashboardState<'a> {
     pub batch_op: &'static str,
     /// Whether the batch operation is still running.
     pub batch_running: bool,
+    /// Whether the repository list holds the screen's focus (§3.1): it picks
+    /// the border color and whether the list draws the `▌` / `surface_alt`
+    /// cursor.
+    pub focused: bool,
 }
 
 /// Bordered-block title shared by every dashboard state: the product label
@@ -67,11 +72,12 @@ pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState
     let batch_area = (batch_rows > 0).then(|| chunks[1]);
 
     if let Some(message) = state.load_error {
-        state_panel::render_state_panel(
+        state_panel::render_state_panel_with_focus(
             f,
             list_area,
             "GitPulse 仓库状态",
             &PanelState::Error { message },
+            state.focused,
         );
         return;
     }
@@ -79,7 +85,7 @@ pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState
     // Empty state: scan dirs may be unconfigured or simply contain no repos,
     // so guide the user into the config panel instead of an empty list.
     if state.repos.is_empty() {
-        render_empty_state(f, list_area);
+        render_empty_state(f, list_area, state.focused);
     } else {
         render_repo_list(f, list_area, state);
     }
@@ -134,13 +140,10 @@ fn render_repo_list(f: &mut Frame, area: Rect, state: &mut DashboardState<'_>) {
 
     let block = Block::default()
         .title(dashboard_title(state.repos.len()))
-        .borders(Borders::ALL);
+        .borders(Borders::ALL)
+        .border_style(role::border(state.focused));
 
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(super::list_highlight())
-        .highlight_symbol(super::HIGHLIGHT_SYMBOL);
-
+    let list = super::with_cursor(List::new(items).block(block), state.focused);
     f.render_stateful_widget(list, area, state.list_state);
 }
 
@@ -175,17 +178,23 @@ fn render_batch_log(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
             ])
         })
         .collect();
-    let block = Block::default().title(title).borders(Borders::ALL);
+    // The batch log is not a focusable panel (§1.1): it has no cursor and no
+    // verbs of its own, so it always wears the unfocused border.
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(role::border(false));
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// Replace the list body with a centered hint that points at the config panel
 /// (`c`), keeping the usual bordered title and row count. The wording stays
 /// neutral because an empty list has more than one cause.
-fn render_empty_state(f: &mut Frame, area: Rect) {
+fn render_empty_state(f: &mut Frame, area: Rect, focused: bool) {
     let block = Block::default()
         .title(dashboard_title(0))
-        .borders(Borders::ALL);
+        .borders(Borders::ALL)
+        .border_style(role::border(focused));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -365,6 +374,7 @@ mod tests {
             batch_log: &[],
             batch_op: "",
             batch_running: false,
+            focused: true,
         });
         assert!(text.contains("alpha"), "missing name: {text}");
         assert!(text.contains("beta"), "missing name: {text}");
@@ -386,6 +396,7 @@ mod tests {
             batch_log: &[],
             batch_op: "",
             batch_running: false,
+            focused: true,
         }));
         assert!(text.contains("加载失败"), "missing error title: {text}");
         assert!(
@@ -411,6 +422,7 @@ mod tests {
                 batch_log: &[],
                 batch_op: "",
                 batch_running: false,
+                focused: true,
             },
             Some(&crate::ui::status::StatusLine {
                 message: "refreshed: 3 repos".to_string(),
@@ -442,6 +454,7 @@ mod tests {
                 batch_log: &[],
                 batch_op: "",
                 batch_running: false,
+                focused: true,
             },
             "批量 pull 完成: 1 成功 / 1 失败",
         );
@@ -479,6 +492,7 @@ mod tests {
             batch_log: &batch_log,
             batch_op: "pull",
             batch_running: true,
+            focused: true,
         });
         // Wide CJK glyphs leave padding cells; compare whitespace-stripped.
         let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
@@ -511,6 +525,7 @@ mod tests {
             batch_log: &[],
             batch_op: "",
             batch_running: false,
+            focused: true,
         });
         let compact = compact(&text);
         assert!(
@@ -535,6 +550,7 @@ mod tests {
             batch_log: &[],
             batch_op: "",
             batch_running: false,
+            focused: true,
         });
         let compact = compact(&text);
         assert!(compact.contains("alpha"), "missing repo: {compact}");
@@ -554,6 +570,7 @@ mod tests {
             batch_log: &[],
             batch_op: "",
             batch_running: false,
+            focused: true,
         });
         let compact = compact(&text);
         assert!(compact.contains("扫描仓库失败"), "missing error: {compact}");

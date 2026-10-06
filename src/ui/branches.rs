@@ -12,6 +12,7 @@ use crate::git::BranchInfo;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 
 use super::components::state_panel::{self, PanelState};
+use super::components::theme::role;
 use super::{hint, pulls};
 
 /// Borrowed render state for the branch panel, referencing `App.branches`
@@ -34,6 +35,9 @@ pub struct BranchesState<'a> {
     /// Load failure of the branch list (§4.3): the panel shows its `error`
     /// state instead of the list.
     pub load_error: Option<&'a str>,
+    /// Whether the branch list holds the screen's focus (§3.1): it picks the
+    /// border color and whether the list draws the `▌` / `surface_alt` cursor.
+    pub focused: bool,
 }
 
 /// Render the branch list, plus the create/confirm overlays when active.
@@ -47,11 +51,12 @@ pub struct BranchesState<'a> {
 /// (checkpoint 2) and an operation failure leaves the list untouched.
 pub fn render_branches(f: &mut Frame, content: Rect, mut state: BranchesState<'_>) {
     if let Some(message) = state.load_error {
-        state_panel::render_state_panel(
+        state_panel::render_state_panel_with_focus(
             f,
             content,
             &branch_title(state.repo_name, 0),
             &PanelState::Error { message },
+            state.focused,
         );
         return;
     }
@@ -138,13 +143,10 @@ fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) 
 
     let block = Block::default()
         .title(branch_title(state.repo_name, state.branches.len()))
-        .borders(Borders::ALL);
+        .borders(Borders::ALL)
+        .border_style(role::border(state.focused));
 
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(super::list_highlight())
-        .highlight_symbol(super::HIGHLIGHT_SYMBOL);
-
+    let list = super::with_cursor(List::new(items).block(block), state.focused);
     f.render_stateful_widget(list, area, state.list_state);
 }
 
@@ -192,6 +194,7 @@ mod tests {
             show_delete_confirm: false,
             confirm_branch: None,
             load_error: None,
+            focused: true,
         }
     }
 

@@ -73,9 +73,27 @@ pub enum PanelState<'a> {
 /// return its inner rect.
 ///
 /// The inner rect is what `ready` / `success-flash` callers fill with their
-/// rows; the other three states are complete once this returns.
+/// rows; the other three states are complete once this returns. The panel is
+/// drawn unfocused — see [`render_state_panel_with_focus`].
 pub fn render_state_panel(f: &mut Frame, area: Rect, title: &str, state: &PanelState<'_>) -> Rect {
-    let block = block_for(title, state);
+    render_state_panel_with_focus(f, area, title, state, false)
+}
+
+/// [`render_state_panel`] plus the panel's focus (§3.1): the focused panel's
+/// border is `border_focus`, every other panel's is `border`.
+///
+/// The `error` state keeps its own `danger` shell either way — §3.2 spells
+/// that state out as a `danger` border block, and §3.1's border rule is about
+/// telling the focus apart from the panels around it, not about repainting a
+/// failure.
+pub fn render_state_panel_with_focus(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    state: &PanelState<'_>,
+    focused: bool,
+) -> Rect {
+    let block = block_for(title, state, focused);
     let inner = block.inner(area);
 
     match state {
@@ -123,7 +141,11 @@ pub fn render_state_panel(f: &mut Frame, area: Rect, title: &str, state: &PanelS
 /// the top-left (§5.3). The error state repaints the whole shell `danger` and
 /// is additionally labelled `加载失败` (PanelState::Error contract), while still
 /// keeping the caller's panel title so the panel says which panel it is.
-fn block_for(title: &str, state: &PanelState<'_>) -> Block<'static> {
+///
+/// Every other state takes the focus border: `border_focus` on the focused
+/// panel, `border` on the rest (§3.1), so a panel keeps its focus visible in
+/// `loading` / `empty` / `ready` / `success-flash` alike.
+fn block_for(title: &str, state: &PanelState<'_>, focused: bool) -> Block<'static> {
     let is_error = matches!(state, PanelState::Error { .. });
     let title = if is_error {
         format!("{title} · 加载失败")
@@ -136,6 +158,8 @@ fn block_for(title: &str, state: &PanelState<'_>) -> Block<'static> {
         .border_type(BorderType::Rounded);
     if is_error {
         block = block.style(Style::default().fg(color::DANGER));
+    } else {
+        block = block.border_style(role::border(focused));
     }
     block
 }

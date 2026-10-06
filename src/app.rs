@@ -119,6 +119,40 @@ pub enum GithubTab {
     Notifications,
 }
 
+/// Which panel of the current screen holds focus (DESIGN §1.1 third
+/// navigation dimension, §3.1).
+///
+/// Panel focus is orthogonal to the screen stack and to the context tabs: it
+/// cycles with `Tab` / `BackTab` *inside* one screen and never enters the
+/// stack, so `Esc` keeps exactly one meaning everywhere (§1.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanelFocus {
+    /// The screen's primary panel — the list panel wherever the screen has
+    /// one, and the panel that owns the §3.1 cursor (`▌` + `surface_alt`).
+    #[default]
+    Primary,
+    /// The preview panel drawn beside the primary one (§1.1 「列表 + 预览」).
+    /// A preview carries no cursor, so the screen shows none while it holds
+    /// focus (§3.1: 光标只存在于焦点列表面板).
+    Preview,
+}
+
+impl PanelFocus {
+    /// The focusable panels `view` actually draws, in `Tab` order — the cycle
+    /// `Tab` / `BackTab` walks (§0: 在**当前屏**的多个面板间循环焦点).
+    ///
+    /// Every screen has a primary panel; the history screen is the one that
+    /// draws a preview pane beside its commit list. A screen with a single
+    /// entry has nothing to cycle, which leaves the focus where it is instead
+    /// of inventing a second panel to land on.
+    pub fn panels_of(view: View) -> &'static [PanelFocus] {
+        match view {
+            View::History => &[PanelFocus::Primary, PanelFocus::Preview],
+            _ => &[PanelFocus::Primary],
+        }
+    }
+}
+
 /// State of the GitHub receipts spine, owned by [`App`] and rendered directly
 /// by the `ui::pulls`/`checks`/`issues`/`notifications` panels (checkpoint 2:
 /// no separate mock data source).
@@ -482,6 +516,10 @@ enum BatchEvent {
 pub struct App {
     /// Current view; key presses are dispatched per view in [`App::dispatch_key`].
     pub view: View,
+    /// Which panel of the current screen holds focus (§3.1); read through
+    /// [`App::focus`] / [`App::panel_is_focused`], which clamp it to the panels
+    /// the current screen draws. Only [`App::cycle_panel_focus`] writes it.
+    focus: PanelFocus,
     /// Loaded configuration; repo discovery consumes it (M1 subtask 3).
     /// `pub(crate)` so the config panel can borrow `scan_dirs` by field
     /// instead of cloning them every frame.
@@ -594,6 +632,7 @@ impl App {
     pub fn new(config: Config) -> Self {
         Self {
             view: View::Dashboard,
+            focus: PanelFocus::default(),
             config,
             status: None,
             load_error: None,
@@ -636,6 +675,47 @@ impl App {
             palette_open: false,
             palette_state: ListState::default(),
         }
+    }
+
+    /// The panel that holds focus on the current screen (§3.1: 同一时刻只有
+    /// 一个焦点面板), clamped to the panels that screen draws: a focus left
+    /// behind by a screen with a preview pane must not point at a panel that
+    /// is not on screen, or the screen would render as if nothing had focus.
+    pub fn focus(&self) -> PanelFocus {
+        let panels = PanelFocus::panels_of(self.view);
+        if panels.contains(&self.focus) {
+            self.focus
+        } else {
+            PanelFocus::Primary
+        }
+    }
+
+    /// Whether `panel` is the focused panel of the current screen — the
+    /// predicate every panel asks before painting its `border_focus` border
+    /// or its cursor (§3.1).
+    pub fn panel_is_focused(&self, panel: PanelFocus) -> bool {
+        self.focus() == panel
+    }
+
+    /// `Tab` / `BackTab`: move the panel focus one step forward / backward
+    /// inside the current screen (§0, §1.1).
+    ///
+    /// Panel focus is the one navigation dimension that never enters the
+    /// stack, so this writes neither [`App::view`] nor any level `Esc` pops —
+    /// `Esc` means the same thing before and after a `Tab`. A screen that
+    /// draws a single panel keeps the focus it already has rather than
+    /// wrapping onto a panel that is not there.
+    pub fn cycle_panel_focus(&mut self, forward: bool) {
+        let panels = PanelFocus::panels_of(self.view);
+        if panels.len() < 2 {
+            return;
+        }
+        let at = panels
+            .iter()
+            .position(|panel| *panel == self.focus)
+            .unwrap_or(0);
+        let step = if forward { 1 } else { panels.len() - 1 };
+        self.focus = panels[(at + step) % panels.len()];
     }
 
     /// Record the result of an operation the user triggered on the status row
@@ -2497,10 +2577,13 @@ impl App {
             KeyCode::Esc => self.pop_one_level(),
             KeyCode::Char('?') if is_plain(key) => self.toggle_help_overlay(),
             KeyCode::Char('p') if is_ctrl(key) => self.toggle_palette_overlay(),
-            // Panel focus and context tags never enter the stack (§1.1);
-            // their cycling state lands with the repo-workspace tabs, so the
-            // keys are reserved here and stay no-ops for now.
-            KeyCode::Tab | KeyCode::BackTab => {}
+            // Panel focus cycles inside the current screen and never enters
+            // the stack (§1.1): `Tab` / `BackTab` move which panel is focused,
+            // so `Esc` keeps its single meaning afterwards (§3.1).
+            KeyCode::Tab => self.cycle_panel_focus(true),
+            KeyCode::BackTab => self.cycle_panel_focus(false),
+            // Context tags are the sibling navigation dimension and stay
+            // reserved for the repo-workspace tabs (DESIGN §6.2).
             KeyCode::Char('<') if is_plain(key) => {}
             KeyCode::Char('>') if is_plain(key) => {}
             KeyCode::Char('r') if is_plain(key) => self.refresh_current_view(),
@@ -3825,9 +3908,10 @@ mod tests {
     }
 
     /// §1.1: panel focus (`Tab`/`BackTab`), context tags (`<`/`>`) and search
-    /// (`/`) are reserved for the upcoming subtasks and act as no-ops today.
+    /// (`/`) all stay inside the current screen — none of them enters the
+    /// navigation stack, so `Esc` keeps meaning the same thing afterwards.
     #[test]
-    fn tab_context_and_search_keys_are_reserved_no_ops() {
+    fn tab_context_and_search_keys_never_enter_the_stack() {
         let dir = temp_dir("dispatch-reserved");
         init_repo_with_commit(&dir);
 
@@ -3843,9 +3927,60 @@ mod tests {
             KeyCode::Char('/'),
         ] {
             assert!(app.dispatch_key(key(code)));
-            assert_eq!(app.view, View::Repo, "{code:?} must be a reserved no-op");
+            assert_eq!(app.view, View::Repo, "{code:?} must stay on the screen");
             assert!(app.status.is_none());
+            // One `Esc` still means "back to the dashboard" — a `Tab` in
+            // between may not have added a level for it to pop (§1.1).
+            assert!(app.dispatch_key(key(KeyCode::Esc)));
+            assert_eq!(app.view, View::Dashboard, "{code:?} must not push a level");
+            // Descend again so the next key is measured from the same screen.
+            app.dashboard_state.select(Some(0));
+            app.enter_repo();
+            assert_eq!(app.view, View::Repo);
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §1.1/§3.1: panel focus is the one navigation dimension that never enters
+    /// the stack. `Tab` moves it among the panels the screen draws; the view
+    /// and every level `Esc` pops stay exactly as they were, so `Esc` keeps its
+    /// single meaning (§0).
+    #[test]
+    fn tab_cycles_panel_focus_and_esc_still_pops_one_level() {
+        let (dir, mut app) = app_with_two_commit_repo("tab-focus");
+        enter_history(&mut app);
+        assert_eq!(app.view, View::History);
+
+        // The history screen is the one drawing a preview pane, so it has two
+        // panels to cycle between; every other screen has one and cannot cycle.
+        assert_eq!(app.focus(), PanelFocus::Primary);
+        assert!(app.dispatch_key(key(KeyCode::Tab)));
+        assert_eq!(app.focus(), PanelFocus::Preview);
+        assert!(app.dispatch_key(key(KeyCode::Tab)));
+        assert_eq!(
+            app.focus(),
+            PanelFocus::Primary,
+            "focus must cycle, not stop"
+        );
+
+        // `BackTab` walks the same ring backwards.
+        assert!(app.dispatch_key(key(KeyCode::BackTab)));
+        assert_eq!(app.focus(), PanelFocus::Preview);
+
+        // No amount of focus cycling changed the view, so one `Esc` still pops
+        // the single level that got the app into the history screen.
+        assert_eq!(app.view, View::History);
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Repo, "`Esc` must pop one level, not zero");
+        assert!(app.dispatch_key(key(KeyCode::Esc)));
+        assert_eq!(app.view, View::Dashboard);
+
+        // A single-panel screen has nothing to cycle: `Tab` leaves the focus
+        // where it is rather than inventing a panel that is not on screen.
+        assert!(app.dispatch_key(key(KeyCode::Tab)));
+        assert_eq!(app.focus(), PanelFocus::Primary);
+        assert_eq!(app.view, View::Dashboard);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
