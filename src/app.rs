@@ -3073,6 +3073,15 @@ impl App {
                 self.enter_config();
                 true
             }
+            // §6.1 KEYS: `n` adds a scan directory (a config-context verb the
+            // dashboard advertises). 5a has no context tabs yet, so it enters
+            // config and opens the picker directly; 5b folds it into the 配置
+            // context without the push.
+            KeyCode::Char('n') => {
+                self.enter_config();
+                self.start_config_add();
+                true
+            }
             KeyCode::Enter => {
                 self.enter_repo();
                 true

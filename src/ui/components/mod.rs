@@ -9,5 +9,6 @@
 
 pub mod cells;
 pub mod footer;
+pub mod header;
 pub mod state_panel;
 pub mod theme;

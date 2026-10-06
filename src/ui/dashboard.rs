@@ -45,14 +45,44 @@ fn dashboard_title(count: usize) -> String {
     format!("GitPulse 仓库状态 ({count})")
 }
 
+/// Minimum width of the dashboard's repository list in cells (§5.4: 80 列下
+/// 列表 ≥28 个格). The list is the focus panel and must never be squeezed.
+const LIST_MIN: u16 = 28;
+/// Minimum width of the preview panel in cells (§5.4: 详情 ≥32 个格).
+const PREVIEW_MIN: u16 = 32;
+/// Ceiling on the preview panel: it never grows fat enough to starve the list.
+const PREVIEW_MAX: u16 = 44;
+/// Frame width at which the preview opens beside the list (≥96 列左右分栏);
+/// below it the preview hides and the list owns the whole width (§6.1:274
+/// 可选预览面板（窄屏隐藏）, §5.4 80 列仅当列表 ≥28 且详情 ≥32 才分栏 — hiding
+/// is the allowed alternative there).
+const SPLIT_MIN: u16 = 96;
+
 /// Render the repository dashboard overview.
 ///
+/// Layout (§6.1:274): the repository list is the focus panel pinned to the left
+/// (min `LIST_MIN` cells); a preview of the selected repository opens beside it
+/// once the frame can fund both minimum budgets — otherwise the list owns the
+/// whole width and the preview hides (§5.4: 80 列下仅当列表 ≥28 且详情 ≥32 才
+/// 允许左右分栏).
+///
 /// A failed scan replaces the repository list with the panel's `error` state so
-/// it never masquerades as an empty list (§4.3, checkpoint 2). The panel draws
-/// content only: every async *result* — the batch progress included — reaches
-/// the frame through the footer's status row (§4.1), and an operation failure
-/// leaves the list untouched.
+/// it never masquerades as an empty list (§4.3); the batch progress log still
+/// reaches the frame through the footer's status row (§4.1), and an operation
+/// failure leaves the list untouched.
 pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState<'_>) {
+    // The preview only mirrors a real selection, so it shares the list pane's
+    // column budget only when there is something to show — on `empty` / `error`
+    // the single panel spans the width (§6.1:266 预览面板 / 空态 / 错误态 are
+    // alternatives, not siblings).
+    let has_repos = !state.repos.is_empty();
+    let show_preview = has_repos && state.load_error.is_none();
+    let (list_pane, preview_area) = if show_preview {
+        split_list_and_preview(content)
+    } else {
+        (content, None)
+    };
+
     // Bottom scrolling batch log (convention 6) takes space only while it
     // has content; the list keeps every remaining row otherwise.
     let batch_rows = if state.batch_log.is_empty() {
@@ -67,7 +97,7 @@ pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
-        .split(content);
+        .split(list_pane);
     let list_area = chunks[0];
     let batch_area = (batch_rows > 0).then(|| chunks[1]);
 
@@ -75,19 +105,21 @@ pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState
         state_panel::render_state_panel_with_focus(
             f,
             list_area,
-            "GitPulse 仓库状态",
+            &dashboard_title(0),
             &PanelState::Error { message },
             state.focused,
         );
+        // The content behind the error never arrived (§4.3), so the preview
+        // has nothing honest to mirror; only the list pane shows the failure.
         return;
     }
 
     // Empty state: scan dirs may be unconfigured or simply contain no repos,
     // so guide the user into the config panel instead of an empty list.
-    if state.repos.is_empty() {
-        render_empty_state(f, list_area, state.focused);
-    } else {
+    if has_repos {
         render_repo_list(f, list_area, state);
+    } else {
+        render_empty_state(f, list_area, state.focused);
     }
 
     // Shared tail (empty state and list alike; the error branch above keeps
@@ -95,6 +127,64 @@ pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState
     if let Some(batch_area) = batch_area {
         render_batch_log(f, batch_area, state);
     }
+
+    if let Some(preview) = preview_area {
+        render_preview(f, preview, state);
+    }
+}
+
+/// Horizontal budget: split the dashboard into the left repository list and the
+/// (optionally hidden) right preview when the frame can fund both minimum
+/// widths (§5.4), keeping the focus list at or above `LIST_MIN`.
+fn split_list_and_preview(content: Rect) -> (Rect, Option<Rect>) {
+    use super::components::theme::spacing;
+    if content.width < SPLIT_MIN {
+        return (content, None);
+    }
+    let preview_w = (content.width - LIST_MIN - spacing::GUTTER).clamp(PREVIEW_MIN, PREVIEW_MAX);
+    let list_w = content.width - spacing::GUTTER - preview_w;
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(list_w),
+            Constraint::Length(spacing::GUTTER),
+            Constraint::Length(preview_w),
+        ])
+        .split(content);
+    (chunks[0], Some(chunks[2]))
+}
+
+/// The selected repository's factual detail (§6.1 preview panel): branch,
+/// ahead/behind, dirty counts and the most recent commit. It mirrors the list
+/// cursor rather than owning focus, so it never draws a cursor (§3.1) and takes
+/// the unfocused border.
+fn render_preview(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
+    let block = Block::default()
+        .title("预览")
+        .borders(Borders::ALL)
+        .border_style(role::border(false));
+    let lines = match state.list_state.selected().and_then(|i| state.repos.get(i)) {
+        Some(repo) => {
+            let dirty = &repo.dirty;
+            let total = dirty.untracked + dirty.modified + dirty.added + dirty.deleted;
+            vec![
+                Line::from(format!("分支 {}", repo.branch)),
+                Line::from(format!("领先 ↑{} 落后 ↓{}", repo.ahead, repo.behind)),
+                Line::from(format!(
+                    "未提交 {total} ｜ 增{} 修{} 加{} 删{}",
+                    dirty.untracked, dirty.modified, dirty.added, dirty.deleted
+                )),
+                Line::from(format!("最近提交 {}", repo.last_commit.summary)),
+                Line::from(format!(
+                    "{} · {}",
+                    repo.last_commit.author,
+                    format_time(repo.last_commit.time)
+                )),
+            ]
+        }
+        None => vec![Line::from("暂无选中仓库 — 用 j/k 选择")],
+    };
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// Draw the bordered repository list: name, branch, dirty count, ahead /
@@ -209,17 +299,14 @@ fn render_empty_state(f: &mut Frame, area: Rect, focused: bool) {
 /// the actions the muted `caption` style, and the pairs are joined by
 /// [`join_hints`] so the gap between two key caps is the two spaces §2.3
 /// prescribes — the dashboard draws no hint row of its own any more.
+///
+/// §6.1:285 fixes this view segment to `⏎ 进入仓库  n 添加目录`: `r` and `q`
+/// already ride in the global segment, `j/k` are the obvious cursor verbs that
+/// the spec leaves unhinted, and the former `l/f/b/c` entries were dashboard
+/// roots that §6.1 folds into the context-tab strip (5b) — keeping them here
+/// would advertise a second, stale dispatch surface (§6.1 KEYS).
 pub(crate) fn dashboard_hints() -> HintRow {
-    HintRow::new(join_hints([
-        hint("j/k", "选择"),
-        hint("Enter", "进入"),
-        hint("r", "刷新"),
-        hint("l", "pull"),
-        hint("f", "fetch"),
-        hint("b", "分支"),
-        hint("c", "配置"),
-        hint("q", "退出"),
-    ]))
+    HintRow::new(join_hints([hint("⏎", "进入仓库"), hint("n", "添加目录")]))
 }
 
 /// Pad `text` to exactly `width` terminal cells by appending spaces, counting
@@ -582,11 +669,13 @@ mod tests {
         );
     }
 
-    /// §2.3: the dashboard's verbs reach the view segment through
-    /// [`dashboard_hints`], so a frame wide enough to show it whole carries
-    /// the config and navigation entries.
+    /// §2.3 + §6.1:285: the dashboard view segment is the spec-fixed verbs only —
+    /// `⏎ 进入仓库  n 添加目录` — and never the reverse-frozen `c/l/f/b/j/k` set
+    /// that §6.1 KEYS folds into the context-tab strip (5b) or the global
+    /// segment. This pins the new segment so the stale dispatch surface cannot
+    /// drift back in: DESIGN.md §6.1 wins over the old test.
     #[test]
-    fn hint_row_view_segment_includes_config_entry() {
+    fn hint_row_view_segment_follows_design_6_1() {
         let backend = TestBackend::new(120, 12);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
@@ -604,7 +693,21 @@ mod tests {
             .map(|x| buffer[(x, buffer.area.height - 1)].symbol().to_string())
             .collect();
         let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(compact.contains("c配置"), "missing config hint: {compact}");
-        assert!(compact.contains("j/k选择"), "missing nav hint: {compact}");
+        assert!(
+            compact.contains("进入仓库"),
+            "missing dashboard verb: {compact}"
+        );
+        assert!(
+            compact.contains("n添加目录"),
+            "missing add-dir verb: {compact}"
+        );
+        assert!(
+            !compact.contains("c配置"),
+            "stale config entry regressed: {compact}"
+        );
+        assert!(
+            !compact.contains("j/k选择"),
+            "stale nav entry regressed: {compact}"
+        );
     }
 }

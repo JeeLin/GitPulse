@@ -296,7 +296,8 @@ fn tail_scroll(line: &Line, inner_width: usize) -> u16 {
 /// mock data source). Every arm is a thin `render_*_view` wrapper so this
 /// function only dispatches (G12).
 pub fn render(f: &mut Frame, app: &mut App) {
-    let (content, footer_area) = footer::split_area(f.area());
+    let (title_area, content, footer_area) = components::header::split_area(f.area());
+    components::header::render_title_bar(f, title_area, &crumb(app), &view_right(app));
 
     match app.view {
         View::Dashboard => render_dashboard_view(f, content, app),
@@ -327,6 +328,55 @@ pub fn render(f: &mut Frame, app: &mut App) {
         help::render_help(f, app);
     } else if app.palette_open {
         help::render_palette(f, app);
+    }
+}
+
+/// The breadcrumb trail for the current screen (§1.2): `仪表盘` at the root and
+/// `›`-joined crumbs as you drill in — the header always shows where you came
+/// from, so a pushed stack is legible without counting `Esc` presses.
+fn crumb(app: &App) -> String {
+    let repo = repo_name_of(&app.repos, app.current_repo);
+    let repo_crumb = if repo.is_empty() {
+        "我的仓库".to_string()
+    } else {
+        format!("我的仓库 › {repo}")
+    };
+    let tail = match app.view {
+        View::Dashboard => return "仪表盘".to_string(),
+        View::Repo => return format!("仪表盘 › {repo_crumb}"),
+        View::Diff => "Diff",
+        View::Commit => "提交",
+        View::Branches => "分支",
+        View::History => "历史",
+        View::Tags => "标签",
+        View::Config => return "仪表盘 › 配置".to_string(),
+        // The receipts spine hangs off the repo's remote hub (§1.2), so its
+        // crumb names the repo before the tab, not the dashboard.
+        View::Pulls
+        | View::PullDetail
+        | View::Checks
+        | View::Issues
+        | View::IssueDetail
+        | View::Notifications => return format!("仪表盘 › {repo_crumb} › 远端中心"),
+    };
+    format!("仪表盘 › {repo_crumb} › {tail}")
+}
+
+/// The right-flush status cell of the title bar (§6.1): the dashboard shows the
+/// repository count, the receipt tabs show the running/last fetch, and every
+/// other screen has nothing to add. The per-row `远端:` badge belongs to the
+/// dashboard list itself, not the title — it needs a remote field that
+/// `RepoInfo` does not yet carry, so it is recorded as a 5a 沉淀 item.
+fn view_right(app: &App) -> String {
+    match app.view {
+        View::Dashboard => format!("仓库 {}", app.repos.len()),
+        View::Pulls
+        | View::PullDetail
+        | View::Checks
+        | View::Issues
+        | View::IssueDetail
+        | View::Notifications => app.receipt_op_label().to_string(),
+        _ => String::new(),
     }
 }
 
@@ -988,11 +1038,11 @@ mod tests {
         for x in 0..buffer.area.width {
             let cell = &buffer[(x, hint_row)];
             match cell.symbol() {
-                "j" if key_fg.is_none() => {
+                "n" if key_fg.is_none() => {
                     key_fg = Some(cell.fg);
                     key_bold = cell.modifier.contains(Modifier::BOLD);
                 }
-                "选" => desc_fg = Some(cell.fg),
+                "添" => desc_fg = Some(cell.fg),
                 _ => {}
             }
         }
@@ -1218,7 +1268,7 @@ mod tests {
             text.contains("q退出") || text.contains("Esc返回"),
             "missing global key hint: {text}"
         );
-        assert!(text.contains("Enter进入"), "missing view hint: {text}");
+        assert!(text.contains("进入仓库"), "missing view hint: {text}");
     }
 
     /// §6.11 command palette (Wave 2): renders the centered modal titled
