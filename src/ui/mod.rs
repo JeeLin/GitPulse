@@ -296,8 +296,25 @@ fn tail_scroll(line: &Line, inner_width: usize) -> u16 {
 /// mock data source). Every arm is a thin `render_*_view` wrapper so this
 /// function only dispatches (G12).
 pub fn render(f: &mut Frame, app: &mut App) {
-    let (title_area, content, footer_area) = components::header::split_area(f.area());
+    let has_context_tags = matches!(
+        app.view,
+        View::Repo | View::Branches | View::History | View::Tags
+    );
+    let (title_area, tags_area, content, footer_area) =
+        components::header::split_area(f.area(), has_context_tags);
     components::header::render_title_bar(f, title_area, &crumb(app), &view_right(app));
+
+    // Repo-workspace context tags (§6.2): one strip under the title for the four
+    // sibling contexts (`<`/`>` cycles them in place). `<`/`>` never enters the
+    // stack (§1.1), so the tabs are a sibling switch, not a pushed screen.
+    if let (Some(tags_area), Some(index)) = (tags_area, active_context_tab(app.view)) {
+        components::header::render_context_tags(
+            f,
+            tags_area,
+            &["工作区", "分支", "历史", "标签"],
+            index,
+        );
+    }
 
     match app.view {
         View::Dashboard => render_dashboard_view(f, content, app),
@@ -334,6 +351,12 @@ pub fn render(f: &mut Frame, app: &mut App) {
 /// The breadcrumb trail for the current screen (§1.2): `仪表盘` at the root and
 /// `›`-joined crumbs as you drill in — the header always shows where you came
 /// from, so a pushed stack is legible without counting `Esc` presses.
+///
+/// Only the *stack* grows the trail. The repo workspace's four contexts are
+/// siblings switched by `<`/`>` without ever entering the stack (§1.1), so
+/// `Branches` / `History` / `Tags` show the same crumb `Repo` does — a pushed
+/// `… › 分支` tail would read as a screen of its own and contradict §6.2,
+/// whose layout draws one breadcrumb (`仪表盘 › GitPulse`) for every context.
 fn crumb(app: &App) -> String {
     let repo = repo_name_of(&app.repos, app.current_repo);
     let repo_crumb = if repo.is_empty() {
@@ -343,12 +366,12 @@ fn crumb(app: &App) -> String {
     };
     let tail = match app.view {
         View::Dashboard => return "仪表盘".to_string(),
-        View::Repo => return format!("仪表盘 › {repo_crumb}"),
+        // One screen, four contexts: the breadcrumb stops at the repository.
+        View::Repo | View::Branches | View::History | View::Tags => {
+            return format!("仪表盘 › {repo_crumb}")
+        }
         View::Diff => "Diff",
         View::Commit => "提交",
-        View::Branches => "分支",
-        View::History => "历史",
-        View::Tags => "标签",
         View::Config => return "仪表盘 › 配置".to_string(),
         // The receipts spine hangs off the repo's remote hub (§1.2), so its
         // crumb names the repo before the tab, not the dashboard.
@@ -360,6 +383,21 @@ fn crumb(app: &App) -> String {
         | View::Notifications => return format!("仪表盘 › {repo_crumb} › 远端中心"),
     };
     format!("仪表盘 › {repo_crumb} › {tail}")
+}
+
+/// Index of the repo-workspace context tag (§6.2: `工作区 │ 分支 │ 历史 │ 标签`)
+/// that `view` selects, or `None` on the screens that have no context tabs yet.
+///
+/// The index is the position in the strip [`render`] draws, so `Repo` (工作区)
+/// is 0, `Branches` (分支) 1, `History` (历史) 2 and `Tags` (标签) 3.
+fn active_context_tab(view: View) -> Option<usize> {
+    match view {
+        View::Repo => Some(0),
+        View::Branches => Some(1),
+        View::History => Some(2),
+        View::Tags => Some(3),
+        _ => None,
+    }
 }
 
 /// The right-flush status cell of the title bar (§6.1): the dashboard shows the
@@ -1378,6 +1416,98 @@ mod tests {
         assert!(
             muted_cells(&on_list) > 0 && muted_cells(&on_preview) > 0,
             "every unfocused panel must keep the muted `border`"
+        );
+    }
+
+    /// §6.2: Branches / History / Tags are context tabs of the repo workspace,
+    /// not pushed screens — so they share the repo crumb with `Repo` instead of
+    /// appending `› 分支` / `› 历史` / `› 标签`, which §6.2 forbids.
+    #[test]
+    fn workspace_context_tabs_share_one_repo_crumb() {
+        let mut app = base_app();
+        app.repos = vec![RepoInfo {
+            name: "GitPulse".to_string(),
+            path: std::path::PathBuf::from("/tmp/GitPulse"),
+            branch: "main".to_string(),
+            dirty: Default::default(),
+            ahead: 0,
+            behind: 0,
+            last_commit: Default::default(),
+        }];
+        app.current_repo = Some(0);
+
+        app.view = View::Repo;
+        let repo_crumb = crumb(&app);
+        // The crumb stops at the repository (the repo marker + repo name).
+        assert!(
+            repo_crumb.contains("GitPulse"),
+            "repo crumb must name the repo: {repo_crumb}"
+        );
+        assert!(
+            repo_crumb.contains("我的仓库"),
+            "repo crumb must reach the repo list: {repo_crumb}"
+        );
+
+        // Every context tab renders that exact same crumb.
+        for view in [View::Branches, View::History, View::Tags] {
+            app.view = view;
+            assert_eq!(
+                crumb(&app),
+                repo_crumb,
+                "context tab {view:?} must share the repo crumb, not push a tail"
+            );
+        }
+
+        // And none of the four may push a `› <tab>` tail (§6.2 §6.2:298).
+        for view in [View::Repo, View::Branches, View::History, View::Tags] {
+            app.view = view;
+            let c = crumb(&app);
+            assert!(
+                !c.contains("› 分支") && !c.contains("› 历史") && !c.contains("› 标签"),
+                "context tab {view:?} must not push a crumb tail: {c}"
+            );
+        }
+    }
+
+    /// §6.2/§5.2 integration: the `render` dispatcher reserves the context-tag
+    /// strip for the four repo-workspace views and leaves the dashboard's layout
+    /// untouched (no strip — those tabs are Phase 3).
+    #[test]
+    fn render_draws_the_context_tag_strip_only_on_workspace_views() {
+        for view in [View::Repo, View::Branches, View::History, View::Tags] {
+            let mut app = base_app();
+            app.view = view;
+            app.file_entries = vec![FileEntry {
+                path: std::path::PathBuf::from("src/main.rs"),
+                state: FileState::Modified,
+            }];
+            let buffer = render_buffer(&mut app);
+            let tags_row = row_text(&buffer, 1);
+            assert!(
+                tags_row.contains("工作区")
+                    && tags_row.contains("分支")
+                    && tags_row.contains("历史")
+                    && tags_row.contains("标签"),
+                "view {view:?} tag strip is missing a label: {tags_row}"
+            );
+            assert!(
+                tags_row.contains('│'),
+                "view {view:?} tags must be joined by `│`: {tags_row}"
+            );
+            assert!(
+                crate::ui::components::cells::width(&tags_row) <= 80,
+                "view {view:?} tag strip overflows 80 columns: {tags_row}"
+            );
+        }
+
+        // The dashboard has no context tabs yet, so its row 1 is panel chrome,
+        // never the tag strip.
+        let mut app = base_app();
+        app.view = View::Dashboard;
+        let buffer = render_buffer(&mut app);
+        assert!(
+            !row_text(&buffer, 1).contains("工作区"),
+            "dashboard must not draw the context-tag strip"
         );
     }
 
