@@ -1581,6 +1581,67 @@ mod tests {
         );
     }
 
+    /// §2.1 / §2.2: every global/canonical key from DESIGN.md's binding table is
+    /// wired into the key dispatch — pinned as a unit so a dropped binding, or a
+    /// view quietly shadowing a global verb, fails `cargo test design` instead
+    /// of slipping past an individual behavioral test.
+    ///
+    /// Global verbs (Esc, ? / Ctrl-P, Tab, BackTab, `<`, `>`, r, `/`, g/G/Home/End)
+    /// live in `dispatch_key`; the owned-but-delegated ones (Enter, q, j/k/↑↓,
+    /// n, d) are dispatched per-view — both sets must exist and stay global.
+    #[test]
+    fn design_canonical_keybindings_match_design_2_1_and_2_2() {
+        let app = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs");
+        let source = strip_test_modules(&fs::read_to_string(app).expect("app.rs is readable"));
+
+        // (canonical §2.2 row, exact production token that binds it). `g` and
+        // `G` share one arm, so their token is the combined pattern.
+        let canonical: [(&str, &str); 21] = [
+            ("quit q", "is_plain_char(key, 'q')"),
+            ("refresh r", "KeyCode::Char('r')"),
+            ("back Esc", "KeyCode::Esc"),
+            ("open Enter", "KeyCode::Enter"),
+            ("move down j", "KeyCode::Char('j')"),
+            ("move up k", "KeyCode::Char('k')"),
+            ("move down ↓", "KeyCode::Down"),
+            ("move up ↑", "KeyCode::Up"),
+            ("search /", "KeyCode::Char('/')"),
+            ("help ?", "KeyCode::Char('?')"),
+            ("palette Ctrl-P", "KeyCode::Char('p') if is_ctrl(key)"),
+            ("new n", "KeyCode::Char('n')"),
+            ("delete d", "KeyCode::Char('d')"),
+            ("context <", "KeyCode::Char('<')"),
+            ("context >", "KeyCode::Char('>')"),
+            ("focus Tab", "KeyCode::Tab"),
+            ("focus BackTab", "KeyCode::BackTab"),
+            ("goto g", "KeyCode::Char('g')"),
+            ("goto G", "'g' | 'G'"),
+            ("goto Home", "KeyCode::Home"),
+            ("goto End", "KeyCode::End"),
+        ];
+
+        let missing: Vec<&str> = canonical
+            .iter()
+            .filter(|(_, token)| !source.contains(token))
+            .map(|(label, _)| *label)
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "§2.2 canonical keys missing from app.rs dispatch: {}",
+            missing.join(", ")
+        );
+
+        // §2.1: a modal (or overlay) must own the keyboard before any global
+        // verb is evaluated — the trap is the guard, the literal-input test
+        // downstream pins its behavior.
+        assert!(
+            source.contains("if self.active_modal().is_some()")
+                && source.contains("fn dispatch_modal_key"),
+            "§2.1 requires the modal focus trap to gate global dispatch"
+        );
+    }
+
     /// Depth-first walk of every `.rs` file under `dir`, calling `visit` on
     /// each. `read_dir` order is unspecified, so nothing here may assume an
     /// order.
