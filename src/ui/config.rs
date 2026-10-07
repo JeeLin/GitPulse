@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
@@ -15,6 +15,7 @@ use super::hint;
 use super::repo::centered_rect;
 use crate::git::show_path;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
+use crate::ui::components::theme::color;
 
 /// Borrowed render state for the config panel, referencing `App.config.scan_dirs`
 /// directly so no mock data source exists (checkpoint 2).
@@ -175,13 +176,13 @@ fn render_dir_picker(
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             path,
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(color::WARNING),
         ))),
         rows[0],
     );
 
     let mut items = vec![ListItem::new(Line::from(vec![
-        Span::styled("↳ ", Style::default().fg(Color::Cyan)),
+        Span::styled("↳ ", Style::default().fg(color::ACCENT)),
         Span::raw("选择当前目录"),
     ]))];
     items.extend(entries.iter().map(|entry| {
@@ -272,7 +273,7 @@ fn render_delete_confirm(f: &mut Frame, area: Rect, dir: Option<&Path>) {
     if let Some(dir) = dir {
         body.push(Line::from(Span::styled(
             show_path(dir),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(color::WARNING),
         )));
     }
     super::render_confirm_overlay(

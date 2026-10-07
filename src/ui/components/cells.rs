@@ -90,7 +90,8 @@ pub fn fit_line(line: Line<'static>, max: usize) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::{Color, Style};
+    use crate::ui::components::theme::color;
+    use ratatui::style::Style;
 
     #[test]
     fn width_counts_cjk_glyphs_as_two_cells() {
@@ -126,7 +127,7 @@ mod tests {
     #[test]
     fn fit_line_keeps_styles_and_fits_the_budget() {
         let line = Line::from(vec![
-            Span::styled("Esc", Style::default().fg(Color::Cyan)),
+            Span::styled("Esc", Style::default().fg(color::ACCENT)),
             Span::raw(" 返回"),
         ]);
         assert_eq!(fit_line(line.clone(), 10).width(), line.width(), "fits");
@@ -137,7 +138,7 @@ mod tests {
         assert!(text.ends_with('…'), "cut must be marked: {text}");
         assert_eq!(
             cut.spans[0].style.fg,
-            Some(Color::Cyan),
+            Some(color::ACCENT),
             "kept spans keep their style"
         );
     }

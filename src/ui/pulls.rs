@@ -5,7 +5,7 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
@@ -15,6 +15,7 @@ use super::hint;
 use crate::app::App;
 use crate::platform::{CheckSummary, PrDetail, PrSummary};
 use crate::ui::components::footer::{hints as join_hints, HintRow};
+use crate::ui::components::theme::color;
 
 /// Empty-state copy of the pull list: zero open pulls is a valid state, not
 /// a failure — the status row below covers failed loads.
@@ -198,34 +199,35 @@ pub(crate) fn block_width(area: Rect) -> usize {
     area.width.saturating_sub(2) as usize
 }
 
-/// Palette of a pull/issue state: open reads green, closed red, any other
-/// value (GitHub keeps inventing them) falls back to dark gray.
+/// Palette of a pull/issue state: open reads success, closed danger, any
+/// other value (GitHub keeps inventing them) falls back to muted.
 pub(crate) fn state_style(state: &str) -> Style {
     match state {
-        "open" => Style::default().fg(Color::Green),
-        "closed" => Style::default().fg(Color::Red),
-        _ => Style::default().fg(Color::DarkGray),
+        "open" => Style::default().fg(color::SUCCESS),
+        "closed" => Style::default().fg(color::DANGER),
+        _ => Style::default().fg(color::FG_MUTED),
     }
 }
 
-/// Palette of a check conclusion: failures red, success green, the muted
-/// outcomes gray, and anything unclassified plain.
+/// Palette of a check conclusion (§5.1 `ci_*`): failures danger, success
+/// `ci_pass`, the muted outcomes `ci_skip`, and anything unclassified plain.
 pub(crate) fn conclusion_style(conclusion: &str) -> Style {
     match conclusion {
-        "success" => Style::default().fg(Color::Green),
-        "failure" | "timed_out" | "action_required" => Style::default().fg(Color::Red),
-        "neutral" | "skipped" | "cancelled" => Style::default().fg(Color::Gray),
+        "success" => Style::default().fg(color::CI_PASS),
+        "failure" | "timed_out" | "action_required" => Style::default().fg(color::CI_FAIL),
+        "neutral" | "skipped" | "cancelled" => Style::default().fg(color::CI_SKIP),
         _ => Style::default(),
     }
 }
 
 /// Palette of a check status: work in flight (queued / in_progress) reads
-/// yellow, a settled run gray — the conclusion column then carries verdict.
+/// `ci_pending`, a settled run muted — the conclusion column then carries
+/// verdict.
 pub(crate) fn check_status_style(status: &str) -> Style {
     match status {
-        "in_progress" | "queued" => Style::default().fg(Color::Yellow),
-        "completed" => Style::default().fg(Color::Gray),
-        _ => Style::default().fg(Color::DarkGray),
+        "in_progress" | "queued" => Style::default().fg(color::CI_PENDING),
+        "completed" => Style::default().fg(color::CI_SKIP),
+        _ => Style::default().fg(color::FG_MUTED),
     }
 }
 
@@ -244,16 +246,16 @@ pub(crate) fn mergeable_label(
 ) -> (&'static str, Style) {
     use crate::platform::PlatformKind;
     match mergeable {
-        Some(true) => ("可合并", Style::default().fg(Color::Green)),
+        Some(true) => ("可合并", Style::default().fg(color::SUCCESS)),
         Some(false) => (
             if kind == Some(PlatformKind::GitHub) {
                 "有冲突"
             } else {
                 "不可合并"
             },
-            Style::default().fg(Color::Red),
+            Style::default().fg(color::DANGER),
         ),
-        None => ("未知", Style::default().fg(Color::Yellow)),
+        None => ("未知", Style::default().fg(color::WARNING)),
     }
 }
 
@@ -403,12 +405,12 @@ pub(crate) fn render_disconnected(
         Line::from(Span::styled(
             copy.title,
             Style::default()
-                .fg(Color::Yellow)
+                .fg(color::WARNING)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             copy.hint,
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(color::FG_MUTED),
         )),
     ];
     f.render_widget(Paragraph::new(lines).block(block), area);
@@ -571,10 +573,10 @@ fn pull_item(pr: &PrSummary, width: usize) -> ListItem<'static> {
     };
     let fixed = cells(&number) + cells(&state_tag) + cells(&draft_tag);
     let head = Line::from(vec![
-        Span::styled(number, Style::default().fg(Color::Cyan)),
+        Span::styled(number, Style::default().fg(color::INFO)),
         Span::raw(ellipsize(&pr.title, width.saturating_sub(fixed))),
         Span::styled(state_tag, state_style(&pr.state)),
-        Span::styled(draft_tag, Style::default().fg(Color::Yellow)),
+        Span::styled(draft_tag, Style::default().fg(color::WARNING)),
     ]);
 
     let meta = format!(
@@ -583,7 +585,7 @@ fn pull_item(pr: &PrSummary, width: usize) -> ListItem<'static> {
     );
     let tail = Line::from(Span::styled(
         ellipsize(&meta, width),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(color::FG_MUTED),
     ));
     ListItem::new(vec![head, tail])
 }
@@ -620,7 +622,7 @@ pub fn render_pull_detail(f: &mut Frame, content: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(Span::styled(
                 DETAIL_PLACEHOLDER,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(color::FG_MUTED),
             ))
             .block(block),
             content,
@@ -672,7 +674,7 @@ fn body_paragraph(detail: &PrDetail) -> Paragraph<'static> {
     let body: Vec<Line> = if detail.body.trim().is_empty() {
         vec![Line::from(Span::styled(
             "（无描述）",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(color::FG_MUTED),
         ))]
     } else {
         detail
@@ -696,7 +698,7 @@ fn render_checks_pane(f: &mut Frame, detail: &PrDetail, area: Rect) {
         f.render_widget(
             Paragraph::new(Span::styled(
                 "—（暂无检查记录）",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(color::FG_MUTED),
             ))
             .block(block),
             area,
@@ -729,10 +731,10 @@ fn summary_lines(
     };
     let fixed = cells(&number) + cells(&state_tag) + cells(&draft_tag);
     let head = Line::from(vec![
-        Span::styled(number, Style::default().fg(Color::Cyan)),
+        Span::styled(number, Style::default().fg(color::INFO)),
         Span::raw(ellipsize(&summary.title, width.saturating_sub(fixed))),
         Span::styled(state_tag, state_style(&summary.state)),
-        Span::styled(draft_tag, Style::default().fg(Color::Yellow)),
+        Span::styled(draft_tag, Style::default().fg(color::WARNING)),
     ]);
 
     let (merge, merge_style) = mergeable_label(kind, detail.mergeable);
@@ -744,7 +746,7 @@ fn summary_lines(
         Span::styled(merge.to_string(), merge_style),
         Span::styled(
             ellipsize(&meta, width.saturating_sub(cells(merge))),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(color::FG_MUTED),
         ),
     ]);
     vec![head, tail, Line::from("")]
@@ -1099,14 +1101,17 @@ mod tests {
 
     #[test]
     fn state_and_conclusion_palettes_follow_the_repo_conventions() {
-        assert_eq!(state_style("open").fg, Some(Color::Green));
-        assert_eq!(state_style("closed").fg, Some(Color::Red));
-        assert_eq!(state_style("draft").fg, Some(Color::DarkGray));
-        assert_eq!(conclusion_style("success").fg, Some(Color::Green));
-        assert_eq!(conclusion_style("failure").fg, Some(Color::Red));
-        assert_eq!(conclusion_style("skipped").fg, Some(Color::Gray));
-        assert_eq!(check_status_style("in_progress").fg, Some(Color::Yellow));
-        assert_eq!(check_status_style("queued").fg, Some(Color::Yellow));
+        assert_eq!(state_style("open").fg, Some(color::SUCCESS));
+        assert_eq!(state_style("closed").fg, Some(color::DANGER));
+        assert_eq!(state_style("draft").fg, Some(color::FG_MUTED));
+        assert_eq!(conclusion_style("success").fg, Some(color::CI_PASS));
+        assert_eq!(conclusion_style("failure").fg, Some(color::CI_FAIL));
+        assert_eq!(conclusion_style("skipped").fg, Some(color::CI_SKIP));
+        assert_eq!(
+            check_status_style("in_progress").fg,
+            Some(color::CI_PENDING)
+        );
+        assert_eq!(check_status_style("queued").fg, Some(color::CI_PENDING));
         use crate::platform::PlatformKind;
         assert_eq!(
             mergeable_label(Some(PlatformKind::GitHub), Some(true)).0,

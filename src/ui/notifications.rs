@@ -3,7 +3,7 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::ListItem,
     Frame,
@@ -11,6 +11,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::platform::{notifications_label, NotificationSummary};
+use crate::ui::components::theme::color;
 
 use super::pulls::{
     cells, ellipsize, meta_budget, render_disconnected, render_load_error, render_receipts_empty,
@@ -98,10 +99,10 @@ fn notification_item(note: &NotificationSummary, width: usize) -> ListItem<'stat
     };
     let marker_style = if note.unread {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(color::WARNING)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(color::FG_MUTED)
     };
 
     let mut spans = vec![
@@ -110,12 +111,12 @@ fn notification_item(note: &NotificationSummary, width: usize) -> ListItem<'stat
             ellipsize(&note.subject_title, head_width.saturating_sub(fixed)),
             title_style,
         ),
-        Span::styled(type_tag, Style::default().fg(Color::Cyan)),
+        Span::styled(type_tag, Style::default().fg(color::INFO)),
     ];
     if budget > 0 {
         spans.push(Span::styled(
             format!("{META_GAP}{}", ellipsize(&meta, budget)),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(color::FG_MUTED),
         ));
     }
     ListItem::new(Line::from(spans))

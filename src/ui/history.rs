@@ -2,7 +2,7 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, ListItem, ListState, Paragraph, Wrap},
     Frame,
@@ -13,7 +13,7 @@ use crate::git::{CommitDetail, CommitRow, RefKind};
 use super::components::state_panel::{self, PanelState};
 use super::{hint, named_title, pulls};
 use crate::ui::components::footer::{hints as join_hints, HintRow};
-use crate::ui::components::theme::role;
+use crate::ui::components::theme::{color, role};
 
 /// Inner width of the DAG column: one cell per lane, capped at the lanes
 /// `git::layout_graph` ever produces (`git::MAX_LANES`).
@@ -144,7 +144,7 @@ fn render_commit_list(f: &mut Frame, area: Rect, state: &mut HistoryRender<'_>) 
 /// One commit row: short hash, summary, ref badges, then author and time.
 fn commit_item(commit: &CommitRow, width: usize) -> ListItem<'static> {
     let mut spans = vec![
-        Span::styled(commit.id.clone(), Style::default().fg(Color::Yellow)),
+        Span::styled(commit.id.clone(), Style::default().fg(color::WARNING)),
         Span::raw(" "),
         Span::raw(pulls::ellipsize(&commit.summary, width)),
     ];
@@ -157,20 +157,20 @@ fn commit_item(commit: &CommitRow, width: usize) -> ListItem<'static> {
     }
     spans.push(Span::styled(
         format!("  {} {}", commit.author, commit.time),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(color::FG_MUTED),
     ));
     ListItem::new(Line::from(spans))
 }
 
-/// Badge style per reference kind: HEAD is highlighted, branches read green
-/// and tags cyan, matching the colors the other panels use for refs.
+/// Badge style per reference kind: HEAD is highlighted, branches read success
+/// and tags info, matching the tokens the other panels use for refs.
 fn ref_style(kind: RefKind) -> Style {
     match kind {
         RefKind::Head => Style::default()
-            .fg(Color::Yellow)
+            .fg(color::WARNING)
             .add_modifier(Modifier::BOLD),
-        RefKind::Branch => Style::default().fg(Color::Green),
-        RefKind::Tag => Style::default().fg(Color::Cyan),
+        RefKind::Branch => Style::default().fg(color::SUCCESS),
+        RefKind::Tag => Style::default().fg(color::INFO),
     }
 }
 
@@ -210,7 +210,7 @@ fn render_detail(f: &mut Frame, area: Rect, state: &HistoryRender<'_>) {
     let paragraph = match state.detail {
         None => Paragraph::new(Span::styled(
             "选择一个提交查看详情",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(color::FG_MUTED),
         ))
         .block(block),
         Some(detail) => {
@@ -224,7 +224,7 @@ fn render_detail(f: &mut Frame, area: Rect, state: &HistoryRender<'_>) {
             }
             lines.push(Line::from(Span::styled(
                 format!("变更文件 ({})", detail.files.len()),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(color::INFO),
             )));
             for file in &detail.files {
                 lines.push(Line::from(format!("  {file}")));

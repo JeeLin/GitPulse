@@ -2,12 +2,13 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     text::Line,
     widgets::Paragraph,
     Frame,
 };
 
+use crate::ui::components::theme::color;
 use crate::ui::status::{RemoteStatus, StatusLine};
 
 /// Blank columns reserved between the remote feedback and the pending
@@ -81,7 +82,7 @@ pub fn render_remote_status(
     match status {
         RemoteStatus::Running(message) => {
             f.render_widget(
-                Paragraph::new(message.as_str()).style(Style::default().fg(Color::Yellow)),
+                Paragraph::new(message.as_str()).style(Style::default().fg(color::WARNING)),
                 feedback_area,
             );
         }
@@ -92,13 +93,13 @@ pub fn render_remote_status(
                 format!("{op} 成功")
             };
             f.render_widget(
-                Paragraph::new(text).style(Style::default().fg(Color::Green)),
+                Paragraph::new(text).style(Style::default().fg(color::SUCCESS)),
                 feedback_area,
             );
         }
         RemoteStatus::Error(err) => {
             f.render_widget(
-                Paragraph::new(error_key_line(err)).style(Style::default().fg(Color::Red)),
+                Paragraph::new(error_key_line(err)).style(Style::default().fg(color::DANGER)),
                 feedback_area,
             );
         }

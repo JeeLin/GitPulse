@@ -441,8 +441,8 @@ mod tests {
         assert!(compact(&text).contains("加载失败:boom"), "missing: {text}");
         assert_eq!(
             first_fg(&buffer, 0),
-            Some(ratatui::style::Color::Red),
-            "errors render red"
+            Some(crate::ui::components::theme::color::DANGER),
+            "errors render on the danger token"
         );
 
         let plain = StatusLine {

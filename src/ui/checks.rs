@@ -66,9 +66,9 @@ mod tests {
     use crate::app::App;
     use crate::config::Config;
     use crate::platform::CheckSummary;
+    use crate::ui::components::theme::color;
     use crate::ui::pulls::{draw_receipt_frame, offline_client};
     use ratatui::backend::TestBackend;
-    use ratatui::style::Color;
     use ratatui::Terminal;
 
     /// Connected app: the `octo/demo` remote resolved and the readiness gate
@@ -160,8 +160,12 @@ mod tests {
                 _ => {}
             }
         }
-        assert_eq!(status_fg, Some(Color::Gray), "settled status reads gray");
-        assert_eq!(conclusion_fg, Some(Color::Red), "failure reads red");
+        assert_eq!(
+            status_fg,
+            Some(color::CI_SKIP),
+            "a settled run reads the skip token"
+        );
+        assert_eq!(conclusion_fg, Some(color::CI_FAIL), "failure reads danger");
     }
 
     #[test]

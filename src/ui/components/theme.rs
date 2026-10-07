@@ -77,6 +77,26 @@ pub mod spacing {
     pub const HINT_GAP: &str = "  ";
 }
 
+/// Canonical side-by-side panel width floors (§5.4 80 列临界地板).
+///
+/// §5.4: "**仅当两个面板都能保住各自 `min_width`（列表 ≥28，详情 ≥32）时才允许
+/// 左右分栏**；否则回退为上下堆叠或『列表 + 焦点时内联预览』". These are the
+/// single source for that rule so every screen's split gate reads one number
+/// instead of inventing its own.
+///
+/// `PREVIEW_MAX` caps the detail pane so it can never starve the list; a screen
+/// may open its split only at a HIGHER frame width than the arithmetic floor
+/// (the dashboard opens at 96) — the floor is a permission, not an obligation.
+pub mod width {
+    /// Minimum width of a list panel that shares its row with another panel.
+    pub const LIST_MIN: u16 = 28;
+    /// Minimum width of the detail/preview panel beside a list.
+    pub const PREVIEW_MIN: u16 = 32;
+    /// Minimum frame width that may split into a list and a detail pane at all
+    /// (`LIST_MIN` + `GUTTER` + `PREVIEW_MIN`).
+    pub const SPLIT_FLOOR: u16 = LIST_MIN + super::spacing::GUTTER + PREVIEW_MIN;
+}
+
 /// Type roles (§5.3): the handful of text weights the whole UI draws with.
 pub mod role {
     use ratatui::style::{Modifier, Style};

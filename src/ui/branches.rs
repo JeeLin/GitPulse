@@ -2,7 +2,7 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState},
     Frame,
@@ -12,7 +12,7 @@ use crate::git::BranchInfo;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 
 use super::components::state_panel::{self, PanelState};
-use super::components::theme::role;
+use super::components::theme::{color, role};
 use super::{hint, pulls};
 
 /// Borrowed render state for the branch panel, referencing `App.branches`
@@ -139,7 +139,7 @@ fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) 
             let marker = if branch.is_head { "* " } else { "  " };
             let name_style = if branch.is_head {
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(color::SUCCESS)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -151,7 +151,7 @@ fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) 
             if let Some(upstream) = &branch.upstream {
                 spans.push(Span::styled(
                     format!("  → {}", pulls::ellipsize(upstream, width)),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(color::FG_MUTED),
                 ));
             }
             ListItem::new(Line::from(spans))
@@ -176,7 +176,7 @@ fn render_create_input(f: &mut Frame, area: Rect, input: &str) {
 fn render_delete_dialog(f: &mut Frame, area: Rect, branch: &BranchInfo) {
     let body = vec![Line::from(vec![
         Span::raw("确定删除分支 "),
-        Span::styled(branch.name.clone(), Style::default().fg(Color::Yellow)),
+        Span::styled(branch.name.clone(), Style::default().fg(color::WARNING)),
         Span::raw("?"),
     ])];
     super::render_confirm_overlay(f, area, "确认删除分支", 50, 8, body, true);

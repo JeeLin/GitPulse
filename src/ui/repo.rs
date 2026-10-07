@@ -1,13 +1,13 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState},
     Frame,
 };
 
 use super::components::state_panel::{self, PanelState};
-use super::components::theme::role;
+use super::components::theme::{color, role};
 use super::{hint, pulls, render_confirm_overlay};
 use crate::git::FileEntry;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
@@ -124,10 +124,10 @@ fn render_file_list(f: &mut Frame, area: Rect, state: &mut RepoState<'_>) {
         .entries
         .iter()
         .map(|entry| {
-            let (symbol, color) = super::file_state_symbol(entry.state);
+            let (symbol, style) = super::file_state_symbol(entry.state);
 
             let line = Line::from(vec![
-                Span::styled(symbol, Style::default().fg(color)),
+                Span::styled(symbol, style),
                 Span::raw(pulls::ellipsize(&entry.path.display().to_string(), width)),
             ]);
             ListItem::new(line)
@@ -148,7 +148,7 @@ fn render_discard_dialog(f: &mut Frame, area: Rect, file: &FileEntry) {
         Span::raw("确定丢弃 "),
         Span::styled(
             file.path.display().to_string(),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(color::WARNING),
         ),
         Span::raw(" 的更改?"),
     ])];
@@ -183,6 +183,7 @@ mod tests {
     use crate::ui::components::footer::StatusRow;
     use crate::ui::status::{RemoteStatus, StatusLine};
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
     use ratatui::Terminal;
 
     fn entry(path: &str, state: FileState) -> FileEntry {
@@ -413,7 +414,11 @@ mod tests {
             vec![22],
             "an operation result stays on the status row only: {text}"
         );
-        assert_eq!(status_fg(&terminal), Color::Red, "error must render red");
+        assert_eq!(
+            status_fg(&terminal),
+            color::DANGER,
+            "error must render danger"
+        );
     }
 
     #[test]
@@ -546,7 +551,11 @@ mod tests {
         );
         let text = compact(&terminal);
         assert!(text.contains("push成功"), "missing success text: {text}");
-        assert_eq!(status_fg(&terminal), Color::Green, "success must be green");
+        assert_eq!(
+            status_fg(&terminal),
+            color::SUCCESS,
+            "success must read success"
+        );
     }
 
     #[test]
@@ -558,7 +567,7 @@ mod tests {
             render_with_footer(state, StatusRow::new(None, Some(&error), "pull"), 80, 24);
         let text = compact(&terminal);
         assert!(text.contains("diverged"), "missing reason: {text}");
-        assert_eq!(status_fg(&terminal), Color::Red, "error must be red");
+        assert_eq!(status_fg(&terminal), color::DANGER, "error must be danger");
     }
 
     /// Rows whose whitespace-stripped text contains `needle` — how a test

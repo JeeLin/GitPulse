@@ -2,7 +2,7 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
@@ -11,6 +11,7 @@ use ratatui::{
 use super::components::state_panel::{self, PanelState};
 use super::hint;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
+use crate::ui::components::theme::color;
 
 /// Render the diff content with syntax highlighting for +/- lines.
 ///
@@ -43,17 +44,17 @@ fn render_diff_content(f: &mut Frame, area: Rect, content: &str, scroll: u16) {
         } else if line.starts_with('+') {
             Line::from(vec![Span::styled(
                 line.to_string(),
-                Style::default().fg(Color::Green),
+                Style::default().fg(color::SUCCESS),
             )])
         } else if line.starts_with('-') {
             Line::from(vec![Span::styled(
                 line.to_string(),
-                Style::default().fg(Color::Red),
+                Style::default().fg(color::DANGER),
             )])
         } else if line.starts_with("@@") {
             Line::from(vec![Span::styled(
                 line.to_string(),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(color::INFO),
             )])
         } else {
             Line::from(vec![Span::raw(line)])
@@ -133,17 +134,25 @@ mod tests {
 
         // Content starts at (1, 1): the block border occupies row 0 / column 0.
         assert_eq!(buf[(1, 6)].symbol(), "-", "minus line row");
-        assert_eq!(buf[(1, 6)].fg, Color::Red, "minus line must be red");
+        assert_eq!(buf[(1, 6)].fg, color::DANGER, "minus line must be danger");
         assert_eq!(buf[(1, 7)].symbol(), "+", "plus line row");
-        assert_eq!(buf[(1, 7)].fg, Color::Green, "plus line must be green");
+        assert_eq!(buf[(1, 7)].fg, color::SUCCESS, "plus line must be success");
         assert_eq!(buf[(1, 4)].symbol(), "@", "hunk header row");
-        assert_eq!(buf[(1, 4)].fg, Color::Cyan, "hunk header must be cyan");
+        assert_eq!(buf[(1, 4)].fg, color::INFO, "hunk header must be info");
 
         // `---`/`+++` are file headers, not change lines: no +/- foreground.
         assert_eq!(buf[(1, 2)].symbol(), "-", "--- header row");
-        assert_ne!(buf[(1, 2)].fg, Color::Red, "--- header must not be red");
+        assert_ne!(
+            buf[(1, 2)].fg,
+            color::DANGER,
+            "--- header must not be danger"
+        );
         assert_eq!(buf[(1, 3)].symbol(), "+", "+++ header row");
-        assert_ne!(buf[(1, 3)].fg, Color::Green, "+++ header must not be green");
+        assert_ne!(
+            buf[(1, 3)].fg,
+            color::SUCCESS,
+            "+++ header must not be success"
+        );
     }
 
     #[test]

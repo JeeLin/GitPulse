@@ -2,7 +2,7 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{ListItem, ListState},
     Frame,
@@ -11,6 +11,7 @@ use ratatui::{
 use crate::app::TagsModal;
 use crate::git::TagInfo;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
+use crate::ui::components::theme::color;
 
 use super::components::state_panel::{self, PanelState};
 use super::{hint, named_title, pulls};
@@ -139,15 +140,15 @@ fn render_tag_list(f: &mut Frame, area: Rect, state: &mut TagsRender<'_>) {
 /// lightweight / annotated marker.
 fn tag_item(tag: &TagInfo, width: usize) -> ListItem<'static> {
     let (kind, kind_style) = if tag.annotated {
-        ("注释", Style::default().fg(Color::Cyan))
+        ("注释", Style::default().fg(color::INFO))
     } else {
-        ("轻量", Style::default().fg(Color::DarkGray))
+        ("轻量", Style::default().fg(color::FG_MUTED))
     };
     ListItem::new(Line::from(vec![
         Span::raw(pulls::ellipsize(&tag.name, width)),
         Span::styled(
             format!("  {}", pulls::ellipsize(&tag.target, width)),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(color::WARNING),
         ),
         Span::styled(format!("  {kind}"), kind_style),
     ]))
@@ -164,7 +165,7 @@ fn render_delete_dialog(f: &mut Frame, area: Rect, tag_to_delete: &str) {
         Span::raw("确定删除标签 "),
         Span::styled(
             tag_to_delete.to_string(),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(color::WARNING),
         ),
         Span::raw("?"),
     ])];

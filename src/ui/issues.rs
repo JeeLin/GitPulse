@@ -2,7 +2,7 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, ListItem, Paragraph, Wrap},
     Frame,
@@ -10,6 +10,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::platform::{IssueDetail, IssueSummary};
+use crate::ui::components::theme::color;
 
 use super::pulls::{
     cells, ellipsize, meta_budget, panel_title, render_disconnected, render_load_error,
@@ -104,7 +105,7 @@ pub fn render_issue_detail(f: &mut Frame, content: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(Span::styled(
                 ISSUE_DETAIL_PLACEHOLDER,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(color::FG_MUTED),
             ))
             .block(block),
             content,
@@ -144,7 +145,7 @@ fn body_paragraph(detail: &IssueDetail) -> Paragraph<'static> {
     let body: Vec<Line> = if detail.body.trim().is_empty() {
         vec![Line::from(Span::styled(
             "（无正文）",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(color::FG_MUTED),
         ))]
     } else {
         detail
@@ -192,7 +193,7 @@ fn summary_lines(issue: &IssueSummary, width: usize) -> Vec<Line<'static>> {
     let fixed = cells(&number) + cells(&state_tag);
 
     let head = Line::from(vec![
-        Span::styled(number, Style::default().fg(Color::Cyan)),
+        Span::styled(number, Style::default().fg(color::INFO)),
         Span::raw(ellipsize(&issue.title, head_width.saturating_sub(fixed))),
         Span::styled(state_tag, state_style(&issue.state)),
     ]);
@@ -200,7 +201,7 @@ fn summary_lines(issue: &IssueSummary, width: usize) -> Vec<Line<'static>> {
     if budget > 0 {
         lines.push(Line::from(Span::styled(
             ellipsize(&meta, meta_width),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(color::FG_MUTED),
         )));
     }
     lines
@@ -232,14 +233,14 @@ fn issue_item(issue: &IssueSummary, width: usize) -> ListItem<'static> {
     let fixed = cells(&number) + cells(&state_tag);
 
     let mut spans = vec![
-        Span::styled(number, Style::default().fg(Color::Cyan)),
+        Span::styled(number, Style::default().fg(color::INFO)),
         Span::raw(ellipsize(&issue.title, head_width.saturating_sub(fixed))),
         Span::styled(state_tag, state_style(&issue.state)),
     ];
     if budget > 0 {
         spans.push(Span::styled(
             format!("{META_GAP}{}", ellipsize(&meta, budget)),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(color::FG_MUTED),
         ));
     }
     ListItem::new(Line::from(spans))

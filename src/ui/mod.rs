@@ -19,7 +19,7 @@ pub mod tags;
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
@@ -88,16 +88,16 @@ pub(crate) fn submit_hints(submit: &str) -> Line<'static> {
     join_hints([hint("Enter", submit), hint("Esc", "取消")])
 }
 
-/// Draw the status row of the footer (§4.2): errors render red and persist
-/// until the next operation, anything else keeps the default style. `None`
-/// leaves the row blank.
+/// Draw the status row of the footer (§4.2): errors render on `danger` and
+/// persist until the next operation, anything else keeps the default style.
+/// `None` leaves the row blank.
 ///
 /// Called through [`footer::render_footer`] — views never draw the row
 /// themselves.
 pub fn render_status_line(f: &mut Frame, area: Rect, status: Option<&StatusLine>) {
     if let Some(status) = status {
         let style = if status.is_error {
-            Style::default().fg(Color::Red)
+            Style::default().fg(color::DANGER)
         } else {
             Style::default()
         };
@@ -190,20 +190,30 @@ pub(crate) fn render_named_list(
     f.render_stateful_widget(list, area, list_state);
 }
 
-/// Symbol and color of a working-tree [`FileState`] in the file list (G11).
+/// Symbol and style of a working-tree [`FileState`] in the file list (G11).
 ///
 /// The mapping is git semantics — which state a status flag means and which
-/// color stands for it — so it lives with the shared render helpers rather
-/// than in the closure that builds the rows; the repo panel only composes
-/// the styled spans. The symbol is two cells (`M `) so the path columns of
-/// every row line up.
-pub(crate) fn file_state_symbol(state: FileState) -> (&'static str, Color) {
+/// §5.1 `git_*` token stands for it — so it lives with the shared render
+/// helpers rather than in the closure that builds the rows; the repo panel
+/// only composes the styled spans. `Conflicted` borrows `danger` and adds
+/// bold: §5.1 gives file states no hue of their own, and a merge conflict has
+/// to read as loudly as the deletion it usually resolves into. `Untracked`
+/// has no `git_*` alias either — §5.1 stops at the four tracked states — so
+/// it takes the bare `info` hue, which is neutral where a `git_*` alias would
+/// have mislabelled it. The symbol is
+/// two cells (`M `) so the path columns of every row line up.
+pub(crate) fn file_state_symbol(state: FileState) -> (&'static str, Style) {
     match state {
-        FileState::Modified => ("M ", Color::Yellow),
-        FileState::Added => ("A ", Color::Green),
-        FileState::Deleted => ("D ", Color::Red),
-        FileState::Untracked => ("? ", Color::Cyan),
-        FileState::Conflicted => ("U ", Color::Magenta),
+        FileState::Modified => ("M ", Style::default().fg(color::GIT_MOD)),
+        FileState::Added => ("A ", Style::default().fg(color::GIT_ADD)),
+        FileState::Deleted => ("D ", Style::default().fg(color::GIT_DEL)),
+        FileState::Untracked => ("? ", Style::default().fg(color::INFO)),
+        FileState::Conflicted => (
+            "U ",
+            Style::default()
+                .fg(color::DANGER)
+                .add_modifier(Modifier::BOLD),
+        ),
     }
 }
 
@@ -224,7 +234,7 @@ pub fn render_confirm_overlay(
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Red));
+        .style(Style::default().fg(color::DANGER));
 
     let mut lines = body;
     lines.push(Line::from(""));
@@ -241,7 +251,7 @@ pub fn render_confirm_overlay(
 }
 
 /// Shared single-line input overlay (convention 9): a centered popup titled
-/// `title` showing `text` after a cyan `> ` prompt. `show_cursor` appends the
+/// `title` showing `text` after an accent `> ` prompt. `show_cursor` appends the
 /// `▌` caret (config manual input); popups whose hints live in the title
 /// (branch create, commit message) omit it. The line scrolls horizontally by
 /// the display width that does not fit so the tail — and with it the caret —
@@ -251,11 +261,11 @@ pub fn render_input_overlay(f: &mut Frame, area: Rect, title: &str, text: &str, 
     f.render_widget(Clear, popup);
 
     let mut spans = vec![
-        Span::styled("> ", Style::default().fg(Color::Cyan)),
+        Span::styled("> ", Style::default().fg(color::ACCENT)),
         Span::raw(text),
     ];
     if show_cursor {
-        spans.push(Span::styled("▌", Style::default().fg(Color::Cyan)));
+        spans.push(Span::styled("▌", Style::default().fg(color::ACCENT)));
     }
     let block = Block::default().title(title).borders(Borders::ALL);
     let line = Line::from(spans);
@@ -646,6 +656,8 @@ mod tests {
     use crate::git::{BranchInfo, FileEntry, FileState};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use std::fs;
+    use std::path::Path;
 
     fn base_app() -> App {
         App::new(Config::default())
@@ -1029,7 +1041,7 @@ mod tests {
         );
         assert_eq!(
             buffer[(0, height - 2)].fg,
-            Color::Red,
+            color::DANGER,
             "view {view:?}: the operation failure renders in danger"
         );
         let text = compact_frame(&buffer);
@@ -1521,5 +1533,154 @@ mod tests {
                     .map(move |x| (x, y))
             })
             .collect()
+    }
+
+    /// §5 hard rule: **颜色一律走 token，不写死色值**. `components::theme` is the
+    /// single place allowed to name a `ratatui::style::Color`; every other
+    /// module under `src/ui` reads its hues from `theme::color`, so a theme
+    /// change stays one edit and no view can drift into a private palette.
+    ///
+    /// This is the source-level gate for that rule: it walks `src/ui/**` and
+    /// fails on any `Color::` outside `theme.rs`. Test modules are stripped
+    /// first (a test may legitimately pin a token's value, and the palette test
+    /// inside `theme.rs` must name the hexes), so only production code is
+    /// checked.
+    #[test]
+    fn design_no_bare_color_literals_outside_theme() {
+        const THEME: &str = "src/ui/components/theme.rs";
+        let ui_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui");
+
+        let mut offenders: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        walk_rs_files(&ui_dir, &mut |path| {
+            let relative = path
+                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                .expect("ui files live under the manifest dir")
+                .to_string_lossy()
+                .replace('\\', "/");
+            if relative == THEME {
+                return;
+            }
+            let source = fs::read_to_string(path).expect("ui sources are readable");
+            checked += 1;
+            for (idx, line) in strip_test_modules(&source).lines().enumerate() {
+                if line.contains("Color::") {
+                    offenders.push(format!("{relative}:{}", idx + 1));
+                }
+            }
+        });
+
+        assert!(
+            checked > 0,
+            "the gate found no sources to check — it would pass vacuously"
+        );
+        assert!(
+            offenders.is_empty(),
+            "§5 forbids naming a `Color::` outside {THEME}; these lines do:\n  {}",
+            offenders.join("\n  ")
+        );
+    }
+
+    /// Depth-first walk of every `.rs` file under `dir`, calling `visit` on
+    /// each. `read_dir` order is unspecified, so nothing here may assume an
+    /// order.
+    fn walk_rs_files(dir: &Path, visit: &mut impl FnMut(&Path)) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk_rs_files(&path, visit);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                visit(&path);
+            }
+        }
+    }
+
+    /// `source` with every `#[cfg(test)] mod … { … }` block removed, so the
+    /// color gate reads production code only.
+    ///
+    /// Deliberately a scanner rather than a parser, and deliberately pragmatic:
+    /// an `#[cfg(test)]` is only treated as a test module when the line it
+    /// decorates starts with `mod` (`help.rs` gates a single `use` on it), and
+    /// the block ends at the brace that balances its opening one — a
+    /// string/char/comment-aware scan, because a `{` inside `"{}"` in an
+    /// assertion message would otherwise close the block early.
+    fn strip_test_modules(source: &str) -> String {
+        let mut kept = String::with_capacity(source.len());
+        let lines: Vec<&str> = source.lines().collect();
+        let mut idx = 0usize;
+        while idx < lines.len() {
+            let line = lines[idx];
+            let decorated_mod = line.trim_start().starts_with("#[cfg(test)]")
+                && lines[idx + 1..]
+                    .iter()
+                    .find(|l| !l.trim_start().starts_with('#'))
+                    .is_some_and(|l| l.trim_start().starts_with("mod "));
+            if !decorated_mod {
+                kept.push_str(line);
+                kept.push('\n');
+                idx += 1;
+                continue;
+            }
+            idx += 1;
+            let mut depth = 0i32;
+            let mut in_string = false;
+            let mut escaped = false;
+            while idx < lines.len() {
+                let current = lines[idx];
+                idx += 1;
+                for ch in current.chars() {
+                    if escaped {
+                        escaped = false;
+                        continue;
+                    }
+                    match ch {
+                        '\\' if in_string => escaped = true,
+                        '"' => in_string = !in_string,
+                        '{' if !in_string => depth += 1,
+                        '}' if !in_string => depth -= 1,
+                        _ => {}
+                    }
+                }
+                if depth <= 0 {
+                    break;
+                }
+            }
+        }
+        kept
+    }
+
+    /// The gate reads production code, so its own fixtures must not leak into
+    /// the checked sources: a synthetic `Color::` line has to be reported (and
+    /// a `#[cfg(test)]` line must be stripped) or the gate proves nothing.
+    #[test]
+    fn design_color_gate_scanner_isolates_production_code() {
+        let source = "\
+const A: u8 = 1;
+#[cfg(test)]
+mod tests {
+    const IN_TEST: u8 = 2;
+    #[test]
+    fn t() {
+        assert!(IN_TEST == 2, \"braces {} in a message\");
+    }
+}
+const B: u8 = 3;
+";
+        let stripped = strip_test_modules(source);
+        assert!(
+            !stripped.contains("IN_TEST"),
+            "the test module must be stripped: {stripped}"
+        );
+        assert!(
+            !stripped.contains("mod tests"),
+            "the test module header must be stripped: {stripped}"
+        );
+        assert!(
+            stripped.contains("const A") && stripped.contains("const B"),
+            "production lines on both sides must survive: {stripped}"
+        );
     }
 }

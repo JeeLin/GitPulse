@@ -2,7 +2,7 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame,
@@ -14,7 +14,7 @@ use crate::git::RepoInfo;
 use super::{hint, pulls};
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 use crate::ui::components::state_panel::{self, PanelState};
-use crate::ui::components::theme::role;
+use crate::ui::components::theme::{color, role};
 
 /// Borrowed render state for the dashboard, referencing `App.repos` directly
 /// so no mock data source exists (checkpoint 2).
@@ -197,16 +197,16 @@ fn render_repo_list(f: &mut Frame, area: Rect, state: &mut DashboardState<'_>) {
             let dirty_count =
                 repo.dirty.untracked + repo.dirty.modified + repo.dirty.added + repo.dirty.deleted;
             let dirty_color = if dirty_count == 0 {
-                Color::Green
+                color::SUCCESS
             } else {
-                Color::Red
+                color::DANGER
             };
 
             let line = Line::from(vec![
                 Span::raw(pad_cells(&pulls::ellipsize(&repo.name, 20), 20)),
                 Span::styled(
                     pad_cells(&pulls::ellipsize(&repo.branch, 15), 15),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(color::ACCENT),
                 ),
                 Span::styled(
                     format!("{:>4}", dirty_count),
@@ -216,7 +216,7 @@ fn render_repo_list(f: &mut Frame, area: Rect, state: &mut DashboardState<'_>) {
                 Span::styled(
                     format!("{}↑{}↓", repo.ahead, repo.behind),
                     if repo.ahead > 0 {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(color::WARNING)
                     } else {
                         Style::default()
                     },
@@ -252,19 +252,19 @@ fn render_batch_log(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
     let lines: Vec<Line> = state.batch_log[visible.min(state.batch_log.len())..]
         .iter()
         .map(|entry| {
-            let color = if entry.is_error {
-                Color::Red
+            let tone = if entry.is_error {
+                color::DANGER
             } else if entry.is_success {
-                Color::Green
+                color::SUCCESS
             } else {
-                Color::DarkGray
+                color::FG_MUTED
             };
             Line::from(vec![
                 Span::styled(
                     pad_cells(&pulls::ellipsize(&entry.name, 20), 20),
-                    Style::default().fg(color),
+                    Style::default().fg(tone),
                 ),
-                Span::styled(entry.message.clone(), Style::default().fg(color)),
+                Span::styled(entry.message.clone(), Style::default().fg(tone)),
             ])
         })
         .collect();
