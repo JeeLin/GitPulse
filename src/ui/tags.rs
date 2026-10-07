@@ -10,6 +10,7 @@ use ratatui::{
 
 use crate::app::TagsModal;
 use crate::git::TagInfo;
+use crate::ui::components::cells;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 use crate::ui::components::theme::color;
 
@@ -145,9 +146,9 @@ fn tag_item(tag: &TagInfo, width: usize) -> ListItem<'static> {
         ("轻量", Style::default().fg(color::FG_MUTED))
     };
     ListItem::new(Line::from(vec![
-        Span::raw(pulls::ellipsize(&tag.name, width)),
+        Span::raw(cells::ellipsize(&tag.name, width)),
         Span::styled(
-            format!("  {}", pulls::ellipsize(&tag.target, width)),
+            format!("  {}", cells::ellipsize(&tag.target, width)),
             Style::default().fg(color::WARNING),
         ),
         Span::styled(format!("  {kind}"), kind_style),

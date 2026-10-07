@@ -14,6 +14,7 @@ use super::components::state_panel::{self, PanelState};
 use super::hint;
 use super::repo::centered_rect;
 use crate::git::show_path;
+use crate::ui::components::cells;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 use crate::ui::components::theme::color;
 
@@ -172,7 +173,7 @@ fn render_dir_picker(
 
     // Path line, truncated by display width so long paths stay on one row
     // and the ellipsis fits within the frame.
-    let path = ellipsize(&show_path(dir), inner.width as usize);
+    let path = cells::ellipsize_middle(&show_path(dir), inner.width as usize);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             path,
@@ -197,63 +198,6 @@ fn render_dir_picker(
         .highlight_style(super::list_highlight())
         .highlight_symbol(super::HIGHLIGHT_SYMBOL);
     f.render_stateful_widget(list, rows[1], list_state);
-}
-
-/// Shorten `text` to at most `max` display columns around a middle
-/// ellipsis, so long directory paths remain readable on a single line.
-/// Width is measured in terminal cells (CJK chars count as 2), matching how
-/// ratatui lays out the rendered line.
-fn ellipsize(text: &str, max: usize) -> String {
-    let width = |s: &str| Span::raw(s.to_string()).width();
-    if width(text) <= max {
-        return text.to_string();
-    }
-    if max <= 1 {
-        return "…".to_string();
-    }
-    let head_budget = (max - 1) / 2;
-
-    let chars: Vec<char> = text.chars().collect();
-    let mut head_end = 0;
-    let mut head_width = 0;
-    for (i, c) in chars.iter().enumerate() {
-        let cw = width(&c.to_string());
-        if head_width + cw > head_budget {
-            break;
-        }
-        head_width += cw;
-        head_end = i + 1;
-    }
-    // Never drop the head entirely: force one cell (or a 2-cell CJK char)
-    // even when it exceeds the budget, and pay for it out of the tail so the
-    // total still fits within `max` columns. When head + ellipsis cannot fit
-    // at all (max == 2 with a 2-column first char), the head alone stands in
-    // for the truncated form.
-    if head_end == 0 && !chars.is_empty() {
-        head_end = 1;
-        head_width = width(&chars[0].to_string());
-        if head_width + 1 > max {
-            return chars[0].to_string();
-        }
-    }
-    let tail_budget = (max - 1).saturating_sub(head_width);
-
-    let mut tail_start = chars.len();
-    let mut tail_width = 0;
-    while tail_start > head_end {
-        let c = chars[tail_start - 1];
-        let cw = width(&c.to_string());
-        if tail_width + cw > tail_budget {
-            break;
-        }
-        tail_width += cw;
-        tail_start -= 1;
-    }
-
-    let mut out: String = chars[..head_end].iter().collect();
-    out.push('…');
-    out.extend(chars[tail_start..].iter());
-    out
 }
 
 /// Delete-confirm popup geometry: `60%` of the frame width, `7` rows so the
@@ -694,36 +638,41 @@ mod tests {
     }
 
     #[test]
-    fn ellipsize_keeps_short_text_and_heads_tails_long_text() {
-        assert_eq!(ellipsize("abc", 10), "abc");
-        let long = "a".repeat(20);
-        let out = ellipsize(&long, 9);
-        assert_eq!(out.chars().count(), 9, "must fit: {out}");
-        assert!(out.contains('…'), "missing ellipsis: {out}");
-        assert_eq!(ellipsize("xy", 1), "…");
-
-        // CJK chars occupy 2 columns each: measure in display width, not chars.
-        let cjk = format!("/{}", ["中文目录"; 10].join("/"));
-        let out = ellipsize(&cjk, 12);
-        assert!(out.contains('…'), "missing ellipsis: {out}");
+    fn picker_renders_a_truncated_path_with_a_middle_ellipsis() {
+        let long = format!("/{}/", ["deep-directory"; 12].join("/"));
+        let dirs: Vec<PathBuf> = vec![PathBuf::from(&long)];
+        let mut list_state = ListState::default();
+        let mut picker_state = ListState::default();
+        picker_state.select(Some(0));
+        let mut state = base_state(&dirs, &mut list_state, &mut picker_state);
+        state.show_picker = true;
+        state.picker_dir = Path::new(&long);
+        let text = render_to_text(state);
+        let path_line = text
+            .lines()
+            .find(|line| line.contains('…'))
+            .unwrap_or_else(|| panic!("picker path must be elided: {text}"));
+        // The frame renders as one flattened block of box-drawing, so the path
+        // is the run between two panel borders: the only `│`-delimited chunk
+        // that starts at the path root and carries a middle mark. (The hint row
+        // also contains `…` and `/上级`, so requiring both is what keeps this
+        // from matching the wrong run.)
+        let path = path_line
+            .split('│')
+            .map(str::trim)
+            .find(|chunk| chunk.starts_with('/') && chunk.contains('…'))
+            .unwrap_or_else(|| panic!("picker path must be elided: {text}"));
+        let (head, tail) = path
+            .split_once('…')
+            .expect("the elided path carries exactly one middle mark");
+        assert!(head.starts_with('/'), "a path keeps its root: {path}");
         assert!(
-            Span::raw(out.clone()).width() <= 12,
-            "display width must fit 12 cells: {out}"
+            tail.ends_with('/'),
+            "a path keeps its trailing entry: {path}"
         );
-
-        // Forced-head fallback path (head does not fit its budget): the
-        // result must still fit within `max` display columns.
-        for (text, max) in [("abcd", 2), ("中ab", 3), ("中文目录", 4), ("a中b", 5)] {
-            let out = ellipsize(text, max);
-            assert!(
-                Span::raw(out.clone()).width() <= max,
-                "fallback must fit {max} cells: {out}"
-            );
-        }
-        assert_eq!(
-            ellipsize("中ab", 2),
-            "中",
-            "head alone when no ellipsis fits"
+        assert!(
+            tail.len() < long.len(),
+            "only the middle is elided, never the whole path: {path}"
         );
     }
 }

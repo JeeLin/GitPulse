@@ -14,6 +14,7 @@ use crate::ui::components::footer::{hints as join_hints, HintRow};
 use super::components::state_panel::{self, PanelState};
 use super::components::theme::{color, role};
 use super::{hint, pulls};
+use crate::ui::components::cells;
 
 /// Borrowed render state for the branch panel, referencing `App.branches`
 /// directly so no mock data source exists (checkpoint 2).
@@ -146,11 +147,11 @@ fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) 
             };
             let mut spans = vec![
                 Span::raw(marker),
-                Span::styled(pulls::ellipsize(&branch.name, width), name_style),
+                Span::styled(cells::ellipsize(&branch.name, width), name_style),
             ];
             if let Some(upstream) = &branch.upstream {
                 spans.push(Span::styled(
-                    format!("  → {}", pulls::ellipsize(upstream, width)),
+                    format!("  → {}", cells::ellipsize(upstream, width)),
                     Style::default().fg(color::FG_MUTED),
                 ));
             }

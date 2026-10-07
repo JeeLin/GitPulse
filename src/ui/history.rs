@@ -12,6 +12,7 @@ use crate::git::{CommitDetail, CommitRow, RefKind};
 
 use super::components::state_panel::{self, PanelState};
 use super::{hint, named_title, pulls};
+use crate::ui::components::cells;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 use crate::ui::components::theme::{color, role};
 
@@ -146,7 +147,7 @@ fn commit_item(commit: &CommitRow, width: usize) -> ListItem<'static> {
     let mut spans = vec![
         Span::styled(commit.id.clone(), Style::default().fg(color::WARNING)),
         Span::raw(" "),
-        Span::raw(pulls::ellipsize(&commit.summary, width)),
+        Span::raw(cells::ellipsize(&commit.summary, width)),
     ];
     for mark in &commit.refs {
         spans.push(Span::raw(" "));

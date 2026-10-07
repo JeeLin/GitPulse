@@ -11,7 +11,8 @@ use ratatui::{
 use crate::app::BatchLogLine;
 use crate::git::RepoInfo;
 
-use super::{hint, pulls};
+use super::hint;
+use crate::ui::components::cells;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 use crate::ui::components::state_panel::{self, PanelState};
 use crate::ui::components::theme::{color, role};
@@ -203,9 +204,9 @@ fn render_repo_list(f: &mut Frame, area: Rect, state: &mut DashboardState<'_>) {
             };
 
             let line = Line::from(vec![
-                Span::raw(pad_cells(&pulls::ellipsize(&repo.name, 20), 20)),
+                Span::raw(cells::pad_cells(&cells::ellipsize(&repo.name, 20), 20)),
                 Span::styled(
-                    pad_cells(&pulls::ellipsize(&repo.branch, 15), 15),
+                    cells::pad_cells(&cells::ellipsize(&repo.branch, 15), 15),
                     Style::default().fg(color::ACCENT),
                 ),
                 Span::styled(
@@ -261,7 +262,7 @@ fn render_batch_log(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
             };
             Line::from(vec![
                 Span::styled(
-                    pad_cells(&pulls::ellipsize(&entry.name, 20), 20),
+                    cells::pad_cells(&cells::ellipsize(&entry.name, 20), 20),
                     Style::default().fg(tone),
                 ),
                 Span::styled(entry.message.clone(), Style::default().fg(tone)),
@@ -307,19 +308,6 @@ fn render_empty_state(f: &mut Frame, area: Rect, focused: bool) {
 /// would advertise a second, stale dispatch surface (§6.1 KEYS).
 pub(crate) fn dashboard_hints() -> HintRow {
     HintRow::new(join_hints([hint("⏎", "进入仓库"), hint("n", "添加目录")]))
-}
-
-/// Pad `text` to exactly `width` terminal cells by appending spaces, counting
-/// CJK glyphs as two cells (ratatui's display-width model) so the fixed columns
-/// of the dashboard row stay aligned when a repo/branch name mixes scripts —
-/// the same width model [`pulls::ellipsize`] and [`pulls::cells`] use.
-fn pad_cells(text: &str, width: usize) -> String {
-    let used = pulls::cells(text);
-    if used >= width {
-        text.to_string()
-    } else {
-        format!("{text}{}", " ".repeat(width - used))
-    }
 }
 
 /// Format a Unix timestamp as `YYYY-MM-DD HH:MM` (UTC) without chrono.

@@ -10,6 +10,7 @@ use super::components::state_panel::{self, PanelState};
 use super::components::theme::{color, role};
 use super::{hint, pulls, render_confirm_overlay};
 use crate::git::FileEntry;
+use crate::ui::components::cells;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 
 /// State for rendering the single-repo view.
@@ -128,7 +129,7 @@ fn render_file_list(f: &mut Frame, area: Rect, state: &mut RepoState<'_>) {
 
             let line = Line::from(vec![
                 Span::styled(symbol, style),
-                Span::raw(pulls::ellipsize(&entry.path.display().to_string(), width)),
+                Span::raw(cells::ellipsize(&entry.path.display().to_string(), width)),
             ]);
             ListItem::new(line)
         })

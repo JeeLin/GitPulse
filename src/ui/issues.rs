@@ -13,10 +13,10 @@ use crate::platform::{IssueDetail, IssueSummary};
 use crate::ui::components::theme::color;
 
 use super::pulls::{
-    cells, ellipsize, meta_budget, panel_title, render_disconnected, render_load_error,
-    render_receipts_empty, render_receipts_loading, render_receipts_rows, row_width, state_style,
-    META_GAP,
+    meta_budget, panel_title, render_disconnected, render_load_error, render_receipts_empty,
+    render_receipts_loading, render_receipts_rows, row_width, state_style, META_GAP,
 };
+use crate::ui::components::cells;
 /// Empty-state copy: no open issues. Zero rows is a valid state — a failed load
 /// paints the panel's `error` state.
 const EMPTY_ISSUES: &str = "—（暂无 Issues）";
@@ -186,21 +186,24 @@ fn summary_lines(issue: &IssueSummary, width: usize) -> Vec<Line<'static>> {
     // in (budget == 0) is dropped — the head then takes the full width.
     let budget = meta_budget(&meta, width);
     let (head_width, meta_width) = if budget > 0 {
-        (width - budget - cells(META_GAP), budget)
+        (width - budget - cells::width(META_GAP), budget)
     } else {
         (width, 0)
     };
-    let fixed = cells(&number) + cells(&state_tag);
+    let fixed = cells::width(&number) + cells::width(&state_tag);
 
     let head = Line::from(vec![
         Span::styled(number, Style::default().fg(color::INFO)),
-        Span::raw(ellipsize(&issue.title, head_width.saturating_sub(fixed))),
+        Span::raw(cells::ellipsize(
+            &issue.title,
+            head_width.saturating_sub(fixed),
+        )),
         Span::styled(state_tag, state_style(&issue.state)),
     ]);
     let mut lines = vec![head];
     if budget > 0 {
         lines.push(Line::from(Span::styled(
-            ellipsize(&meta, meta_width),
+            cells::ellipsize(&meta, meta_width),
             Style::default().fg(color::FG_MUTED),
         )));
     }
@@ -226,20 +229,23 @@ fn issue_item(issue: &IssueSummary, width: usize) -> ListItem<'static> {
 
     let budget = meta_budget(&meta, width);
     let head_width = if budget > 0 {
-        width - budget - cells(META_GAP)
+        width - budget - cells::width(META_GAP)
     } else {
         width
     };
-    let fixed = cells(&number) + cells(&state_tag);
+    let fixed = cells::width(&number) + cells::width(&state_tag);
 
     let mut spans = vec![
         Span::styled(number, Style::default().fg(color::INFO)),
-        Span::raw(ellipsize(&issue.title, head_width.saturating_sub(fixed))),
+        Span::raw(cells::ellipsize(
+            &issue.title,
+            head_width.saturating_sub(fixed),
+        )),
         Span::styled(state_tag, state_style(&issue.state)),
     ];
     if budget > 0 {
         spans.push(Span::styled(
-            format!("{META_GAP}{}", ellipsize(&meta, budget)),
+            format!("{META_GAP}{}", cells::ellipsize(&meta, budget)),
             Style::default().fg(color::FG_MUTED),
         ));
     }

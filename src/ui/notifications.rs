@@ -14,9 +14,10 @@ use crate::platform::{notifications_label, NotificationSummary};
 use crate::ui::components::theme::color;
 
 use super::pulls::{
-    cells, ellipsize, meta_budget, render_disconnected, render_load_error, render_receipts_empty,
+    meta_budget, render_disconnected, render_load_error, render_receipts_empty,
     render_receipts_loading, render_receipts_rows, row_width, META_GAP,
 };
+use crate::ui::components::cells;
 
 /// Empty-state copy: nothing to review. Zero rows is a valid state — a failed
 /// load paints the panel's `error` state.
@@ -87,11 +88,11 @@ fn notification_item(note: &NotificationSummary, width: usize) -> ListItem<'stat
 
     let budget = meta_budget(&meta, width);
     let head_width = if budget > 0 {
-        width - budget - cells(META_GAP)
+        width - budget - cells::width(META_GAP)
     } else {
         width
     };
-    let fixed = cells(marker) + cells(&type_tag);
+    let fixed = cells::width(marker) + cells::width(&type_tag);
     let title_style = if note.unread {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
@@ -108,14 +109,14 @@ fn notification_item(note: &NotificationSummary, width: usize) -> ListItem<'stat
     let mut spans = vec![
         Span::styled(marker, marker_style),
         Span::styled(
-            ellipsize(&note.subject_title, head_width.saturating_sub(fixed)),
+            cells::ellipsize(&note.subject_title, head_width.saturating_sub(fixed)),
             title_style,
         ),
         Span::styled(type_tag, Style::default().fg(color::INFO)),
     ];
     if budget > 0 {
         spans.push(Span::styled(
-            format!("{META_GAP}{}", ellipsize(&meta, budget)),
+            format!("{META_GAP}{}", cells::ellipsize(&meta, budget)),
             Style::default().fg(color::FG_MUTED),
         ));
     }

@@ -14,6 +14,7 @@ use ratatui::{
 use super::hint;
 use crate::app::App;
 use crate::platform::{CheckSummary, PrDetail, PrSummary};
+use crate::ui::components::cells;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 use crate::ui::components::theme::color;
 
@@ -40,51 +41,20 @@ const MIN_HEAD_WIDTH: usize = 16;
 /// PR with thirty runs cannot eat the description pane.
 const MAX_DETAIL_CHECKS: usize = 10;
 
-/// Display width of `text` in terminal cells (a CJK glyph costs 2), the unit
-/// ratatui lays out and clips rows with.
-pub(crate) fn cells(text: &str) -> usize {
-    Line::from(text).width()
-}
-
-/// Cut `text` to `max` display cells, marking the cut with a trailing `…` so
-/// a truncated row reads as truncated instead of silently ending.
-pub(crate) fn ellipsize(text: &str, max: usize) -> String {
-    if cells(text) <= max {
-        return text.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let budget = max - 1; // one cell for the ellipsis itself
-    let mut out = String::new();
-    let mut used = 0usize;
-    for c in text.chars() {
-        let mut buf = [0u8; 4];
-        let cw = cells(c.encode_utf8(&mut buf));
-        if used + cw > budget {
-            break;
-        }
-        used += cw;
-        out.push(c);
-    }
-    out.push('…');
-    out
-}
-
 /// Cells of a `width`-wide row the trailing meta part (`author  labels  time`)
 /// may occupy: everything it needs when there is room, else at least a third
 /// of the row (never a sliver), and nothing at all on very narrow rows — the
 /// head then uses the full width.
 pub(crate) fn meta_budget(meta: &str, width: usize) -> usize {
-    let needed = cells(meta);
+    let needed = cells::width(meta);
     if needed == 0 {
         return 0;
     }
-    if needed + cells(META_GAP) <= width {
+    if needed + cells::width(META_GAP) <= width {
         return needed;
     }
     let target = (width / 3).max(12).min(needed);
-    let target = target.min(width.saturating_sub(MIN_HEAD_WIDTH + cells(META_GAP)));
+    let target = target.min(width.saturating_sub(MIN_HEAD_WIDTH + cells::width(META_GAP)));
     if target >= 8 {
         target
     } else {
@@ -264,9 +234,9 @@ pub(crate) fn mergeable_label(
 pub(crate) fn check_line(check: &CheckSummary, width: usize) -> Line<'static> {
     let status = column(&check.status);
     let conclusion = column(&check.conclusion);
-    let used = cells(&status) + cells(&conclusion) + 2 * cells(META_GAP);
+    let used = cells::width(&status) + cells::width(&conclusion) + 2 * cells::width(META_GAP);
     Line::from(vec![
-        Span::raw(ellipsize(&check.name, width.saturating_sub(used))),
+        Span::raw(cells::ellipsize(&check.name, width.saturating_sub(used))),
         Span::styled(format!("{META_GAP}{status}"), check_status_style(&status)),
         Span::styled(
             format!("{META_GAP}{conclusion}"),
@@ -571,10 +541,10 @@ fn pull_item(pr: &PrSummary, width: usize) -> ListItem<'static> {
     } else {
         String::new()
     };
-    let fixed = cells(&number) + cells(&state_tag) + cells(&draft_tag);
+    let fixed = cells::width(&number) + cells::width(&state_tag) + cells::width(&draft_tag);
     let head = Line::from(vec![
         Span::styled(number, Style::default().fg(color::INFO)),
-        Span::raw(ellipsize(&pr.title, width.saturating_sub(fixed))),
+        Span::raw(cells::ellipsize(&pr.title, width.saturating_sub(fixed))),
         Span::styled(state_tag, state_style(&pr.state)),
         Span::styled(draft_tag, Style::default().fg(color::WARNING)),
     ]);
@@ -584,7 +554,7 @@ fn pull_item(pr: &PrSummary, width: usize) -> ListItem<'static> {
         pr.author, pr.head_ref, pr.base_ref, pr.updated_at
     );
     let tail = Line::from(Span::styled(
-        ellipsize(&meta, width),
+        cells::ellipsize(&meta, width),
         Style::default().fg(color::FG_MUTED),
     ));
     ListItem::new(vec![head, tail])
@@ -729,10 +699,13 @@ fn summary_lines(
     } else {
         String::new()
     };
-    let fixed = cells(&number) + cells(&state_tag) + cells(&draft_tag);
+    let fixed = cells::width(&number) + cells::width(&state_tag) + cells::width(&draft_tag);
     let head = Line::from(vec![
         Span::styled(number, Style::default().fg(color::INFO)),
-        Span::raw(ellipsize(&summary.title, width.saturating_sub(fixed))),
+        Span::raw(cells::ellipsize(
+            &summary.title,
+            width.saturating_sub(fixed),
+        )),
         Span::styled(state_tag, state_style(&summary.state)),
         Span::styled(draft_tag, Style::default().fg(color::WARNING)),
     ]);
@@ -745,7 +718,7 @@ fn summary_lines(
     let tail = Line::from(vec![
         Span::styled(merge.to_string(), merge_style),
         Span::styled(
-            ellipsize(&meta, width.saturating_sub(cells(merge))),
+            cells::ellipsize(&meta, width.saturating_sub(cells::width(merge))),
             Style::default().fg(color::FG_MUTED),
         ),
     ]);
@@ -960,21 +933,6 @@ mod tests {
         );
         assert!(text.contains("未知"), "uncomputed mergeability: {text}");
         assert!(text.contains("[草稿]"), "missing draft badge: {text}");
-    }
-
-    #[test]
-    fn ellipsize_cuts_by_display_width_not_char_count() {
-        assert_eq!(ellipsize("hello", 10), "hello", "fits, stays verbatim");
-        assert_eq!(ellipsize("hello", 5), "hello", "exact fit stays verbatim");
-        assert_eq!(ellipsize("hello", 4), "hel…", "tail is cut, not the head");
-        assert_eq!(
-            ellipsize("中文标题", 5),
-            "中文…",
-            "wide glyphs count two, so only two fit under the mark"
-        );
-        assert_eq!(ellipsize("中文标题", 4), "中…", "one wide glyph + the mark");
-        assert_eq!(ellipsize("hello", 0), "", "no budget, no text");
-        assert_eq!(ellipsize("hello", 1), "…", "one cell only holds the mark");
     }
 
     #[test]
