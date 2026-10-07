@@ -14,11 +14,27 @@ use super::components::state_panel::{self, PanelState};
 use super::{hint, named_title, pulls};
 use crate::ui::components::cells;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
-use crate::ui::components::theme::{color, role};
+use crate::ui::components::theme::{color, role, spacing, width as theme_width};
 
 /// Inner width of the DAG column: one cell per lane, capped at the lanes
 /// `git::layout_graph` ever produces (`git::MAX_LANES`).
 const GRAPH_WIDTH: usize = crate::git::MAX_LANES;
+
+/// Cells the DAG column itself takes, borders included: the fixed context pane
+/// the list shares its rows with (§6.2.3).
+const GRAPH_COLUMNS: u16 = GRAPH_WIDTH as u16 + GRAPH_BORDER_COLUMNS;
+
+/// Frame width at which the detail pane may open beside the list (§5.4).
+///
+/// §5.4: "**仅当两个面板都能保住各自 `min_width`（列表 ≥28，详情 ≥32）时才允许
+/// 左右分栏**；否则回退为上下堆叠". [`theme_width::SPLIT_FLOOR`] is the
+/// arithmetic floor for a two-pane split, but history funds the DAG column
+/// first, so its split opens only once the frame pays for all three panes.
+const SPLIT_MIN: u16 = theme_width::SPLIT_FLOOR + GRAPH_COLUMNS;
+
+/// Ceiling on the detail pane, so a wide frame widens the commit list
+/// (whose rows carry the longest content) instead of the preview.
+const DETAIL_MAX: u16 = 44;
 
 /// Columns the DAG column's own [`Block`] takes beyond [`GRAPH_WIDTH`]: the
 /// vertical border on each side costs one cell (G23).
@@ -78,18 +94,7 @@ pub struct HistoryRender<'a> {
 /// load keeps its rows and the detail pane reports the failure — the content
 /// that arrived stays readable either way.
 pub fn render_history(f: &mut Frame, content: Rect, mut state: HistoryRender<'_>) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(GRAPH_WIDTH as u16 + GRAPH_BORDER_COLUMNS), // DAG + borders
-            Constraint::Min(24),                                           // commit list
-            Constraint::Percentage(40),                                    // detail pane
-        ])
-        .split(content);
-
-    let graph_area = columns[0];
-    let list_area = columns[1];
-    let detail_area = columns[2];
+    let (graph_area, list_area, detail_area) = split_history(content);
 
     if let Some(message) = state.load_error {
         // Which pane lost its content decides where the error state goes: a
@@ -109,6 +114,58 @@ pub fn render_history(f: &mut Frame, content: Rect, mut state: HistoryRender<'_>
     render_commit_list(f, list_area, &mut state);
     render_graph(f, graph_area, &state);
     render_detail(f, detail_area, &state);
+}
+
+/// §5.4 split gate for the history view (DAG + list + detail): side by side
+/// only when the frame funds the DAG column plus both floors — otherwise the
+/// detail pane stacks beneath the list so the list never gets squeezed below
+/// [`theme_width::LIST_MIN`] (§6.2.3). Mirrors the dashboard's
+/// compare-width-then-decide structure, with the DAG column as history's
+/// extra fixed pane.
+/// §5.4 split gate for the history view (DAG + list + detail): side by side
+/// only when the frame funds the DAG column plus both floors — otherwise the
+/// detail pane stacks beneath the list so the list never gets squeezed below
+/// [`theme_width::LIST_MIN`] (§6.2.3). Mirrors the dashboard's
+/// compare-width-then-decide structure, with the DAG column as history's
+/// extra fixed pane.
+fn split_history(content: Rect) -> (Rect, Rect, Rect) {
+    if content.width >= SPLIT_MIN {
+        // Side by side: list grows into the slack, the detail is floored at
+        // `PREVIEW_MIN` and capped at `DETAIL_MAX`.
+        let detail_w = (content
+            .width
+            .saturating_sub(GRAPH_COLUMNS + theme_width::LIST_MIN + spacing::GUTTER))
+        .clamp(theme_width::PREVIEW_MIN, DETAIL_MAX);
+        let list_w = content
+            .width
+            .saturating_sub(GRAPH_COLUMNS + 2 * spacing::GUTTER + detail_w);
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(GRAPH_COLUMNS),   // DAG
+                Constraint::Length(spacing::GUTTER), // gap
+                Constraint::Length(list_w),          // commit list
+                Constraint::Length(spacing::GUTTER), // gap
+                Constraint::Length(detail_w),        // detail
+            ])
+            .split(content);
+        (chunks[0], chunks[2], chunks[4])
+    } else {
+        // Stacked: the detail pane drops beneath the list and owns the
+        // full width, so neither pane is starved (§5.4: stacked fallback).
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(70), Constraint::Min(1)])
+            .split(content);
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(GRAPH_COLUMNS),
+                Constraint::Min(theme_width::LIST_MIN),
+            ])
+            .split(rows[0]);
+        (cols[0], cols[1], rows[1])
+    }
 }
 
 /// Footer hint row for the history view (§2.3): list navigation, then the
@@ -143,24 +200,71 @@ fn render_commit_list(f: &mut Frame, area: Rect, state: &mut HistoryRender<'_>) 
 }
 
 /// One commit row: short hash, summary, ref badges, then author and time.
+///
+/// §5.4 budget: the hash is the always-shown head; the ref badges identify
+/// the commit (HEAD / branch / tag) and are kept unless the row is starved
+/// below the hash's floor; the `  author time` suffix is the single
+/// Low-priority column and is the first to vanish whole (§5.4 低优先列先消失).
+/// The summary is ellipsized to whatever cells remain, then
+/// [`cells::fit_line`] guarantees the row never overflows.
 fn commit_item(commit: &CommitRow, width: usize) -> ListItem<'static> {
-    let mut spans = vec![
+    let head_str = format!("{} ", commit.id);
+    let head_width = cells::width(&head_str);
+
+    // Ref badges — identity of the commit, shown unless the row cannot hold them.
+    let badge_spans: Vec<Span<'static>> = commit
+        .refs
+        .iter()
+        .flat_map(|mark| {
+            [
+                Span::raw(" "),
+                Span::styled(format!("[{}]", mark.name), ref_style(mark.kind)),
+            ]
+        })
+        .collect();
+    let badge_spans_width = Line::from(badge_spans.clone()).width();
+
+    // Author + time — the only Low-priority column; dropped before the
+    // summary is allowed below a readable one-cell floor.
+    let author_time_str = format!("  {} {}", commit.author, commit.time);
+    let author_time_width = cells::width(&author_time_str);
+
+    let (summary_width, show_badges, show_author_time) =
+        if head_width + badge_spans_width + author_time_width <= width {
+            // Wide enough for everything: the author/time tail stays, badges stay.
+            (
+                width.saturating_sub(head_width + badge_spans_width + author_time_width),
+                true,
+                true,
+            )
+        } else if head_width + badge_spans_width < width {
+            // Drop the Low column (author/time), keep badges + a real summary.
+            (
+                width.saturating_sub(head_width + badge_spans_width),
+                true,
+                false,
+            )
+        } else {
+            // Starved: badges go too — the hash never shrinks, only the summary does.
+            (width.saturating_sub(head_width), false, false)
+        };
+
+    let mut spans: Vec<Span<'static>> = vec![
         Span::styled(commit.id.clone(), Style::default().fg(color::WARNING)),
         Span::raw(" "),
-        Span::raw(cells::ellipsize(&commit.summary, width)),
+        Span::raw(cells::ellipsize(&commit.summary, summary_width)),
     ];
-    for mark in &commit.refs {
-        spans.push(Span::raw(" "));
+    if show_badges {
+        spans.extend(badge_spans);
+    }
+    if show_author_time {
         spans.push(Span::styled(
-            format!("[{}]", mark.name),
-            ref_style(mark.kind),
+            author_time_str,
+            Style::default().fg(color::FG_MUTED),
         ));
     }
-    spans.push(Span::styled(
-        format!("  {} {}", commit.author, commit.time),
-        Style::default().fg(color::FG_MUTED),
-    ));
-    ListItem::new(Line::from(spans))
+
+    ListItem::new(cells::fit_line(Line::from(spans), width))
 }
 
 /// Badge style per reference kind: HEAD is highlighted, branches read success

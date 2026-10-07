@@ -11,11 +11,11 @@ use ratatui::{
 use crate::app::BatchLogLine;
 use crate::git::RepoInfo;
 
-use super::hint;
+use super::{hint, pulls};
 use crate::ui::components::cells;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 use crate::ui::components::state_panel::{self, PanelState};
-use crate::ui::components::theme::{color, role};
+use crate::ui::components::theme::{color, role, spacing, width as theme_width};
 
 /// Borrowed render state for the dashboard, referencing `App.repos` directly
 /// so no mock data source exists (checkpoint 2).
@@ -46,11 +46,10 @@ fn dashboard_title(count: usize) -> String {
     format!("GitPulse 仓库状态 ({count})")
 }
 
-/// Minimum width of the dashboard's repository list in cells (§5.4: 80 列下
-/// 列表 ≥28 个格). The list is the focus panel and must never be squeezed.
-const LIST_MIN: u16 = 28;
-/// Minimum width of the preview panel in cells (§5.4: 详情 ≥32 个格).
-const PREVIEW_MIN: u16 = 32;
+/// Minimum width of the preview panel in cells (§5.4) — read from the shared
+/// floor in [`theme::width`] so the dashboard no longer keeps its own copy of
+/// the canonical §5.4 thresholds (6a).
+///
 /// Ceiling on the preview panel: it never grows fat enough to starve the list.
 const PREVIEW_MAX: u16 = 44;
 /// Frame width at which the preview opens beside the list (≥96 列左右分栏);
@@ -136,13 +135,13 @@ pub fn render_dashboard(f: &mut Frame, content: Rect, state: &mut DashboardState
 
 /// Horizontal budget: split the dashboard into the left repository list and the
 /// (optionally hidden) right preview when the frame can fund both minimum
-/// widths (§5.4), keeping the focus list at or above `LIST_MIN`.
+/// widths (§5.4), keeping the focus list at or above `theme_width::LIST_MIN`.
 fn split_list_and_preview(content: Rect) -> (Rect, Option<Rect>) {
-    use super::components::theme::spacing;
     if content.width < SPLIT_MIN {
         return (content, None);
     }
-    let preview_w = (content.width - LIST_MIN - spacing::GUTTER).clamp(PREVIEW_MIN, PREVIEW_MAX);
+    let preview_w = (content.width - theme_width::LIST_MIN - spacing::GUTTER)
+        .clamp(theme_width::PREVIEW_MIN, PREVIEW_MAX);
     let list_w = content.width - spacing::GUTTER - preview_w;
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -188,45 +187,93 @@ fn render_preview(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+/// Cells the dirty count column holds (`{:>4}` — fixed width, right-aligned so
+/// it never shifts the columns beside it).
+const DIRTY_CELLS: usize = 4;
+/// Cells the ahead/behind marker holds (`4↑2`) when the row is drawn whole.
+const SYNC_CELLS: usize = 4;
+/// Cells the last-commit timestamp holds (`YYYY-MM-DD HH:MM`); the `-`
+/// placeholder for a repository without history is shorter.
+const TIME_CELLS: usize = 16;
+/// Cells the two high-priority columns reserve when the pane has room to spare
+/// (§5.4 表格列宽): name and branch identify the row, so they flex inside a floor
+/// instead of ever being dropped.
+const NAME_CELLS: usize = 20;
+const BRANCH_CELLS: usize = 15;
+/// Floors the two high-priority columns shrink to before a Low column would be
+/// sacrificed — a row is never allowed to chew into identification before it has
+/// dropped the columns §5.4 calls "low priority".
+const NAME_MIN: usize = 12;
+const BRANCH_MIN: usize = 8;
+
+/// Priority of a repository row column (§5.4 表格列宽): a Low column vanishes
+/// whole when the row cannot fund its cells, whereas a High column only shrinks
+/// to its floor first — identification is never erased to save a timestamp.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Priority {
+    /// Identifies the row: the name and the branch. Never dropped, only
+    /// squeezed within its floor, and grown back to its preferred width
+    /// whenever the pane has the cells.
+    High,
+    /// Context the preview panel repeats (dirty count, ahead/behind, time):
+    /// dropped from the right edge of the row before the High columns shrink.
+    Low,
+}
+
+/// The data a repository row column renders — §6.1:262 fixes this exact set.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Column {
+    /// Repository name.
+    Name,
+    /// Current branch.
+    Branch,
+    /// Uncommitted change count.
+    Dirty,
+    /// Ahead / behind marker.
+    Sync,
+    /// Last-commit timestamp — the lowest-priority column, dropped first.
+    Time,
+}
+
+/// §5.4 column priority table for a repository row: an ordered slice of
+/// `(column, min_width, priority)` — every column's `min_width` (the cells it
+/// keeps while drawn) and its priority (whether it may be dropped when the row
+/// runs out of cells). Ordered high → low, so the renderer keeps a prefix of
+/// this slice while the row fits and cuts the tail: `Time` goes before `Sync`,
+/// `Sync` before `Dirty`, and the two High columns never go at all.
+const REPO_COLUMNS: [(Column, usize, Priority); 5] = [
+    (Column::Name, NAME_MIN, Priority::High),
+    (Column::Branch, BRANCH_MIN, Priority::High),
+    (Column::Dirty, DIRTY_CELLS, Priority::Low),
+    (Column::Sync, SYNC_CELLS, Priority::Low),
+    (Column::Time, TIME_CELLS, Priority::Low),
+];
+
+/// The width a `High` column grows back to whenever the pane has cells to
+/// spare (`[min_width, preferred]` — the §5.4 `min_width` itself lives in
+/// [`REPO_COLUMNS`]).
+fn preferred_width(column: &Column) -> Option<usize> {
+    match column {
+        Column::Name => Some(NAME_CELLS),
+        Column::Branch => Some(BRANCH_CELLS),
+        Column::Dirty | Column::Sync | Column::Time => None,
+    }
+}
+
 /// Draw the bordered repository list: name, branch, dirty count, ahead /
 /// behind markers, and last-commit time, with the shared highlight style.
+///
+/// The row is budgeted by §5.4 through [`REPO_COLUMNS`]: columns are included
+/// in priority order while they fit the row's available width and dropped from
+/// the right when they don't. Name and branch are High and flex inside their
+/// floors; the status columns disappear whole before they shrink (§5.4
+/// 低优先列先消失, 不是缩小).
 fn render_repo_list(f: &mut Frame, area: Rect, state: &mut DashboardState<'_>) {
+    let budget = pulls::row_width(area);
     let items: Vec<ListItem> = state
         .repos
         .iter()
-        .map(|repo| {
-            let dirty_count =
-                repo.dirty.untracked + repo.dirty.modified + repo.dirty.added + repo.dirty.deleted;
-            let dirty_color = if dirty_count == 0 {
-                color::SUCCESS
-            } else {
-                color::DANGER
-            };
-
-            let line = Line::from(vec![
-                Span::raw(cells::pad_cells(&cells::ellipsize(&repo.name, 20), 20)),
-                Span::styled(
-                    cells::pad_cells(&cells::ellipsize(&repo.branch, 15), 15),
-                    Style::default().fg(color::ACCENT),
-                ),
-                Span::styled(
-                    format!("{:>4}", dirty_count),
-                    Style::default().fg(dirty_color),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    format!("{}↑{}↓", repo.ahead, repo.behind),
-                    if repo.ahead > 0 {
-                        Style::default().fg(color::WARNING)
-                    } else {
-                        Style::default()
-                    },
-                ),
-                Span::raw("  "),
-                Span::raw(format_time(repo.last_commit.time)),
-            ]);
-            ListItem::new(line)
-        })
+        .map(|repo| ListItem::new(repo_row(repo, budget)))
         .collect();
 
     let block = Block::default()
@@ -238,6 +285,121 @@ fn render_repo_list(f: &mut Frame, area: Rect, state: &mut DashboardState<'_>) {
     f.render_stateful_widget(list, area, state.list_state);
 }
 
+/// One repository row fitted to `budget` cells (§5.4). The High columns (name,
+/// branch) are always present and absorb leftover cells up to their preferred
+/// widths; the Low columns (dirty count, ahead/behind, timestamp) are shown
+/// whole or dropped whole from the right — never squeezed alongside a shrunken
+/// identifier (§5.4 低优先列先消失, 不是缩小).
+fn repo_row(repo: &RepoInfo, budget: usize) -> Line<'static> {
+    let dirty_count =
+        repo.dirty.untracked + repo.dirty.modified + repo.dirty.added + repo.dirty.deleted;
+    let dirty_color = if dirty_count == 0 {
+        color::SUCCESS
+    } else {
+        color::DANGER
+    };
+    let sync_span = Span::styled(
+        format!("{}↑{}↓", repo.ahead, repo.behind),
+        if repo.ahead > 0 {
+            Style::default().fg(color::WARNING)
+        } else {
+            Style::default()
+        },
+    );
+    let time_span = Span::raw(format_time(repo.last_commit.time));
+    let gap = cells::width("  ");
+
+    // One payload per column of [`REPO_COLUMNS`], in table order.
+    let payload = |column: &Column| -> Span<'static> {
+        match column {
+            Column::Name => Span::raw(repo.name.clone()),
+            Column::Branch => Span::styled(repo.branch.clone(), Style::default().fg(color::ACCENT)),
+            Column::Dirty => Span::styled(
+                format!("{:>4}", dirty_count),
+                Style::default().fg(dirty_color),
+            ),
+            Column::Sync => sync_span.clone(),
+            Column::Time => time_span.clone(),
+        }
+    };
+    // Cells a column costs while it is drawn whole: a High column at its
+    // preferred width, a Low column at its natural width plus the gap §6.1
+    // puts before a status column — so one drop takes column and gap together.
+    let cost = |column: &Column| -> usize {
+        let natural = cells::width(&payload(column).content);
+        preferred_width(column).unwrap_or(natural + gap)
+    };
+
+    // Drop Low columns from the right until the row fits. The table is ordered
+    // high → low, so the tail is always the lowest-priority column still drawn.
+    let mut kept = REPO_COLUMNS.len();
+    while kept > HEAD_COLUMNS
+        && REPO_COLUMNS[..kept]
+            .iter()
+            .map(|(column, _, _)| cost(column))
+            .sum::<usize>()
+            > budget
+    {
+        kept -= 1;
+    }
+
+    // The surviving Low columns keep their natural width; the High columns
+    // split what is left. The name wins contested cells first (it is the row's
+    // primary identifier) and the branch keeps only its floor until the name
+    // has reached its preferred width.
+    let low_total: usize = REPO_COLUMNS[HEAD_COLUMNS..kept]
+        .iter()
+        .map(|(column, _, _)| cost(column))
+        .sum();
+    let head_budget = budget.saturating_sub(low_total);
+    let name_cells = if head_budget >= NAME_CELLS + BRANCH_MIN {
+        NAME_CELLS
+    } else {
+        head_budget
+            .saturating_sub(BRANCH_MIN)
+            .clamp(NAME_MIN, NAME_CELLS)
+    };
+    let branch_cells = head_budget
+        .saturating_sub(name_cells)
+        .clamp(BRANCH_MIN, BRANCH_CELLS);
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (column, _, _) in REPO_COLUMNS.iter().take(kept) {
+        match column {
+            Column::Name => spans.push(Span::raw(cells::pad_cells(
+                &cells::ellipsize(&repo.name, name_cells),
+                name_cells,
+            ))),
+            Column::Branch => spans.push(Span::styled(
+                cells::pad_cells(&cells::ellipsize(&repo.branch, branch_cells), branch_cells),
+                Style::default().fg(color::ACCENT),
+            )),
+            Column::Dirty => spans.push(Span::styled(
+                format!("{:>4}", dirty_count),
+                Style::default().fg(dirty_color),
+            )),
+            Column::Sync | Column::Time => {
+                spans.push(Span::raw("  "));
+                spans.push(payload(column));
+            }
+        }
+    }
+
+    // Belt-and-braces: even when a long name plus the floors cannot all fit,
+    // the row never exceeds the pane (§5.4 单行永不换行).
+    cells::fit_line(Line::from(spans), budget)
+}
+
+/// How many [`REPO_COLUMNS`] entries are the High-priority heads — the count
+/// that is never dropped however narrow the row gets.
+const HEAD_COLUMNS: usize = 2;
+
+/// Cells the batch log's repository-name column reserves when the pane has
+/// room for it (§5.4): the name identifies *which* repository a line is
+/// about, so it never vanishes — it shrinks toward the pane's width instead,
+/// and the message takes whatever cells remain (ellipsized to them).
+const BATCH_NAME_CELLS: usize = 20;
+
 /// Draw the scrolling per-repository batch progress log (convention 6):
 /// the newest lines stay visible; failures render red, successes green.
 fn render_batch_log(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
@@ -246,6 +408,9 @@ fn render_batch_log(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
     } else {
         format!("批量 {} 结果", state.batch_op)
     };
+    let budget = pulls::block_width(area);
+    let name_cells = BATCH_NAME_CELLS.min(budget);
+    let message_cells = budget.saturating_sub(name_cells);
     let visible = state
         .batch_log
         .len()
@@ -262,10 +427,13 @@ fn render_batch_log(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
             };
             Line::from(vec![
                 Span::styled(
-                    cells::pad_cells(&cells::ellipsize(&entry.name, 20), 20),
+                    cells::pad_cells(&cells::ellipsize(&entry.name, name_cells), name_cells),
                     Style::default().fg(tone),
                 ),
-                Span::styled(entry.message.clone(), Style::default().fg(tone)),
+                Span::styled(
+                    cells::ellipsize(&entry.message, message_cells),
+                    Style::default().fg(tone),
+                ),
             ])
         })
         .collect();
