@@ -26,11 +26,9 @@ const GRAPH_COLUMNS: u16 = GRAPH_WIDTH as u16 + GRAPH_BORDER_COLUMNS;
 
 /// Frame width at which the detail pane may open beside the list (§5.4).
 ///
-/// §5.4: "**仅当两个面板都能保住各自 `min_width`（列表 ≥28，详情 ≥32）时才允许
-/// 左右分栏**；否则回退为上下堆叠". [`theme_width::SPLIT_FLOOR`] is the
-/// arithmetic floor for a two-pane split, but history funds the DAG column
-/// first, so its split opens only once the frame pays for all three panes.
-const SPLIT_MIN: u16 = theme_width::SPLIT_FLOOR + GRAPH_COLUMNS;
+/// Opens its split only once the frame funds the DAG column + both gaps + both
+/// pane floors (`SPLIT_FLOOR` budgets one gutter; this layout has two).
+const SPLIT_MIN: u16 = theme_width::SPLIT_FLOOR + spacing::GUTTER + GRAPH_COLUMNS;
 
 /// Ceiling on the detail pane, so a wide frame widens the commit list
 /// (whose rows carry the longest content) instead of the preview.
@@ -134,7 +132,7 @@ fn split_history(content: Rect) -> (Rect, Rect, Rect) {
         // `PREVIEW_MIN` and capped at `DETAIL_MAX`.
         let detail_w = (content
             .width
-            .saturating_sub(GRAPH_COLUMNS + theme_width::LIST_MIN + spacing::GUTTER))
+            .saturating_sub(GRAPH_COLUMNS + 2 * spacing::GUTTER + theme_width::LIST_MIN))
         .clamp(theme_width::PREVIEW_MIN, DETAIL_MAX);
         let list_w = content
             .width
@@ -416,14 +414,19 @@ mod tests {
     /// author/time tail to fit on the selected row — and return the
     /// whitespace-stripped buffer text (wide CJK glyphs leave padding cells).
     fn render_to_text(state: HistoryState) -> String {
-        render_to_text_with(state, None)
+        render_to_text_with(state, None, 120)
+    }
+
+    /// Render at a caller-chosen frame width (§5.4 per-view 80-column checks).
+    fn render_to_text_width(state: HistoryState, width: u16) -> String {
+        render_to_text_with(state, None, width)
     }
 
     /// Same frame with a load failure in play, so a test can place the
     /// panel's `error` state (§4.3).
-    fn render_to_text_with(state: HistoryState, load_error: Option<&str>) -> String {
+    fn render_to_text_with(state: HistoryState, load_error: Option<&str>, width: u16) -> String {
         let hints = history_hints();
-        let backend = TestBackend::new(120, 24);
+        let backend = TestBackend::new(width, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
@@ -500,5 +503,45 @@ mod tests {
             "missing detail placeholder: {text}"
         );
         assert!(!text.contains("变更文件"), "stale detail: {text}");
+    }
+
+    /// §5.4: a commit row that is wider than the list pane is truncated with
+    /// `…`. The short hash is the row's always-shown head, so it survives while
+    /// the summary gives way.
+    #[test]
+    fn design_commit_row_truncates_a_long_summary_with_an_ellipsis_at_80_columns() {
+        let mut state = loaded_state();
+        state.commits[0].summary = format!("refactor {}", "detail ".repeat(30));
+        let text = render_to_text_width(state, 80);
+        assert!(
+            text.contains('…'),
+            "a too-wide commit row must be elided, not clipped: {text}"
+        );
+        assert!(
+            text.contains("abc1234"),
+            "the short hash is High priority and must survive: {text}"
+        );
+    }
+
+    /// §5.4 低优先列先消失: the `  author time` suffix is the Low-priority column.
+    /// When the row cannot fund hash + badges + author/time, the author/time tail
+    /// drops whole while the identity columns (hash + ref badges) stay — the
+    /// badges outrank the metadata tail.
+    #[test]
+    fn design_commit_row_drops_the_author_time_tail_before_the_ref_badges() {
+        let mut state = loaded_state();
+        // At 120 columns the list row funds hash + badges but not the 33-cell
+        // author/time tail, so the tail drops and the badges remain.
+        state.commits[0].summary = "x".repeat(60);
+        let text = render_to_text(state);
+        assert!(text.contains("abc1234"), "the hash must survive: {text}");
+        assert!(
+            text.contains("HEAD"),
+            "ref badges identify the commit and outrank the author/time tail: {text}"
+        );
+        assert!(
+            !text.contains("GitPulseTest"),
+            "the author/time tail is Low priority and must drop first: {text}"
+        );
     }
 }

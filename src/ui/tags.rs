@@ -145,14 +145,27 @@ fn tag_item(tag: &TagInfo, width: usize) -> ListItem<'static> {
     } else {
         ("轻量", Style::default().fg(color::FG_MUTED))
     };
-    ListItem::new(Line::from(vec![
-        Span::raw(cells::ellipsize(&tag.name, width)),
-        Span::styled(
-            format!("  {}", cells::ellipsize(&tag.target, width)),
+    let kind_str = format!("  {kind}");
+    let kind_w = cells::width(&kind_str);
+    let target_tail = format!("  {}", tag.target);
+    // §5.4: name is the row's identity (High, always shown); the target
+    // short-hash is Low and drops whole when the row cannot fund it. The
+    // lightweight/annotated marker is a fixed suffix that always stays.
+    let shows_target = cells::width(&tag.name) + cells::width(&target_tail) + kind_w <= width;
+    let name = if shows_target {
+        tag.name.clone()
+    } else {
+        cells::ellipsize(&tag.name, width.saturating_sub(kind_w))
+    };
+    let mut spans = vec![Span::raw(name)];
+    if shows_target {
+        spans.push(Span::styled(
+            target_tail,
             Style::default().fg(color::WARNING),
-        ),
-        Span::styled(format!("  {kind}"), kind_style),
-    ]))
+        ));
+    }
+    spans.push(Span::styled(kind_str, kind_style));
+    ListItem::new(Line::from(spans))
 }
 
 /// Single-line create input (convention 9): Enter creates, Esc cancels.
@@ -281,6 +294,25 @@ mod tests {
         assert!(text.contains("c新建"), "missing create hint: {text}");
         assert!(text.contains("d删除"), "missing delete hint: {text}");
         assert!(text.contains("p推送"), "missing push hint: {text}");
+    }
+
+    /// §5.4: a tag row is budgeted to the pane width and cut with `…`, so a
+    /// long tag name truncates instead of clipping the panel border.
+    #[test]
+    fn design_tag_row_truncates_a_long_name_with_an_ellipsis_at_80_columns() {
+        let long = format!("release-{}", "rc".repeat(60));
+        let tags = vec![tag(&long, "deadbeef", true)];
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        let text = render_to_text(base_state(&tags, &mut list_state));
+        assert!(
+            text.contains('…'),
+            "a too-wide tag row must be marked with an ellipsis: {text}"
+        );
+        assert!(
+            text.contains("release-"),
+            "the High-priority name prefix must survive: {text}"
+        );
     }
 
     /// Zero tags is a valid state rather than a failure (checkpoint 2): the

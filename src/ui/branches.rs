@@ -145,15 +145,22 @@ fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) 
             } else {
                 Style::default()
             };
-            let mut spans = vec![
-                Span::raw(marker),
-                Span::styled(cells::ellipsize(&branch.name, width), name_style),
-            ];
-            if let Some(upstream) = &branch.upstream {
-                spans.push(Span::styled(
-                    format!("  → {}", cells::ellipsize(upstream, width)),
-                    Style::default().fg(color::FG_MUTED),
-                ));
+            let marker_w = cells::width(marker);
+            let tail = branch.upstream.as_ref().map(|u| format!("  → {u}"));
+            // §5.4: name is the row's identity (High, always shown); the
+            // `  → upstream` tail is Low and drops whole when the row cannot
+            // fund it. Name is ellipsized to the remaining budget.
+            let shows_tail = tail
+                .as_ref()
+                .is_some_and(|t| marker_w + cells::width(&branch.name) + cells::width(t) <= width);
+            let name = if shows_tail {
+                branch.name.clone()
+            } else {
+                cells::ellipsize(&branch.name, width.saturating_sub(marker_w))
+            };
+            let mut spans = vec![Span::raw(marker), Span::styled(name, name_style)];
+            if let Some(tail) = tail.filter(|_| shows_tail) {
+                spans.push(Span::styled(tail, Style::default().fg(color::FG_MUTED)));
             }
             ListItem::new(Line::from(spans))
         })
@@ -282,6 +289,59 @@ mod tests {
         assert!(text.contains("→origin/main"), "missing upstream: {text}");
         assert!(text.contains("feature"), "missing branch: {text}");
         assert!(text.contains("alpha"), "missing repo name: {text}");
+    }
+
+    /// §5.4: the row is measured in display cells and cut with `…`, so a long
+    /// branch name truncates instead of wrapping or silently clipping. At 80
+    /// columns every row is one line and carries the ellipsis mark.
+    #[test]
+    fn design_branch_row_truncates_a_long_name_with_an_ellipsis_at_80_columns() {
+        let long = format!("feature-{}", "x".repeat(90));
+        let branches = vec![branch(&long, false, None)];
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        let text = render_to_text(base_state(&branches, &mut list_state));
+        assert!(
+            text.contains('…'),
+            "a too-wide row must be marked with an ellipsis, not clipped: {text}"
+        );
+        assert!(
+            text.contains("feature-"),
+            "the High-priority name prefix must survive truncation: {text}"
+        );
+    }
+
+    /// §5.4 低优先列先消失: the upstream tail is the Low-priority column. When the
+    /// row cannot fund name + upstream together, the tail drops whole and the
+    /// name stays full rather than being squeezed to make room.
+    #[test]
+    fn design_branch_row_drops_the_upstream_tail_before_shrinking_the_name() {
+        let branches = vec![branch(
+            "stable",
+            false,
+            Some("origin/very-long-tracking-branch"),
+        )];
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        let terminal = render_to_terminal_sized(base_state(&branches, &mut list_state), 28, 12);
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect::<String>()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            text.contains("stable"),
+            "name is High priority and must survive: {text}"
+        );
+        assert!(
+            !text.contains('→'),
+            "upstream is Low priority and must drop before the name shrinks: {text}"
+        );
     }
 
     /// §4.3: a branch-list load failure lands on the panel's `error` state, not on

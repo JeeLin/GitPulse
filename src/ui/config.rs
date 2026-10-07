@@ -182,6 +182,7 @@ fn render_dir_picker(
         rows[0],
     );
 
+    let row_budget = rows[1].width.saturating_sub(2) as usize; // highlight symbol
     let mut items = vec![ListItem::new(Line::from(vec![
         Span::styled("↳ ", Style::default().fg(color::ACCENT)),
         Span::raw("选择当前目录"),
@@ -191,7 +192,10 @@ fn render_dir_picker(
             .file_name()
             .map(|name| show_path(Path::new(name)))
             .unwrap_or_else(|| show_path(entry));
-        ListItem::new(Line::from(format!("{name}/")))
+        ListItem::new(Line::from(cells::ellipsize(
+            &format!("{name}/"),
+            row_budget,
+        )))
     }));
 
     let list = List::new(items)
@@ -673,6 +677,30 @@ mod tests {
         assert!(
             tail.len() < long.len(),
             "only the middle is elided, never the whole path: {path}"
+        );
+    }
+
+    /// §5.4: a picker entry name is budgeted to the list row and cut with `…`,
+    /// so a long directory name stays on one line instead of overflowing the
+    /// popup.
+    #[test]
+    fn design_picker_entry_truncates_a_long_dir_name_on_one_row() {
+        let long = format!("{}-{}", "verylongprojectname", "x".repeat(60));
+        let dirs: Vec<PathBuf> = vec![PathBuf::from(&long)];
+        let mut list_state = ListState::default();
+        let mut picker_state = ListState::default();
+        picker_state.select(Some(0));
+        let mut state = base_state(&dirs, &mut list_state, &mut picker_state);
+        state.show_picker = true;
+        state.picker_dir = Path::new(&long);
+        let text = render_to_text(state);
+        assert!(
+            text.contains('…'),
+            "a too-wide picker entry must be elided: {text}"
+        );
+        assert!(
+            text.contains("verylongprojectname"),
+            "the entry name prefix must survive truncation: {text}"
         );
     }
 }

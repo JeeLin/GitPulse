@@ -1,10 +1,11 @@
 //! Diff viewer for single file.
 
+use crate::ui::components::cells;
 use ratatui::{
     layout::Rect,
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -57,15 +58,19 @@ fn render_diff_content(f: &mut Frame, area: Rect, content: &str, scroll: u16) {
                 Style::default().fg(color::INFO),
             )])
         } else {
-            Line::from(vec![Span::raw(line)])
+            Line::from(vec![Span::raw(line.to_string())])
         };
         lines.push(styled_line);
     }
 
-    let paragraph = Paragraph::new(lines)
-        .block(Block::default().title("文件差异").borders(Borders::ALL))
-        .wrap(Wrap { trim: true })
-        .scroll((scroll, 0));
+    let paragraph = Paragraph::new(
+        lines
+            .into_iter()
+            .map(|line| cells::fit_line(line, area.width.saturating_sub(2) as usize))
+            .collect::<Vec<_>>(),
+    )
+    .block(Block::default().title("文件差异").borders(Borders::ALL))
+    .scroll((scroll, 0));
 
     f.render_widget(paragraph, area);
 }
@@ -196,5 +201,30 @@ mod tests {
             text.contains("body-5"),
             "first visible line missing: {text}"
         );
+    }
+
+    /// §5.4: a diff line that is wider than the pane is truncated with `…` —
+    /// it must never wrap onto two terminal rows (§5.4 单行永不换行).
+    #[test]
+    fn design_diff_truncates_a_long_line_with_an_ellipsis_instead_of_wrapping() {
+        let long = format!("+{}-{}", "x".repeat(100), "trailer");
+        let app = app_with_diff(&long);
+        let terminal = render_app(&app);
+        let text = compact(&terminal);
+        assert!(
+            text.contains('…'),
+            "a too-wide diff line must end in an ellipsis, not wrap or clip: {text}"
+        );
+        assert!(
+            text.contains("+xxxx"),
+            "the head of a wide line must survive truncation (§5.4 cuts the right): {text}"
+        );
+        // §5.4 single-line-never-wraps: the long line occupies exactly one
+        // content row. A wrap would spill `x` cells onto a second row.
+        let buf = terminal.backend().buffer();
+        let x_rows = (0..buf.area.height)
+            .filter(|&y| (0..buf.area.width).any(|x| buf[(x, y)].symbol() == "x"))
+            .count();
+        assert_eq!(x_rows, 1, "the long line must not wrap: {text}");
     }
 }
