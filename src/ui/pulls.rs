@@ -27,11 +27,17 @@ use crate::ui::components::theme::color;
 // panels addressing the hint rows, the panel title and the row budget the way
 // they always have.
 pub(crate) use crate::ui::components::receipts::{
-    issue_detail_hints, panel_title, pull_detail_hints, receipt_hints, row_width,
+    detail_hints,
+    panel_title,
+    receipt_hints,
+    row_width,
+    // kept for any external readers; see module re-exports below.
 };
 
 #[cfg(test)]
-pub(crate) use crate::ui::components::receipts::{draw_receipt_frame, offline_client, rows_with};
+pub(crate) use crate::ui::components::cells::rows_with;
+#[cfg(test)]
+pub(crate) use crate::ui::components::receipts::{draw_receipt_frame, offline_client};
 
 /// Cells a paragraph row may use inside `area`'s block: minus the borders
 /// only (no cursor on paragraph rows).

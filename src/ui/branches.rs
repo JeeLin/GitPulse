@@ -100,8 +100,6 @@ fn key_hints(input_open: bool, confirm_open: bool) -> Line<'static> {
             hint("n", "新建"),
             hint("d", "删除"),
             hint("r", "刷新"),
-            hint("q", "退出"),
-            hint("Esc", "返回"),
         ])
     }
 }

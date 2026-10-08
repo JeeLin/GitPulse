@@ -130,7 +130,7 @@ mod tests {
     }
 
     fn render_text(app: &App) -> String {
-        receipts::compact(&receipt_buffer(app))
+        cells::compact(&receipt_buffer(app))
     }
 
     #[test]
@@ -205,14 +205,14 @@ mod tests {
         app.set_error("gh 不可用，无法自动获取 token");
         app.github_state.notifications = vec![note("ghost", "Issue", true)];
         let buffer = receipt_buffer(&app);
-        let text = receipts::compact(&buffer);
+        let text = cells::compact(&buffer);
         // No resolved remote means `kind == None`, which falls back to the
         // GitHub gate copy, verbatim as in v0.5.0.
         assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
         assert!(!text.contains("ghost"), "no rows without a client: {text}");
         assert!(!text.contains('●'), "no marker without a client: {text}");
         assert_eq!(
-            receipts::rows_with(&buffer, "gh不可用，无法自动获取token"),
+            cells::rows_with(&buffer, "gh不可用，无法自动获取token"),
             vec![buffer.area.height - 2],
             "the reason belongs on the footer status row only: {text}"
         );

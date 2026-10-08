@@ -263,7 +263,7 @@ mod tests {
     /// reaches the buffer through [`crate::ui::components::footer`]
     /// (§2.3), so a test that skipped it would miss the row entirely.
     fn render_text(app: &App) -> String {
-        receipts::compact(&receipt_buffer(app))
+        cells::compact(&receipt_buffer(app))
     }
 
     /// The rendered frame, so a test can address the single row an async
@@ -333,7 +333,7 @@ mod tests {
         app.set_error("GitHub 认证失败");
         app.github_state.issues = vec![issue(1, "ghost", "open", &[])];
         let buffer = receipt_buffer(&app);
-        let text = receipts::compact(&buffer);
+        let text = cells::compact(&buffer);
         // No resolved remote means `kind == None`, which falls back to the
         // GitHub gate copy, verbatim as in v0.5.0.
         assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
@@ -342,7 +342,7 @@ mod tests {
             "no rows without a client: {text}"
         );
         assert_eq!(
-            receipts::rows_with(&buffer, "GitHub认证失败"),
+            cells::rows_with(&buffer, "GitHub认证失败"),
             vec![buffer.area.height - 2],
             "the reason belongs on the footer status row only: {text}"
         );

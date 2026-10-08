@@ -26,13 +26,11 @@ pub fn render_diff(f: &mut Frame, content: Rect, app: &crate::app::App) {
     render_diff_content(f, content, &app.diff_content, app.diff_scroll);
 }
 
-/// Footer hint row for the diff view (§2.3): the scroll keys and the way out.
+/// Footer hint row for the diff view (§2.3): the one verb the screen owns.
+/// `Esc 返回` and `q 退出` are global segments (§2.3 item 1), so this row
+/// must not restate them.
 pub(crate) fn diff_hints() -> HintRow {
-    HintRow::new(join_hints([
-        hint("j/k", "滚动"),
-        hint("Esc", "返回"),
-        hint("q", "退出"),
-    ]))
+    HintRow::new(join_hints([hint("j/k", "滚动")]))
 }
 
 fn render_diff_content(f: &mut Frame, area: Rect, content: &str, scroll: u16) {

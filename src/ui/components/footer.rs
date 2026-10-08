@@ -236,7 +236,22 @@ fn compose_hint_row(row: &HintRow, width: usize) -> Line<'static> {
         }
     }
 
-    cells::fit_line(hints(parts), width)
+    // §2.3 gives up whole segments before it gives up cells, so a frame too
+    // narrow for the whole row loses its tail, then its view segment, rather
+    // than having a key pair sliced into an unreadable `q 退` stub.
+    while parts.len() > 1 && hints(parts.clone()).width() > width {
+        parts.pop();
+    }
+
+    let line = hints(parts);
+    // Below the width of the four global verbs no composition can fit; the row
+    // is clipped by the frame itself, which is the one §2.3's "never
+    // truncate" cannot survive. [`global_hints`] is what the user is left
+    // reading, so it is what stays.
+    if line.width() > width {
+        return line;
+    }
+    cells::fit_line(line, width)
 }
 
 /// Render one frame of a view with its footer: the content closure draws
@@ -419,6 +434,30 @@ mod tests {
         assert!(text.contains('…'), "cut must be marked: {text}");
         assert!(text.contains("j/k选择"), "head of the view segment stays");
         assert!(text.ends_with('…'), "the cut is at the right edge: {text}");
+    }
+
+    /// §2.3: segments are given up whole before any cell is cut, so a narrow
+    /// frame loses the tail and then the view segment instead of slicing a key
+    /// pair. At exactly the global segment's width the row is the global
+    /// segment, intact and unmarked.
+    #[test]
+    fn hint_row_drops_whole_segments_before_it_cuts_a_pair() {
+        let row = HintRow::new(hints([hint("j/k", "选择"), hint("n", "新建")]))
+            .with_tail_segment(Some(tail_hints()));
+        let global: String = global_hints()
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        let width = cells::width(&global);
+        let (_, hint_row) = render_rows(StatusRow::plain(None), &row, width as u16);
+        let text = compact(&hint_row);
+        assert_eq!(
+            text,
+            compact(&global),
+            "the global segment is the whole row"
+        );
+        assert!(!text.contains('…'), "no half-cut pair: {text}");
     }
 
     /// Key caps render bold accent, actions muted (§2.3).

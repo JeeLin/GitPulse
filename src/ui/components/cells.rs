@@ -160,6 +160,42 @@ pub fn fit_line(line: Line<'static>, max: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Whitespace-stripped text of a whole rendered frame.
+///
+/// A wide (CJK) glyph occupies two buffer cells: the glyph plus a reset
+/// *padding* cell whose symbol is `" "`, so the raw concatenation reads
+/// `" 选择 "` rather than `" 选择"`. Stripping every whitespace removes the
+/// padding and the layout gaps alike, leaving the text the frame actually
+/// says — which is what a view test asserts on.
+///
+/// One implementation for every view: a screen test that re-derived this would
+/// drift the moment the buffer layout changes.
+#[cfg(test)]
+pub(crate) fn compact(buffer: &ratatui::buffer::Buffer) -> String {
+    let mut raw = String::new();
+    for cell in buffer.content() {
+        raw.push_str(cell.symbol());
+    }
+    raw.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Row indices of a rendered frame whose whitespace-stripped text contains
+/// `needle` — how a view test proves one message landed on the footer status
+/// row (`height - 2`) and nowhere else (§4.1), or that a panel title is still
+/// on screen at all.
+#[cfg(test)]
+pub(crate) fn rows_with(buffer: &ratatui::buffer::Buffer, needle: &str) -> Vec<u16> {
+    (0..buffer.area.height)
+        .filter(|y| {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, *y)].symbol().to_string())
+                .collect();
+            let row: String = row.chars().filter(|c| !c.is_whitespace()).collect();
+            row.contains(needle)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

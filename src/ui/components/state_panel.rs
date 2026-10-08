@@ -1,10 +1,13 @@
-//! The five-state body of every list panel (§3.2).
+//! The list-panel body states of §3.2.
 //!
 //! Loading, empty and error are rendered here so no panel invents its own
-//! wording or geometry for them; `ready` and `success-flash` hand the caller
-//! the inner rect to fill with rows, because only the view knows its item
-//! type. The panel keeps its border and title in every state — a loading or
-//! failed panel still says which panel it is.
+//! wording or geometry for them; `ready` hands the caller the inner rect to
+//! fill with rows, because only the view knows its item type. §3.2's fifth
+//! state, `success-flash`, has no body of its own: it is 「等同 `ready`」 with
+//! the operation result on the *status row* (§4.1/§4.2), which
+//! [`crate::ui::render_status_line`] paints — never a line inside the panel.
+//! The panel keeps its border and title in every state — a loading or failed
+//! panel still says which panel it is.
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -26,11 +29,14 @@ const SPINNER: &str = "⠋";
 /// as one glance, the rest would turn the panel into a log (§3.2).
 const ERROR_MAX_LINES: usize = 3;
 
-/// Body of a list panel in one of the five states (§3.2).
+/// Body of a list panel in the states §3.2 gives a body to.
 ///
 /// A view picks the variant it is in and hands it to
 /// [`render_state_panel`]; the panel text is caller-supplied so existing
-/// empty-state copy (`暂无标签`, `暂无提交记录`, …) stays verbatim.
+/// empty-state copy (`暂无标签`, `暂无提交记录`, …) stays verbatim. `success-flash`
+/// is absent on purpose: §3.2 defines it as 「等同 `ready`」, with the green
+/// result on the status row, so a view that just flashed is `Ready` here and
+/// [`crate::ui::status::StatusLine`] carries the message.
 #[derive(Debug, Clone)]
 pub enum PanelState<'a> {
     /// Centered spinner glyph + label, with an optional sub-label naming
@@ -51,28 +57,15 @@ pub enum PanelState<'a> {
         /// Action prompt; styled by the caller so its key cap stands out.
         action: Line<'a>,
     },
-    /// `danger` block titled `加载失败`: up to [`ERROR_MAX_LINES`] message
-    /// lines (each ellipsized to the panel width) over `按 r 重试`.
+    /// Block titled `加载失败`: up to [`ERROR_MAX_LINES`] message lines (each
+    /// ellipsized to the panel width) over `按 r 重试`, painted `danger` on the
+    /// message body while the shell keeps the §3.1 focus border.
     Error {
         /// Failure reason as the loader reported it.
         message: &'a str,
     },
     /// Content with a cursor: the caller fills the returned inner rect.
     Ready,
-    /// `ready` plus the success flash: the panel keeps its rows (the caller
-    /// fills the returned inner rect as in `ready`) and the flash line rides
-    /// above them — the same green `✓ result` the status row shows (§3.2).
-    ///
-    /// §3.2 puts the transient *green result* on the status row; this variant
-    /// is the panel half of that state, for the operation whose result is not
-    /// only a status row (a panel that grew a row, a refreshed list). It stays
-    /// until the next state change or input — §4.4 rules out a self-clearing
-    /// timer, since the terminal only repaints on input, so nothing would
-    /// remove the flash until the user touched a key anyway.
-    Success {
-        /// Result of the operation that just completed.
-        message: &'a str,
-    },
 }
 
 /// Centered title + one-line description + the primary action that resolves
@@ -106,25 +99,12 @@ pub fn loading_state<'a>(sub: Option<&'a str>) -> PanelState<'a> {
     }
 }
 
-/// The `success-flash` body of a panel (§3.2): the panel stays in `ready` —
-/// the caller fills the returned inner rect exactly as it does for
-/// [`PanelState::Ready`] — and `message` rides above the rows as the green
-/// `✓ result` line.
-///
-/// Per §4.4 the flash carries no timer: the platform repaints only on input,
-/// so a self-expiring flash would never be seen expire. The panel therefore
-/// stays in this state until its owner hands it the next state (or the user
-/// presses a key).
-pub fn success_state<'a>(message: &'a str) -> PanelState<'a> {
-    PanelState::Success { message }
-}
-
 /// Draw `area` as a bordered panel titled `title` in state `state` and
 /// return its inner rect.
 ///
-/// The inner rect is what `ready` / `success-flash` callers fill with their
-/// rows; the other three states are complete once this returns. The panel is
-/// drawn unfocused — see [`render_state_panel_with_focus`].
+/// The inner rect is what `ready` callers fill with their rows; the other
+/// three states are complete once this returns. The panel is drawn unfocused —
+/// see [`render_state_panel_with_focus`].
 pub fn render_state_panel(f: &mut Frame, area: Rect, title: &str, state: &PanelState<'_>) -> Rect {
     render_state_panel_with_focus(f, area, title, state, false)
 }
@@ -132,10 +112,10 @@ pub fn render_state_panel(f: &mut Frame, area: Rect, title: &str, state: &PanelS
 /// [`render_state_panel`] plus the panel's focus (§3.1): the focused panel's
 /// border is `border_focus`, every other panel's is `border`.
 ///
-/// The `error` state keeps its own `danger` shell either way — §3.2 spells
-/// that state out as a `danger` border block, and §3.1's border rule is about
-/// telling the focus apart from the panels around it, not about repainting a
-/// failure.
+/// The `error` state follows the same border rule — §3.2 paints its *body*
+/// in `danger` (via [`error_lines`]), but the shell keeps answering §3.1 so
+/// the panel stays legible as its own panel. A failure is not a focus signal
+/// and a focus shift is not a failure; the two never repaint each other.
 pub fn render_state_panel_with_focus(
     f: &mut Frame,
     area: Rect,
@@ -175,26 +155,20 @@ pub fn render_state_panel_with_focus(
         PanelState::Ready => {
             f.render_widget(block, area);
         }
-        PanelState::Success { message } => {
-            f.render_widget(block, area);
-            let flash = vec![
-                Line::styled(format!("✓ {message}"), Style::default().fg(color::SUCCESS)),
-                Line::from(""),
-            ];
-            render_centered(f, inner, flash);
-        }
     }
     inner
 }
 
 /// Bordered shell shared by every state: rounded corners and the title at
-/// the top-left (§5.3). The error state repaints the whole shell `danger` and
-/// is additionally labelled `加载失败` (PanelState::Error contract), while still
-/// keeping the caller's panel title so the panel says which panel it is.
+/// the top-left (§5.3). The `error` state is additionally labelled `加载失败`
+/// (PanelState::Error contract) while still keeping the caller's panel title
+/// so the panel says which panel it is.
 ///
-/// Every other state takes the focus border: `border_focus` on the focused
-/// panel, `border` on the rest (§3.1), so a panel keeps its focus visible in
-/// `loading` / `empty` / `ready` / `success-flash` alike.
+/// Every state — `error` included — takes the §3.1 focus border:
+/// `border_focus` on the focused panel, `border` on the rest, so a panel keeps
+/// its focus visible in `loading` / `empty` / `error` / `ready` alike. The
+/// `error` body keeps its `danger` tone from [`error_lines`]; the shell only
+/// carries the focus border — a failure is never repainted into a focus signal.
 fn block_for(title: &str, state: &PanelState<'_>, focused: bool) -> Block<'static> {
     let is_error = matches!(state, PanelState::Error { .. });
     let title = if is_error {
@@ -202,16 +176,11 @@ fn block_for(title: &str, state: &PanelState<'_>, focused: bool) -> Block<'stati
     } else {
         title.to_string()
     };
-    let mut block = Block::default()
+    Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded);
-    if is_error {
-        block = block.style(Style::default().fg(color::DANGER));
-    } else {
-        block = block.border_style(role::border(focused));
-    }
-    block
+        .border_type(BorderType::Rounded)
+        .border_style(role::border(focused))
 }
 
 /// Loading body: `⠋ 加载中…` with the optional sub-label below it.
@@ -347,8 +316,11 @@ mod tests {
         assert!(text.contains("按n新建第一个标签"), "missing action: {text}");
     }
 
+    /// §3.2/§3.1: the error state follows the focus border rule (unfocused here
+    /// → `border`) while its body keeps `danger` — a failure is not repainted
+    /// into a focus signal, and a focus border is not a failure.
     #[test]
-    fn error_state_shows_reason_retry_hint_and_danger_shell() {
+    fn error_state_shows_reason_retry_hint_and_danger_body() {
         let text = render_text(
             "PR 列表",
             &PanelState::Error {
@@ -377,10 +349,25 @@ mod tests {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
+        // §3.1: the unfocused panel keeps the `border` focus border, not DANGER.
         assert_eq!(
             buffer[(0, 0)].fg,
-            color::DANGER,
-            "the error shell is painted danger"
+            color::BORDER,
+            "the error shell keeps the focus border, not danger"
+        );
+        // The reason body is still painted `danger` (§3.2).
+        let mut reason_fg = None;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if buffer[(x, y)].symbol() == "G" {
+                    reason_fg = Some(buffer[(x, y)].fg);
+                }
+            }
+        }
+        assert_eq!(
+            reason_fg,
+            Some(color::DANGER),
+            "the error body keeps danger"
         );
     }
 
@@ -415,69 +402,6 @@ mod tests {
         assert_eq!(buffer[(0, 0)].symbol(), "╭", "rounded corners per §5.3");
     }
 
-    /// §3.2: the flash is `ready` plus the green result line — the panel keeps
-    /// its shell and title, and the message rides in green.
-    #[test]
-    fn success_state_shows_the_flash_and_keeps_the_shell() {
-        let state = success_state("已暂存 src/main.rs");
-        let text = render_text("文件状态", &state);
-        assert!(text.contains("✓"), "missing flash glyph: {text}");
-        assert!(
-            text.contains("已暂存src/main.rs"),
-            "missing flash message: {text}"
-        );
-        assert!(text.contains("文件状态"), "title must survive: {text}");
-
-        let backend = TestBackend::new(80, 12);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                render_state_panel(f, f.area(), "文件状态", &state);
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let mut flash_fg = None;
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                if buffer[(x, y)].symbol() == "✓" {
-                    flash_fg = Some(buffer[(x, y)].fg);
-                }
-            }
-        }
-        assert_eq!(flash_fg, Some(color::SUCCESS), "flash reads success");
-    }
-
-    /// §3.2 `success-flash` is `ready` plus the flash, so the caller fills the
-    /// same inner rect it fills for `ready` — the flash never costs the panel a
-    /// row of its own.
-    #[test]
-    fn success_state_hands_back_the_same_inner_rect_as_ready() {
-        let backend = TestBackend::new(80, 12);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let mut ready_inner = Rect::default();
-        let mut flash_inner = Rect::default();
-        terminal
-            .draw(|f| {
-                ready_inner =
-                    render_state_panel(f, f.area(), "分支 [demo] (2)", &PanelState::Ready);
-            })
-            .unwrap();
-        terminal
-            .draw(|f| {
-                flash_inner = render_state_panel(
-                    f,
-                    f.area(),
-                    "分支 [demo] (2)",
-                    &success_state("✓ 已切换到 dev"),
-                );
-            })
-            .unwrap();
-        assert_eq!(
-            ready_inner, flash_inner,
-            "the flash must not shrink the rows the caller fills"
-        );
-    }
-
     /// Every state keeps the panel title: a loading panel still says which
     /// panel it is (§3.2 "边框与标题不变").
     #[test]
@@ -494,7 +418,6 @@ mod tests {
             },
             PanelState::Error { message: "boom" },
             PanelState::Ready,
-            PanelState::Success { message: "完成" },
         ];
         for state in &states {
             let text = render_text("提交历史 [demo] (0)", state);

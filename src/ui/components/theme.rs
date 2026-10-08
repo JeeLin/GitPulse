@@ -13,13 +13,6 @@
 pub mod color {
     use ratatui::style::Color;
 
-    /// Application background (§5.1 `bg`).
-    ///
-    /// Reserved: §5.1 paints the app background in the root render
-    /// (`ui::render`, outside this lane) and no call site names the token yet,
-    /// so the number stays pinned here rather than duplicated.
-    #[allow(dead_code)]
-    pub const BG: Color = Color::Rgb(0x1a, 0x1b, 0x26);
     /// Panel background / modal surface.
     pub const SURFACE: Color = Color::Rgb(0x24, 0x28, 0x3b);
     /// Selected row / alternating row background.
@@ -49,15 +42,6 @@ pub mod color {
     pub const GIT_MOD: Color = WARNING;
     /// Working-tree file: deleted.
     pub const GIT_DEL: Color = DANGER;
-    /// Working-tree file: renamed (§5.1 `git_renamed`).
-    ///
-    /// Reserved: `git::FileState` has no `Renamed` variant — `src/git/file.rs`
-    /// is frozen this release — and `file_state_symbol` (ui/mod.rs, outside
-    /// this lane) stops at the four tracked states, so no call site names this
-    /// alias yet; kept for §5 token parity with the rest of the `git_*` set.
-    #[allow(dead_code)]
-    pub const GIT_RENAMED: Color = INFO;
-
     /// CI run: success.
     pub const CI_PASS: Color = SUCCESS;
     /// CI run: failure.
@@ -68,16 +52,9 @@ pub mod color {
     pub const CI_SKIP: Color = FG_MUTED;
 }
 
-/// Spacing rhythm (§5.2): the one-cell padding, the one-cell inter-panel
-/// gutter and the fixed heights of the vertical structure.
+/// Spacing rhythm (§5.2): the one-cell inter-panel gutter and the fixed heights
+/// of the vertical structure.
 pub mod spacing {
-    /// Horizontal padding inside a panel (left and right, in cells).
-    ///
-    /// Reserved: §5.2's number of record. Views build their own `Block`s and
-    /// none applies it as a `Padding` yet, so it stays the single source future
-    /// panels pad from rather than a magic `1` copied per view.
-    #[allow(dead_code)]
-    pub const PADDING_X: u16 = 1;
     /// Gutter between two panels.
     pub const GUTTER: u16 = 1;
     /// Height of the title row.
@@ -172,7 +149,6 @@ mod tests {
     /// would silently re-theme the whole application.
     #[test]
     fn color_tokens_match_the_design_palette() {
-        assert_eq!(color::BG, Color::Rgb(0x1a, 0x1b, 0x26));
         assert_eq!(color::SURFACE, Color::Rgb(0x24, 0x28, 0x3b));
         assert_eq!(color::SURFACE_ALT, Color::Rgb(0x2f, 0x33, 0x49));
         assert_eq!(color::BORDER, Color::Rgb(0x41, 0x48, 0x68));
@@ -192,7 +168,6 @@ mod tests {
         assert_eq!(color::GIT_ADD, color::SUCCESS);
         assert_eq!(color::GIT_MOD, color::WARNING);
         assert_eq!(color::GIT_DEL, color::DANGER);
-        assert_eq!(color::GIT_RENAMED, color::INFO);
         assert_eq!(color::CI_PASS, color::SUCCESS);
         assert_eq!(color::CI_FAIL, color::DANGER);
         assert_eq!(color::CI_PENDING, color::WARNING);
@@ -202,7 +177,6 @@ mod tests {
     /// §5.2: the fixed heights the layout composes from.
     #[test]
     fn spacing_tokens_keep_the_vertical_rhythm() {
-        assert_eq!(spacing::PADDING_X, 1);
         assert_eq!(spacing::GUTTER, 1);
         assert_eq!(spacing::TITLE_ROWS, 1);
         assert_eq!(spacing::TAB_ROWS, 1);

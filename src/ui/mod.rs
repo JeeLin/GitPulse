@@ -89,16 +89,25 @@ pub(crate) fn submit_hints(submit: &str) -> Line<'static> {
     join_hints([hint("Enter", submit), hint("Esc", "取消")])
 }
 
-/// Draw the status row of the footer (§4.2): errors render on `danger` and
-/// persist until the next operation, anything else keeps the default style.
-/// `None` leaves the row blank.
+/// Draw the status row of the footer (§4.2): errors render on `danger`, a
+/// success (non-error carrying the design's `✓ ` glyph) renders on the
+/// `success` token, and anything else keeps the default style. `None` leaves
+/// the row blank.
 ///
 /// Called through [`footer::render_footer`] — views never draw the row
 /// themselves.
+///
+/// The green tone is derived from the glyph rather than a dedicated field:
+/// [`StatusLine`] is built by struct literal in views and tests alike, so a
+/// new flag would be a breaking change across every one of them. `✓ ` is the
+/// design's own success marker (§3.2 `success-flash`), which is why the stage /
+/// unstage / discard verdicts carry it — see [`StatusLine::is_success`].
 pub fn render_status_line(f: &mut Frame, area: Rect, status: Option<&StatusLine>) {
     if let Some(status) = status {
         let style = if status.is_error {
             Style::default().fg(color::DANGER)
+        } else if status.is_success() {
+            Style::default().fg(color::SUCCESS)
         } else {
             Style::default()
         };
@@ -482,12 +491,10 @@ pub(crate) fn view_hints(app: &App) -> HintRow {
         ),
         View::History => history::history_hints(),
         View::Tags => tags::tags_hints(app.tags_state.modal.as_ref()),
-        View::Pulls => pulls::receipt_hints(true, app.github_state.kind()),
-        View::PullDetail => pulls::pull_detail_hints(app.github_state.kind()),
-        View::Checks => pulls::receipt_hints(false, app.github_state.kind()),
-        View::Issues => pulls::receipt_hints(true, app.github_state.kind()),
-        View::IssueDetail => pulls::issue_detail_hints(app.github_state.kind()),
-        View::Notifications => pulls::receipt_hints(false, app.github_state.kind()),
+        View::Checks | View::Notifications | View::PullDetail | View::IssueDetail => {
+            pulls::detail_hints(app.github_state.kind())
+        }
+        View::Pulls | View::Issues => pulls::receipt_hints(true, app.github_state.kind()),
     };
     row.with_tail_segment(view_tail(app.view))
 }
@@ -576,7 +583,6 @@ fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
         confirm_file,
         load_error: app.load_error.as_deref(),
         focused,
-        flash: app.panel_flash.as_deref(),
         line_counts: &app.file_line_counts,
         preview_content: app.preview_diff.as_deref(),
         preview_scroll: app.preview_scroll,
@@ -597,7 +603,6 @@ fn render_commit_view(f: &mut Frame, content: Rect, app: &mut App) {
         confirm_file: None,
         load_error: app.load_error.as_deref(),
         focused,
-        flash: app.panel_flash.as_deref(),
         line_counts: &app.file_line_counts,
         preview_content: app.preview_diff.as_deref(),
         preview_scroll: app.preview_scroll,
@@ -988,7 +993,7 @@ mod tests {
             "the view segment cut must be marked: {row}"
         );
         assert!(
-            row.contains("j/k选择"),
+            row.contains("⏎查看diff"),
             "the head of the view segment stays: {row}"
         );
     }

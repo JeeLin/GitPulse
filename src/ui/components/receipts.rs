@@ -124,13 +124,13 @@ pub(crate) fn render_receipts_list(
 }
 
 /// The panel's `error` state for a failed load of its own content (§4.3):
-/// `加载失败`, the reason and `按 r 重试`, on a `danger` shell that keeps the
-/// panel title.
+/// `加载失败`, the reason and `按 r 重试`. The body is painted `danger` by
+/// `error_lines`, while the shell keeps the §3.1 focus border (so a failed
+/// panel still says which panel it is) — a failure is not a focus signal and a
+/// focus border is not a failure (see [`state_panel::render_state_panel_with_focus`]).
 ///
-/// A `focused` receipt panel keeps that danger shell either way — §3.2 spells
-/// the state out as a `danger` block, and §3.1's border rule is about telling
-/// the focus apart from the panels around it, not about repainting a failure
-/// (see [`state_panel::render_state_panel_with_focus`]).
+/// A `focused` receipt panel takes that focus border the same as `ready`:
+/// the §5.1 `danger` tone lives on the body text, not the shell.
 pub(crate) fn render_load_error(f: &mut Frame, area: Rect, title: &str, message: &str) {
     render_state(f, area, title, &state_panel::PanelState::Error { message });
 }
@@ -329,7 +329,6 @@ pub(crate) fn receipt_hints(show_enter: bool, kind: Option<PlatformKind>) -> Hin
         hint("i", "issues"),
         hint("n", crate::platform::notifications_label(kind)),
         hint("r", "刷新"),
-        hint("q/Esc", "返回"),
     ];
     if show_enter {
         hints.push(hint("Enter", "详情"));
@@ -337,17 +336,12 @@ pub(crate) fn receipt_hints(show_enter: bool, kind: Option<PlatformKind>) -> Hin
     HintRow::new(join_hints(hints))
 }
 
-/// Footer hint row for the pull-detail panel (§2.3): the receipt hub keys
-/// minus `Enter 详情`, which is a no-op once a detail is open. `kind` carries
-/// the platform, see [`receipt_hints`].
-pub(crate) fn pull_detail_hints(kind: Option<PlatformKind>) -> HintRow {
-    receipt_hints(false, kind)
-}
-
-/// Footer hint row for the issue-detail panel (§2.3): the same keys as the
-/// pull detail — the hub keys without the `Enter` no-op. `kind` carries the
-/// platform, see [`receipt_hints`].
-pub(crate) fn issue_detail_hints(kind: Option<PlatformKind>) -> HintRow {
+/// Footer hint row for a detail panel (§2.3): the receipt hub keys, minus
+/// the `Enter 详情` drill-in, which a detail panel has nowhere to push. Pull
+/// and Issue details share this row verbatim, so it is one function instead of
+/// a pair of byte-for-byte copies. `kind` is the open platform, see
+/// [`receipt_hints`].
+pub(crate) fn detail_hints(kind: Option<PlatformKind>) -> HintRow {
     receipt_hints(false, kind)
 }
 
@@ -385,33 +379,6 @@ pub(crate) fn render_receipt_buffer(
     terminal.backend().buffer().clone()
 }
 
-/// Whitespace-stripped text of the whole frame (wide CJK glyphs leave padding
-/// cells).
-#[cfg(test)]
-pub(crate) fn compact(buffer: &ratatui::buffer::Buffer) -> String {
-    let mut raw = String::new();
-    for cell in buffer.content() {
-        raw.push_str(cell.symbol());
-    }
-    raw.chars().filter(|c| !c.is_whitespace()).collect()
-}
-
-/// Rows of a rendered frame whose whitespace-stripped text contains `needle`
-/// — how a receipt test checks that one async result landed on the footer
-/// status row (`height - 2`) and nowhere else (§4.1).
-#[cfg(test)]
-pub(crate) fn rows_with(buffer: &ratatui::buffer::Buffer, needle: &str) -> Vec<u16> {
-    (0..buffer.area.height)
-        .filter(|y| {
-            let row: String = (0..buffer.area.width)
-                .map(|x| buffer[(x, *y)].symbol().to_string())
-                .collect();
-            let row: String = row.chars().filter(|c| !c.is_whitespace()).collect();
-            row.contains(needle)
-        })
-        .collect()
-}
-
 /// Readiness-gate client for the panel tests.
 ///
 /// `GithubClient::new` only resolves a token (the environment wins) and
@@ -436,6 +403,7 @@ pub(crate) fn offline_client() -> Box<dyn crate::platform::PlatformClient> {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::ui::components::cells::compact;
     use crate::ui::github_remote;
 
     /// Panel title keeps the remote pair once it is known, and reads `—` while
@@ -600,11 +568,27 @@ mod tests {
             assert!(text.contains("PR列表·octo/demo"), "missing title: {text}");
             assert!(text.contains(copy), "missing copy {copy:?}: {text}");
             assert!(text.contains(key), "missing key {key:?}: {text}");
-            if copy != "加载失败" {
+            // §3.1: every state — error included — wears the focus border.
+            assert_eq!(
+                buffer[(0, 0)].fg,
+                color::BORDER_FOCUS,
+                "{copy:?} keeps the focus border"
+            );
+            // §3.2: the error body keeps its `danger` tone while the shell
+            // keeps the focus border — the two never repaint each other.
+            if copy == "加载失败" {
+                let mut body_fg = None;
+                for y in 0..buffer.area.height {
+                    for x in 0..buffer.area.width {
+                        if buffer[(x, y)].symbol() == "b" {
+                            body_fg = Some(buffer[(x, y)].fg);
+                        }
+                    }
+                }
                 assert_eq!(
-                    buffer[(0, 0)].fg,
-                    color::BORDER_FOCUS,
-                    "{copy:?} keeps the focus border"
+                    body_fg,
+                    Some(color::DANGER),
+                    "the error body keeps danger while the border does not"
                 );
             }
         }

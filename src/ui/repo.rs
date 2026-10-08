@@ -34,9 +34,6 @@ pub struct RepoState<'a> {
     /// Whether this panel holds the screen's focus (§3.1): it picks the
     /// border color and whether the list draws the `▌` / `surface_alt` cursor.
     pub focused: bool,
-    /// Result of the operation that just completed (§3.2 `success-flash`),
-    /// drawn above the rows it keeps; `None` is the plain `ready` list.
-    pub flash: Option<&'a str>,
 
     // §6.2.1 inline preview pane (feature A).
     /// Per-entry added/removed line counts, aligned 1:1 with `entries`;
@@ -121,10 +118,12 @@ fn split_repo(content: Rect) -> (Rect, Option<Rect>) {
 }
 
 /// Bottom key-hint row: y/n/Esc while the discard confirmation is open (every
-/// other list key is swallowed then), the file-list actions otherwise. Related
-/// keys share one hint (`s/u`, `p/l`, `b/h/t`) so the row — including the
-/// panel entry — stays within the 80-column bottom line. The commit message
-/// input owns its own row, see [`crate::ui::commit::commit_hints`].
+/// other list key is swallowed then), the file-list actions otherwise.
+///
+/// The pairs are §6.2.1's 提示行视图段 verbatim, in §2.3's priority order, with
+/// the two keys that share one action folded together (`⏎ 查看diff`, `p/P`,
+/// `b/h/t`) so the view segment keeps its cells inside the 80-column line. The
+/// commit message input owns its own row, see [`crate::ui::commit::commit_hints`].
 fn key_hints(discard_confirm_open: bool) -> Line<'static> {
     if discard_confirm_open {
         // Shared row (G5): the y/n/Esc wording of the confirmation, matching
@@ -132,14 +131,11 @@ fn key_hints(discard_confirm_open: bool) -> Line<'static> {
         super::confirm_hints()
     } else {
         join_hints([
-            hint("j/k", "选择"),
-            hint("g", "进入"),
-            hint("s/u", "暂存切换"),
-            hint("x", "丢弃"),
-            hint("c", "commit"),
-            hint("p/l", "push/pull"),
+            hint("⏎", "查看diff"),
+            hint("s/u", "暂存"),
+            hint("c", "提交"),
+            hint("p/P", "推送/拉取"),
             hint("b/h/t", "面板"),
-            hint("Esc", "返回"),
         ])
     }
 }
@@ -203,26 +199,16 @@ fn render_file_list(f: &mut Frame, area: Rect, state: &mut RepoState<'_>) {
         })
         .collect();
 
-    // §3.2 `success-flash`: the shell is painted first and the operation result
-    // rides above the rows it keeps. `Ready` is the same shell without that
-    // line, so both states go through the one shared renderer and the flash
-    // never costs the list a row.
-    let inner = match state.flash {
-        Some(message) => state_panel::render_state_panel_with_focus(
-            f,
-            area,
-            &title,
-            &state_panel::success_state(message),
-            state.focused,
-        ),
-        None => state_panel::render_state_panel_with_focus(
-            f,
-            area,
-            &title,
-            &PanelState::Ready,
-            state.focused,
-        ),
-    };
+    // §3.2 `ready`: the shell is painted once and the rows fill its inner rect.
+    // Operation results no longer flash inside the panel — they ride on the
+    // status row (§4.2), so the list always renders its plain `ready` shell.
+    let inner = state_panel::render_state_panel_with_focus(
+        f,
+        area,
+        &title,
+        &PanelState::Ready,
+        state.focused,
+    );
 
     let list = super::with_cursor(List::new(items), state.focused);
     f.render_stateful_widget(list, inner, state.list_state);
@@ -278,6 +264,9 @@ fn funded_counts_digits(width: usize) -> usize {
     // Two cells for the state symbol, and a path that has to stay long enough
     // to identify a file before a line count is worth anything.
     const SYMBOL_CELLS: usize = 2;
+    /// Minimum cells a path must keep (§5.4): 12 is the floor a path needs to
+    /// identify a file (`src/` + a short name) before a `+N -M` counts column
+    /// is worth the width it costs — below it the column is dropped whole.
     const MIN_PATH_CELLS: usize = 12;
     let spare = width.saturating_sub(SYMBOL_CELLS + MIN_PATH_CELLS);
     // `counts_column_cells` is `2 * digits + 4`, so invert it and clamp at 0.
@@ -483,7 +472,6 @@ mod tests {
             show_discard_confirm: false,
             confirm_file: None,
             load_error: None,
-            flash: None,
             focused: true,
             line_counts: &[],
             preview_content: None,
@@ -881,14 +869,14 @@ mod tests {
             24,
         );
         let text = compact(&terminal);
-        assert!(text.contains("j/k选择"), "missing select hint: {text}");
-        assert!(text.contains("暂存切换"), "missing stage hint: {text}");
-        assert!(text.contains("丢弃"), "missing discard hint: {text}");
-        assert!(text.contains("commit"), "missing commit hint: {text}");
-        assert!(text.contains("push"), "missing push hint: {text}");
-        assert!(text.contains("pull"), "missing pull hint: {text}");
-        assert!(text.contains("b/h/t面板"), "missing panel hint: {text}");
-        assert!(text.contains("Esc返回"), "missing back hint: {text}");
+        // §6.2.1 提示行视图段: ⏎ 查看diff  s 暂存  u 取消  c 提交
+        //  p 推送  P 拉取 — the row folds the two keys of one action
+        // together so it fits (§2.3 / §5.4), and it never restates the
+        // global `Esc 返回` / `q 退出`.
+        for pair in ["⏎查看diff", "s/u暂存", "c提交", "p/P推送/拉取", "b/h/t面板"] {
+            assert!(text.contains(pair), "missing view pair {pair}: {text}");
+        }
+        assert!(text.contains("Esc返回"), "missing global back hint: {text}");
     }
 
     /// The hint row must never overflow an 80-column terminal. The repo
@@ -906,7 +894,7 @@ mod tests {
         );
         assert!(hint.ends_with('…'), "the cut must be marked: {hint}");
         assert!(
-            hint.contains("j/k选择"),
+            hint.contains("⏎查看diff"),
             "the head of the view segment stays: {hint}"
         );
     }
@@ -1013,37 +1001,6 @@ mod tests {
             !text.contains("Msrc/a.rs+"),
             "no counts column should be drawn: {text}"
         );
-    }
-
-    /// §3.2 `success-flash`: a completed operation paints the green result above
-    /// the rows it keeps — the list stays `ready`, so the file paths are still
-    /// on screen next to the flash, and the flash is never a second panel.
-    #[test]
-    fn success_flash_rides_above_the_rows_it_keeps() {
-        let entries = vec![entry("src/a.rs", FileState::Modified)];
-        let mut list_state = ListState::default();
-        list_state.select(Some(0));
-        let mut state = base_state(&entries, &mut list_state);
-        state.flash = Some("✓ 已暂存 src/a.rs");
-        let terminal = render_to_terminal(state);
-        let text = compact(&terminal);
-
-        assert!(text.contains("已暂存src/a.rs"), "missing flash: {text}");
-        assert!(
-            text.contains("src/a.rs"),
-            "flash must keep the rows: {text}"
-        );
-
-        let buffer = terminal.backend().buffer();
-        let mut flash_fg = None;
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                if buffer[(x, y)].symbol() == "✓" {
-                    flash_fg = Some(buffer[(x, y)].fg);
-                }
-            }
-        }
-        assert_eq!(flash_fg, Some(color::SUCCESS), "flash reads success");
     }
 
     /// §5.4: a file with nothing to preview is a valid state — the preview pane

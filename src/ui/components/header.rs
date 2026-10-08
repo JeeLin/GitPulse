@@ -40,31 +40,29 @@ const TAG_SEPARATOR: &str = " │ ";
 /// is `false` the row is absent (`None`) and `content` absorbs it, so every
 /// screen without context tabs keeps the exact geometry it had before.
 pub fn split_area(area: Rect, has_context_tags: bool) -> (Rect, Option<Rect>, Rect, Rect) {
-    let chunks = if has_context_tags {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(TITLE_ROWS),
-                Constraint::Length(CONTEXT_TAG_ROWS),
-                Constraint::Min(1),
-                Constraint::Length(spacing::FOOTER_ROWS),
-            ])
-            .split(area)
+    // One branch decides the tag row's height (zero when absent); the four
+    // slots keep fixed indices whether or not the tag row has height, so the
+    // tuple is assembled without re-evaluating the predicate.
+    let tag_rows = if has_context_tags {
+        CONTEXT_TAG_ROWS
     } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(TITLE_ROWS),
-                Constraint::Min(1),
-                Constraint::Length(spacing::FOOTER_ROWS),
-            ])
-            .split(area)
+        0
     };
-    if has_context_tags {
-        (chunks[0], Some(chunks[1]), chunks[2], chunks[3])
-    } else {
-        (chunks[0], None, chunks[1], chunks[2])
-    }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(TITLE_ROWS),
+            Constraint::Length(tag_rows),
+            Constraint::Min(1),
+            Constraint::Length(spacing::FOOTER_ROWS),
+        ])
+        .split(area);
+    (
+        chunks[0],
+        (tag_rows > 0).then_some(chunks[1]),
+        chunks[2],
+        chunks[3],
+    )
 }
 
 /// Draw the single canonical title bar (§6.1): `breadcrumb` on the left, the

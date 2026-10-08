@@ -109,7 +109,6 @@ fn key_hints(modal: Option<&TagsModal>) -> Line<'static> {
             hint("d", "删除"),
             hint("p", "推送"),
             hint("a", "全部推送"),
-            hint("q/Esc", "返回"),
         ]),
     }
 }

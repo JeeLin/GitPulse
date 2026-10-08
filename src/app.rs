@@ -153,6 +153,10 @@ impl PanelFocus {
             // §6.2.1 / §6.2.3: a list beside its preview — `Tab` switches the
             // focus between the file list and the diff pane.
             View::Repo | View::History => &[PanelFocus::Primary, PanelFocus::Preview],
+            // §6.5: 正文 above the changed-file list — `Tab` switches the focus
+            // between the message and the file list, which is why this screen
+            // is the one sub-screen with two regions.
+            View::CommitDetail => &[PanelFocus::Primary, PanelFocus::Preview],
             _ => &[PanelFocus::Primary],
         }
     }
@@ -570,17 +574,11 @@ pub struct App {
     pub diff_scroll: u16,
     /// Scroll offset of the commit-detail sub-screen (§6.5).
     pub commit_detail_scroll: u16,
+    /// Selected row of the commit-detail file list (§6.5 `Tab` moves the focus
+    /// between 正文 and this list, so the list carries a cursor of its own).
+    pub commit_file_state: ListState,
     /// Whether the discard confirmation dialog is shown.
     pub show_discard_confirm: bool,
-    /// Transient panel-level success flash (§3.2 `success-flash`), set by an
-    /// operation whose result changed the panel itself — staging a file, for
-    /// instance, which is why the §6.2.1 file list flashes `✓ 已暂存 …` above
-    /// its rows instead of only reporting on the status row.
-    ///
-    /// §4.4 rules out a self-clearing timer: the platform repaints on input
-    /// only, so nothing would remove the flash until the user touched a key
-    /// anyway. [`App::clear_feedback`] therefore drops it on the next input.
-    pub panel_flash: Option<String>,
     /// Current diff content for the selected file.
     pub diff_content: String,
     /// Single-line commit message being typed in the Commit view (convention 9).
@@ -672,8 +670,8 @@ impl App {
             preview_scroll: 0,
             diff_scroll: 0,
             commit_detail_scroll: 0,
+            commit_file_state: ListState::default(),
             show_discard_confirm: false,
-            panel_flash: None,
             diff_content: String::new(),
             commit_message: String::new(),
             remote_status: None,
@@ -832,24 +830,8 @@ impl App {
     pub fn clear_feedback(&mut self) {
         self.clear_error();
         self.clear_load_error();
-        self.panel_flash = None;
     }
 
-    /// Drop the settled push/pull (or receipt) feedback so the next status
-    /// message is not outranked by it (G3).
-    ///
-    /// The panels that render `remote_status` above the plain status line
-    /// would otherwise keep showing a stale `Success` / `Error` under (or
-    /// over) a message written afterwards. A push still in flight keeps its
-    /// receiver and re-reports when it finishes, so its running feedback is
-    /// deliberately left alone — this is the one guard the tag panel, its
-    /// overlays and the history/config entry points (G19) share instead of
-    /// re-typing `if self.remote_rx.is_none()`.
-    ///
-    /// It is also the guard that keeps a settled receipt fetch out of the
-    /// repo view (U3): leaving the receipt hub clears its feedback the same
-    /// way, so the repo status row never renders `github 成功` / `gitlab 成功`
-    /// for an operation it did not run.
     /// Op label for a receipt view's status row: the platform slug of the
     /// fetch that settled here, falling back to [`App::remote_op`] while no
     /// receipt has run in this visit.
@@ -883,6 +865,21 @@ impl App {
         self.github_rx = None;
     }
 
+    /// Drop the settled push/pull (or receipt) feedback so the next status
+    /// message is not outranked by it (G3).
+    ///
+    /// The panels that render `remote_status` above the plain status line
+    /// would otherwise keep showing a stale `Success` / `Error` under (or
+    /// over) a message written afterwards. A push still in flight keeps its
+    /// receiver and re-reports when it finishes, so its running feedback is
+    /// deliberately left alone — this is the one guard the tag panel, its
+    /// overlays and the history/config entry points (G19) share instead of
+    /// re-typing `if self.remote_rx.is_none()`.
+    ///
+    /// It is also the guard that keeps a settled receipt fetch out of the
+    /// repo view (U3): leaving the receipt hub clears its feedback the same
+    /// way, so the repo status row never renders `github 成功` / `gitlab 成功`
+    /// for an operation it did not run.
     fn clear_finished_push_feedback(&mut self) {
         if self.remote_rx.is_none() {
             self.remote_status = None;
@@ -1034,6 +1031,10 @@ impl App {
             return;
         }
         self.commit_detail_scroll = 0;
+        // §3.1: an unfocused list has no cursor at all, so the file region can
+        // only be entered on a row the user can see. Landing on row 0 gives
+        // `Tab` something to move away from instead of an empty panel.
+        self.commit_file_state.select(Some(0));
         self.view = View::CommitDetail;
     }
 
@@ -1064,9 +1065,8 @@ impl App {
                 let file_path = self.file_entries[file_idx].path.clone();
                 match git::stage(&repo_path, &file_path) {
                     Ok(()) => {
-                        self.clear_error();
-                        self.panel_flash = Some(format!("✓ 已暂存 {}", file_path.display()));
                         self.load_file_entries();
+                        self.set_info(format!("✓ 已暂存 {}", file_path.display()));
                     }
                     Err(e) => self.set_error(format!("stage 失败: {e}")),
                 }
@@ -1082,14 +1082,59 @@ impl App {
                 let file_path = self.file_entries[file_idx].path.clone();
                 match git::unstage(&repo_path, &file_path) {
                     Ok(()) => {
-                        self.clear_error();
-                        self.panel_flash = Some(format!("✓ 已取消暂存 {}", file_path.display()));
                         self.load_file_entries();
+                        self.set_info(format!("✓ 已取消暂存 {}", file_path.display()));
                     }
                     Err(e) => self.set_error(format!("unstage 失败: {e}")),
                 }
             }
         }
+    }
+
+    /// Toggle stage / unstage on the currently selected file (repo `Space`).
+    ///
+    /// `FileEntry` carries no explicit "staged" bit — `git::list_file_status`
+    /// collapses both-index-and-worktree states into a single `FileState` — so
+    /// the only unambiguously-staged state is `FileState::Added` (an
+    /// `INDEX_NEW` entry). `Space` therefore unstages an already-staged `Added`
+    /// entry and stages everything else, mirroring `s`/`u` without inventing a
+    /// `staged` column the git layer does not expose.
+    pub fn toggle_staged(&mut self) {
+        if let (Some(repo_idx), Some(file_idx)) = (self.current_repo, self.file_state.selected()) {
+            if repo_idx < self.repos.len() && file_idx < self.file_entries.len() {
+                let is_staged = self.file_entries[file_idx].state == git::FileState::Added;
+                if is_staged {
+                    self.unstage_current();
+                } else {
+                    self.stage_current();
+                }
+            }
+        }
+    }
+
+    /// Stage every changed file in the open repository (repo `a`).
+    ///
+    /// The git layer exposes staging per-path (`git::stage`), not as a single
+    /// `-A` call, so this walks `file_entries` and stages each entry. Staging
+    /// an already-staged path is idempotent, so staging every row is safe even
+    /// when some of them are already staged.
+    pub fn stage_all(&mut self) {
+        let Some(repo_idx) = self.current_repo else {
+            return;
+        };
+        if repo_idx >= self.repos.len() {
+            return;
+        }
+        let repo_path = self.repos[repo_idx].path.clone();
+        let paths: Vec<_> = self.file_entries.iter().map(|e| e.path.clone()).collect();
+        let mut count = 0usize;
+        for file_path in paths {
+            if git::stage(&repo_path, &file_path).is_ok() {
+                count += 1;
+            }
+        }
+        self.load_file_entries();
+        self.set_info(format!("✓ 已暂存 {count} 个文件"));
     }
 
     /// Show the discard confirmation dialog.
@@ -1106,9 +1151,8 @@ impl App {
                 let file_path = self.file_entries[file_idx].path.clone();
                 match git::discard(&repo_path, &file_path) {
                     Ok(()) => {
-                        self.clear_error();
-                        self.panel_flash = Some(format!("✓ 已丢弃 {}", file_path.display()));
                         self.load_file_entries();
+                        self.set_info(format!("✓ 已丢弃 {}", file_path.display()));
                     }
                     Err(e) => self.set_error(format!("discard 失败: {e}")),
                 }
@@ -2953,10 +2997,10 @@ impl App {
             // Re-read the diff of the highlighted file (resets the scroll).
             View::Diff => self.view_file_diff(),
             View::Commit => {}
-            // §6.5: the detail pane reads its payload from the history state the
-            // history view already loaded — a sub-screen has nothing of its own
-            // to reload, so `r` is inert here (pop to history to refresh).
-            View::CommitDetail => {}
+            // §6.5: the detail sub-screen is a drill-in on the history pane's own
+            // payload, so `r` re-reads that payload — which is exactly what the
+            // panel's `error` state means by 按 r 重试 (§4.3).
+            View::CommitDetail => self.load_history_detail(),
             View::Branches => self.load_branches(),
             // The scan-dir list is in-memory; `r` re-runs the scan it shows.
             View::Config => self.refresh_repos(),
@@ -3005,19 +3049,25 @@ impl App {
             // §6.5: no list cursor to jump, only a scrollable body — `g` lands
             // the body on its first line, `G` on its last.
             View::CommitDetail => {
-                if head {
+                let files = crate::ui::commit_detail::commit_file_len(self.history.detail.as_ref());
+                if self.panel_is_focused(PanelFocus::Preview) {
+                    // The file list holds the focus, so `g`/`G` move its cursor
+                    // instead of the 正文 scroll — the jump follows the focused
+                    // region, exactly as `j`/`k` do in
+                    // [`App::handle_commit_detail_key`].
+                    jump_selection(&mut self.commit_file_state, files, head);
+                } else if head {
                     self.commit_detail_scroll = 0;
                 } else {
-                    // The same logical-line heuristic the diff viewer uses: a
-                    // wrapped line is one logical line, the closest safe last
-                    // row without rendering a blank panel.
-                    let body = self.history.detail.as_ref().map_or(0, |d| {
-                        // subject/body + blank separator + the files header +
-                        // one row per changed path.
-                        d.message.lines().count() + 1 + 1 + d.files.len()
-                    });
+                    // The 正文 builder itself is the source of truth for the row
+                    // count: a second formula would not stay in step with the
+                    // rendered rows.
+                    let body = crate::ui::commit_detail::commit_message_lines(
+                        self.history.selected_commit(),
+                        self.history.detail.as_ref(),
+                    );
                     self.commit_detail_scroll =
-                        u16::try_from(body.saturating_sub(1)).unwrap_or(u16::MAX);
+                        u16::try_from(body.len().saturating_sub(1)).unwrap_or(u16::MAX);
                 }
             }
             View::Branches => jump_selection(&mut self.branch_state, self.branches.len(), head),
@@ -3203,7 +3253,11 @@ impl App {
         // feedback the `Esc` exit does (B2).
         let leaving_receipts = self.view.is_receipt() && !view.is_receipt();
         self.view = view;
-        self.clear_error();
+        // §4.3: a load failure belongs to the panel that produced it. A jump
+        // replaces that panel wholesale, so the destination must not inherit
+        // the previous screen's `error` state — `clear_error` alone would only
+        // clear the status row.
+        self.clear_feedback();
         if leaving_receipts {
             self.leave_receipt_domain();
         }
@@ -3238,7 +3292,9 @@ impl App {
             View::Pulls | View::Checks | View::Issues | View::Notifications => {
                 self.github_state.selected = 0;
             }
-            // Drill-down states reached by Enter inside a screen, not a jump.
+            // Drill-down states reached by `Enter` inside a screen, not a jump:
+            // they own no list of their own, so there is no row to land on. The
+            // palette only ever jumps to the five screens above.
             View::Diff
             | View::Commit
             | View::CommitDetail
@@ -3318,13 +3374,9 @@ impl App {
                 }
                 true
             }
-            // `Enter` = 打开 (§0): open the highlighted file's diff sub-screen
-            // (`d` is the pre-redesign alias kept until task 7 remaps it).
+            // `Enter` = 打开 (§0): open the highlighted file's diff sub-screen.
+            // `d` no longer aliases it — §6.2.1 gives `d` the discard verb.
             KeyCode::Enter => {
-                self.view_file_diff();
-                true
-            }
-            KeyCode::Char('d') => {
                 self.view_file_diff();
                 true
             }
@@ -3336,7 +3388,21 @@ impl App {
                 self.unstage_current();
                 true
             }
-            KeyCode::Char('x') => {
+            // §6.2.1: `Space` toggles stage / unstage on the highlighted file.
+            KeyCode::Char(' ') => {
+                self.toggle_staged();
+                true
+            }
+            // §6.2.1: `a` stages every changed file at once.
+            KeyCode::Char('a') => {
+                self.stage_all();
+                true
+            }
+            // §6.2.1 KEYS: `d` = 丢弃选中（确认框）. `App::start_discard` only
+            // arms the confirmation; the modal focus trap owns `y`/`n`, so the
+            // destructive call itself cannot happen without that confirmation
+            // (§2.2 / §7.7: 删除类操作缺确认).
+            KeyCode::Char('d') => {
                 self.start_discard();
                 true
             }
@@ -3386,21 +3452,34 @@ impl App {
         }
     }
 
-    /// Key handler for the commit-detail sub-screen (§6.5): vertical scroll
-    /// only — `Esc` (back to the history view) and `q` (quit) belong to
+    /// Key handler for the commit-detail sub-screen (§6.5). The two regions
+    /// answer the same vertical keys differently, because §6.5 gives `Tab` a
+    /// real meaning on this screen: `j`/`k` scroll 正文 while it holds the
+    /// focus and walk the changed-file cursor while the file list does.
+    /// `Esc` (back to the history view) and `q` (quit) belong to
     /// [`App::dispatch_key`].
     fn handle_commit_detail_key(&mut self, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.commit_detail_scroll = self.commit_detail_scroll.saturating_add(1);
-                true
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.commit_detail_scroll = self.commit_detail_scroll.saturating_sub(1);
-                true
-            }
-            _ => true,
+        let down = matches!(key.code, KeyCode::Char('j') | KeyCode::Down);
+        let up = matches!(key.code, KeyCode::Char('k') | KeyCode::Up);
+        if !down && !up {
+            return true;
         }
+
+        if self.panel_is_focused(PanelFocus::Preview) {
+            move_selection(
+                &mut self.commit_file_state,
+                crate::ui::commit_detail::commit_file_len(self.history.detail.as_ref()),
+                down,
+            );
+        } else {
+            let scroll = &mut self.commit_detail_scroll;
+            *scroll = if down {
+                scroll.saturating_add(1)
+            } else {
+                scroll.saturating_sub(1)
+            };
+        }
+        true
     }
 
     /// Key handler for the branch panel: list navigation and its two overlay
@@ -5501,8 +5580,8 @@ mod tests {
         assert_eq!(app.view, View::Repo);
         assert!(app.commit_message.is_empty());
 
-        // x opens the discard dialog, n cancels it.
-        assert!(app.dispatch_key(key(KeyCode::Char('x'))));
+        // d opens the discard dialog (§6.2.1), n cancels it.
+        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
         assert!(app.show_discard_confirm);
         assert!(app.dispatch_key(key(KeyCode::Char('n'))));
         assert!(!app.show_discard_confirm);
@@ -5549,8 +5628,8 @@ mod tests {
         app.dashboard_state.select(Some(0));
         app.enter_repo();
 
-        // d opens the diff of the modified tracked file.
-        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
+        // Enter opens the diff of the modified tracked file (§6.2.1).
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         assert_eq!(app.view, View::Diff);
         assert!(!app.diff_content.is_empty());
         assert_eq!(app.diff_scroll, 0);
@@ -5586,7 +5665,10 @@ mod tests {
 
         // Untracked files produce no HEAD→workdir diff: the diff load fails, so
         // the panel owns the reason (§4.3) and the view stays in Repo.
-        assert!(app.dispatch_key(key(KeyCode::Char('d'))));
+        //
+        // `Enter` is the §6.2.1 key for the file diff; `d` now arms the discard
+        // confirmation (§6.2.1 KEYS: `d` = 丢弃选中).
+        assert!(app.dispatch_key(key(KeyCode::Enter)));
         assert_eq!(app.view, View::Repo);
         let load_error = app.load_error.as_ref().expect("a load failure is reported");
         assert!(load_error.contains("加载 diff 失败"), "{load_error}");
@@ -5639,11 +5721,99 @@ mod tests {
 
         assert!(app.dispatch_key(key(KeyCode::Char('s'))));
         assert!(index_has_staged(&dir, "a.txt"));
-        assert!(app.status.is_none());
+        let st = app.status.as_ref().expect("stage leaves a success status");
+        assert!(
+            !st.is_error,
+            "stage success is not an error: {}",
+            st.message
+        );
+        assert!(
+            st.message.contains("✓ 已暂存"),
+            "stage carries the ✓ prefix: {}",
+            st.message
+        );
 
         assert!(app.dispatch_key(key(KeyCode::Char('u'))));
         assert!(!index_has_staged(&dir, "a.txt"));
-        assert!(app.status.is_none());
+        let st = app
+            .status
+            .as_ref()
+            .expect("unstage leaves a success status");
+        assert!(
+            !st.is_error,
+            "unstage success is not an error: {}",
+            st.message
+        );
+        assert!(
+            st.message.contains("✓ 已取消暂存"),
+            "unstage carries the ✓ prefix: {}",
+            st.message
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §3.2/§4.2: a completed local-git operation (stage / unstage / discard)
+    /// lands its green `✓ …` on the status row — not a panel flash — and
+    /// survives the file-entry reload that runs first, so `clear_feedback`
+    /// inside `load_file_entries` cannot wipe the success.
+    #[test]
+    fn stage_unstage_discard_each_leave_a_green_success_on_the_status_row() {
+        let dir = temp_dir("success_status");
+        init_repo_with_commit(&dir);
+        std::fs::write(dir.join("a.txt"), "v2\n").unwrap();
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert_eq!(app.file_entries.len(), 1);
+
+        // Stage: success on the status row, green (✓ prefix, not an error).
+        app.stage_current();
+        let st = app.status.as_ref().expect("stage sets a success status");
+        assert!(!st.is_error, "stage success must not be an error");
+        assert!(
+            st.message.starts_with("✓ "),
+            "stage carries the ✓ prefix: {}",
+            st.message
+        );
+        assert!(
+            st.message.contains("a.txt"),
+            "stage names the file: {}",
+            st.message
+        );
+
+        // Unstage: still a success after the reload.
+        app.unstage_current();
+        let st = app.status.as_ref().expect("unstage sets a success status");
+        assert!(!st.is_error, "unstage success must not be an error");
+        assert!(
+            st.message.starts_with("✓ "),
+            "unstage carries the ✓ prefix: {}",
+            st.message
+        );
+        assert!(
+            st.message.contains("a.txt"),
+            "unstage names the file: {}",
+            st.message
+        );
+
+        // Discard: still a success after the reload. The file is modified (just
+        // unstaged) so there is something to discard.
+        app.start_discard();
+        app.confirm_discard();
+        let st = app.status.as_ref().expect("discard sets a success status");
+        assert!(!st.is_error, "discard success must not be an error");
+        assert!(
+            st.message.starts_with("✓ "),
+            "discard carries the ✓ prefix: {}",
+            st.message
+        );
+        assert!(
+            st.message.contains("a.txt"),
+            "discard names the file: {}",
+            st.message
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -6965,7 +7135,20 @@ mod tests {
         assert!(!app.show_discard_confirm);
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "v1\n");
         assert!(app.file_entries.is_empty());
-        assert!(app.status.is_none());
+        let st = app
+            .status
+            .as_ref()
+            .expect("discard leaves a success status");
+        assert!(
+            !st.is_error,
+            "discard success is not an error: {}",
+            st.message
+        );
+        assert!(
+            st.message.contains("✓ 已丢弃"),
+            "discard carries the ✓ prefix: {}",
+            st.message
+        );
 
         // Untracked file: discard removes it from the working tree.
         std::fs::write(dir.join("u.txt"), "junk\n").unwrap();
@@ -7327,6 +7510,58 @@ mod tests {
             app.status.is_none(),
             "a load failure never reaches the status row"
         );
+    }
+
+    /// §6.5: the jump verbs follow the focused region — with 正文 focused `G`
+    /// lands on the message's last line, with 变更文件 focused it moves the file
+    /// cursor to the last path. The row count comes from the rendered body
+    /// builder, not from arithmetic that would drift the moment the body gains
+    /// or loses a row.
+    #[test]
+    fn commit_detail_g_follows_the_focused_region() {
+        let mut app = App::new(Config::default());
+        app.history.set_commits(
+            vec![CommitRow {
+                full_id: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                id: "abc1234".to_string(),
+                summary: String::new(),
+                author: "GitPulse Test".to_string(),
+                time: "2023-11-14 22:18".to_string(),
+                refs: vec![],
+                parents: vec![],
+            }],
+            vec![vec![' '; crate::git::MAX_LANES]],
+        );
+        app.history.detail = Some(CommitDetail {
+            message: "first line\nsecond line".to_string(),
+            files: vec![
+                "src/main.rs".to_string(),
+                "src/lib.rs".to_string(),
+                "README.md".to_string(),
+            ],
+        });
+        app.view = View::History;
+        app.open_commit_detail();
+
+        assert!(app.dispatch_key(key(KeyCode::Char('G'))));
+        assert_eq!(
+            app.commit_detail_scroll, 1,
+            "a 2-line message puts G on its last line, not past it"
+        );
+        assert_eq!(
+            app.commit_file_state.selected(),
+            Some(0),
+            "the unfocused file list keeps its own cursor"
+        );
+
+        assert!(app.dispatch_key(key(KeyCode::Tab)));
+        assert!(app.dispatch_key(key(KeyCode::Char('G'))));
+        assert_eq!(
+            app.commit_file_state.selected(),
+            Some(2),
+            "with 变更文件 focused, G moves the file cursor to the last path"
+        );
+        assert_eq!(app.commit_detail_scroll, 1, "the body keeps its scroll");
     }
 
     /// §4.3: `r` is the `error` state's retry — it reloads the panel's content,

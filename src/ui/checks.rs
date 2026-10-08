@@ -38,6 +38,7 @@ mod tests {
     use crate::app::App;
     use crate::config::Config;
     use crate::platform::CheckSummary;
+    use crate::ui::components::cells;
     use crate::ui::components::receipts;
     use crate::ui::components::theme::color;
     use ratatui::backend::TestBackend;
@@ -65,7 +66,7 @@ mod tests {
     /// reaches the buffer through [`crate::ui::components::footer`]
     /// (§2.3), so a test that skipped it would miss the row entirely.
     fn render_text(app: &App) -> String {
-        receipts::compact(&receipt_buffer(app))
+        cells::compact(&receipt_buffer(app))
     }
 
     /// The rendered frame, so a test can address the single row an async
@@ -136,13 +137,13 @@ mod tests {
         app.set_error("解析远端失败: 未配置远端");
         app.github_state.checks = vec![check("unit", "completed", "success")];
         let buffer = receipt_buffer(&app);
-        let text = receipts::compact(&buffer);
+        let text = cells::compact(&buffer);
         // No resolved remote means `kind == None`, which falls back to the
         // GitHub gate copy, verbatim as in v0.5.0.
         assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
         assert!(!text.contains("unit"), "no rows without a client: {text}");
         assert_eq!(
-            receipts::rows_with(&buffer, "解析远端失败:未配置远端"),
+            cells::rows_with(&buffer, "解析远端失败:未配置远端"),
             vec![buffer.area.height - 2],
             "the reason belongs on the footer status row only: {text}"
         );

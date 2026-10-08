@@ -6,22 +6,27 @@
 //! `Esc` to return to the history view and `q` to quit the application.
 
 use ratatui::{
-    layout::Rect,
-    style::Style,
+    layout::{Constraint, Direction, Layout, Rect},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
 use super::components::state_panel::{self, PanelState};
-use super::components::theme::{color, role};
-use super::hint;
+use super::components::theme::role;
+use super::{hint, with_cursor, PanelFocus};
 use crate::git::{CommitDetail, CommitRow};
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 
 /// Title of the sub-screen, used by the breadcrumb (§1.2) and the title bar
 /// when no commit is highlighted.
 const PANEL_TITLE: &str = "提交详情";
+
+/// Share of the panel body the message region keeps (§6.5). The message is
+/// the region the reader scrolls, so it gets the larger share; the file list
+/// needs only as many rows as it has files.
+const BODY_PERCENT: u16 = 60;
+const FILE_LIST_PERCENT: u16 = 40;
 
 /// Render the commit-detail sub-screen (§6.5).
 ///
@@ -30,7 +35,7 @@ const PANEL_TITLE: &str = "提交详情";
 /// history view, and popped by `Esc`. A load failure of the detail payload
 /// lands on this panel's `error` state (§4.3), the same slot the history pane
 /// surfaced it in.
-pub fn render_commit_detail(f: &mut Frame, content: Rect, app: &crate::app::App) {
+pub fn render_commit_detail(f: &mut Frame, content: Rect, app: &mut crate::app::App) {
     let title = pane_title(app);
 
     if let Some(message) = app.load_error.as_deref() {
@@ -61,52 +66,122 @@ fn pane_title(app: &crate::app::App) -> String {
 
 /// Body of the sub-screen once the error state is ruled out.
 ///
-/// * A selected commit with a detail payload draws the message (soft-wrapped),
-///   a blank separator and the changed-paths list.
-/// * A selected commit whose detail still has not arrived — or never will, for
-///   a commit with nothing to diff — falls back to the placeholder; this is a
-///   "nothing to show" case, never an `error` panel (§4.3).
-/// * No commit at all (the user opened the screen on an empty history) is the
-///   same placeholder.
-fn render_commit_detail_content(f: &mut Frame, area: Rect, app: &crate::app::App, title: &str) {
-    let body = commit_detail_body(app.history.selected_commit(), app.history.detail.as_ref());
+/// Two regions per §6.5: 正文 above, carrying the commit message the reader
+/// scrolls, and the 变更文件 list below, one row per changed path. `Tab` moves
+/// the focus between them (§3.1) and the border style says which one has it.
+///
+/// The placeholder case is the same for both regions: a selected commit whose
+/// detail has not arrived — or never will, for a commit with nothing to diff —
+/// shows the body placeholder and an empty file list; no commit at all (the
+/// screen was opened on an empty history) is the same state. That is a "nothing
+/// to show" case, never an `error` panel (§4.3).
+fn render_commit_detail_content(f: &mut Frame, area: Rect, app: &mut crate::app::App, title: &str) {
+    let body = commit_message_lines(app.history.selected_commit(), app.history.detail.as_ref());
+    let body_focused = app.panel_is_focused(PanelFocus::Primary);
 
-    let block = Block::default().title(title).borders(Borders::ALL);
+    // §6.5 draws 正文 and 变更文件 as the two regions of one full-screen
+    // panel, and `Tab` moves the focus between them. Two bordered blocks are
+    // what makes that focus legible: §3.1 gives the focused one
+    // `border_focus` and the other `border`, so the reader can see which
+    // region `j`/`k` will move.
+    let regions = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(BODY_PERCENT),
+            Constraint::Percentage(FILE_LIST_PERCENT),
+        ])
+        .split(area);
 
-    let paragraph = Paragraph::new(body)
-        .block(block)
-        .wrap(Wrap { trim: false })
-        .scroll((app.commit_detail_scroll, 0));
+    f.render_widget(
+        Paragraph::new(body)
+            .wrap(Wrap { trim: false })
+            .scroll((app.commit_detail_scroll, 0))
+            .block(
+                Block::default()
+                    .title(title.to_string())
+                    .borders(Borders::ALL)
+                    .border_style(role::border(body_focused)),
+            ),
+        regions[0],
+    );
 
-    f.render_widget(paragraph, area);
+    // The file rows carry the `▌` cursor over `surface_alt` only while the file
+    // list holds focus; while the body does, the list shows no cursor at all.
+    let list = with_cursor(
+        List::new(changed_file_rows(app.history.detail.as_ref())),
+        !body_focused,
+    );
+    f.render_stateful_widget(
+        list.block(
+            Block::default()
+                .title(changed_file_title(app.history.detail.as_ref()))
+                .borders(Borders::ALL)
+                .border_style(role::border(!body_focused)),
+        ),
+        regions[1],
+        &mut app.commit_file_state,
+    );
 }
 
-/// The body lines: message, blank line, the `变更文件 (N)` header and one
-/// indented path per changed file — the layout §6.5 fixes, mirroring the
-/// history detail pane's own composition.
-fn commit_detail_body(
+/// Title of the changed-file region: the §6.5 `变更文件 (N)` header.
+fn changed_file_title(detail: Option<&CommitDetail>) -> String {
+    let count = detail.map_or(0, |d| d.files.len());
+    format!("变更文件 ({count})")
+}
+
+/// One row per changed path.
+///
+/// The rows are read-only: `Enter` on a file would open that file's diff
+/// inside the commit, and the git layer exposes no such API (`git::diff_file`
+/// diffs the working tree only, and `src/git/` is frozen this release). So the
+/// list advertises no `⏎ 文件diff` hint — a hint the screen cannot honour is
+/// worse than a missing one — and `Tab` plus the scroll keys are the verbs the
+/// region answers.
+fn changed_file_rows(detail: Option<&CommitDetail>) -> Vec<ListItem<'static>> {
+    match detail {
+        Some(detail) => detail
+            .files
+            .iter()
+            .map(|file| ListItem::new(file.clone()))
+            .collect(),
+        // No payload: the placeholder row is a caption, not a file, and the
+        // cursor must never land on it — `commit_file_len` is what the key
+        // handlers move against, and it counts files only.
+        None => vec![ListItem::new(Span::styled(
+            "（暂无变更文件）",
+            role::caption(),
+        ))],
+    }
+}
+
+/// Number of rows the file region's cursor moves over: the changed paths, and
+/// nothing else. The placeholder row of [`changed_file_rows`] is deliberately
+/// outside this count so `j`/`k`/`g`/`G` cannot select a caption that has no
+/// action behind it — the same "a list cursor never points at a non-actionable
+/// row" rule the other panels follow.
+pub(crate) fn commit_file_len(detail: Option<&CommitDetail>) -> usize {
+    detail.map_or(0, |detail| detail.files.len())
+}
+
+/// The lines that the 正文 region scrolls: the commit message only. The
+/// changed-path list is a separate region (see [`changed_file_rows`]), so the
+/// body must not also carry the `变更文件 (N)` header and paths — it never did
+/// in the two-region render §6.5 specifies.
+///
+/// `pub(crate)` because `App`'s `g`/`G` handler derives the 正文 row count
+/// from *this* builder rather than re-deriving it arithmetically: the blank
+/// separator is only inserted for a non-empty message, so a second formula
+/// could not stay in step with the rendered rows.
+pub(crate) fn commit_message_lines(
     selected: Option<&CommitRow>,
     detail: Option<&CommitDetail>,
 ) -> Vec<Line<'static>> {
     match (selected, detail) {
-        (Some(_), Some(detail)) => {
-            let mut lines: Vec<Line> = detail
-                .message
-                .lines()
-                .map(|line| Line::from(Span::raw(line.to_string())))
-                .collect();
-            if !lines.is_empty() {
-                lines.push(Line::from(""));
-            }
-            lines.push(Line::from(Span::styled(
-                format!("变更文件 ({})", detail.files.len()),
-                Style::default().fg(color::INFO),
-            )));
-            for file in &detail.files {
-                lines.push(Line::from(Span::raw(format!("  {file}"))));
-            }
-            lines
-        }
+        (Some(_), Some(detail)) => detail
+            .message
+            .lines()
+            .map(|line| Line::from(Span::raw(line.to_string())))
+            .collect(),
         // No commit selected, or a commit with no detail payload to show:
         // the placeholder, never an error panel.
         _ => vec![Line::from(Span::styled(
@@ -116,15 +191,16 @@ fn commit_detail_body(
     }
 }
 
-/// Footer hint row for the commit-detail sub-screen (§2.3): scroll verbs and
-/// the two exits — mirrors [`crate::ui::diff::diff_hints`] so the two
-/// full-screen bodies read the same.
+/// Footer hint row for the commit-detail sub-screen (§6.5): the two region
+/// verbs and the two exits.
+///
+/// `Tab 面板` is here because §6.5 makes `Tab` switch between 正文 and the
+/// file list. `⏎ 文件diff` is deliberately absent: the changed-file rows are
+/// read-only this release (see [`changed_file_rows`]), so advertising the key
+/// would promise a screen the app cannot open. `Esc 返回` / `q 退出` are the
+/// global segment (§2.3 item 1) and must not be restated here.
 pub(crate) fn commit_detail_hints() -> HintRow {
-    HintRow::new(join_hints([
-        hint("j/k", "滚动"),
-        hint("Esc", "返回"),
-        hint("q", "退出"),
-    ]))
+    HintRow::new(join_hints([hint("j/k", "滚动"), hint("Tab", "面板")]))
 }
 
 #[cfg(test)]
@@ -134,13 +210,30 @@ mod tests {
     use crate::config::Config;
     use crate::git::history::RefMark;
     use crate::git::{CommitRow, RefKind};
+    use crate::ui::components::cells::{compact, rows_with};
     use crate::ui::components::footer::StatusRow;
+    use crate::ui::components::theme::color;
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
 
     /// Build a one-commit history with a detail payload, ready to push.
     fn app_with_commit() -> App {
-        App::new(Config::default())
+        let mut app = App::new(Config::default());
+        populate_commit(&mut app);
+        // §6.5 is a sub-screen, so the tests reach it the way a user does:
+        // through the history view's `Enter` (§6.2.3). That also gives the file
+        // region the row-0 cursor `open_commit_detail` installs.
+        app.view = View::History;
+        app.open_commit_detail();
+        app
+    }
+
+    /// Build a commit-detail screen without any commit: the empty-history case.
+    fn app_without_commit() -> App {
+        let mut app = App::new(Config::default());
+        app.view = View::CommitDetail;
+        app
     }
 
     fn populate_commit(app: &mut App) {
@@ -168,14 +261,20 @@ mod tests {
 
     /// Render one frame through the full footer (§4.1), so the hint row sits
     /// on the bottom row like [`crate::ui::diff`] tests do.
-    fn render_app(app: &App) -> Terminal<TestBackend> {
+    ///
+    /// `&mut` because the file region is a stateful list: the screen borrows
+    /// the cursor it paints.
+    fn render_app(app: &mut App) -> Terminal<TestBackend> {
+        // Read the borrowed status before handing `app` to the renderer, which
+        // needs it `&mut` for the file region's cursor.
+        let status = app.status.clone();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
                 crate::ui::components::footer::draw_frame(
                     f,
-                    StatusRow::plain(app.status.as_ref()),
+                    StatusRow::plain(status.as_ref()),
                     &commit_detail_hints(),
                     |f, body| render_commit_detail(f, body, app),
                 );
@@ -184,41 +283,42 @@ mod tests {
         terminal
     }
 
-    /// Whitespace-stripped buffer text (wide CJK glyphs leave padding cells).
-    fn compact(terminal: &Terminal<TestBackend>) -> String {
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>()
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect()
+    fn buffer(terminal: &Terminal<TestBackend>) -> &ratatui::buffer::Buffer {
+        terminal.backend().buffer()
     }
 
-    fn rows_with(terminal: &Terminal<TestBackend>, needle: &str) -> Vec<u16> {
-        let buffer = terminal.backend().buffer();
-        (0..buffer.area.height)
-            .filter(|y| {
-                let raw: String = (0..buffer.area.width)
-                    .map(|x| buffer[(x, *y)].symbol().to_string())
-                    .collect();
-                raw.chars()
-                    .filter(|c| !c.is_whitespace())
-                    .collect::<String>()
-                    .contains(needle)
-            })
-            .collect()
+    /// Dispatch one key press through the real [`App::dispatch_key`] chain, so
+    /// a test on this screen exercises the same routing production does (§2.1)
+    /// instead of reaching into the private handler.
+    fn press(app: &mut App, code: KeyCode) {
+        app.dispatch_key(KeyEvent::new(
+            code,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+    }
+
+    /// Row index of the `变更文件` region's top border, i.e. where the second
+    /// region starts (§6.5). Read from the buffer instead of hard-coded so the
+    /// test survives a change to the body/file split ratio.
+    fn file_region_row(terminal: &Terminal<TestBackend>) -> u16 {
+        rows_with(terminal.backend().buffer(), "变更文件")
+            .into_iter()
+            .next()
+            .expect("file region missing")
+    }
+
+    /// Top border row of the 正文 region (the title row).
+    fn body_region_row(terminal: &Terminal<TestBackend>) -> u16 {
+        rows_with(terminal.backend().buffer(), "提交abc1234")
+            .into_iter()
+            .next()
+            .expect("body region missing")
     }
 
     #[test]
     fn render_shows_commit_header_author_and_time() {
         let mut app = app_with_commit();
-        app.view = View::CommitDetail;
-        populate_commit(&mut app);
-        let text = compact(&render_app(&app));
+        let text = compact(render_app(&mut app).backend().buffer());
         assert!(text.contains("提交abc1234"), "missing short id: {text}");
         assert!(text.contains("作者:GitPulseTest"), "missing author: {text}");
         assert!(text.contains("2023-11-1422:18"), "missing time: {text}");
@@ -227,9 +327,7 @@ mod tests {
     #[test]
     fn render_shows_message_body_and_changed_files() {
         let mut app = app_with_commit();
-        app.view = View::CommitDetail;
-        populate_commit(&mut app);
-        let text = compact(&render_app(&app));
+        let text = compact(render_app(&mut app).backend().buffer());
         assert!(
             text.contains("Bodyofthecommit."),
             "missing message body: {text}"
@@ -241,9 +339,8 @@ mod tests {
 
     #[test]
     fn render_shows_placeholder_without_a_selected_commit() {
-        let mut app = App::new(Config::default());
-        app.view = View::CommitDetail;
-        let text = compact(&render_app(&app));
+        let mut app = app_without_commit();
+        let text = compact(render_app(&mut app).backend().buffer());
         assert!(
             text.contains("选择一个提交查看详情"),
             "missing placeholder: {text}"
@@ -253,25 +350,120 @@ mod tests {
     #[test]
     fn render_shows_placeholder_when_detail_is_empty() {
         let mut app = app_with_commit();
-        app.view = View::CommitDetail;
-        populate_commit(&mut app);
         app.history.detail = None;
-        let text = compact(&render_app(&app));
+        let text = compact(render_app(&mut app).backend().buffer());
         assert!(
             text.contains("选择一个提交查看详情"),
             "missing placeholder: {text}"
         );
-        assert!(!text.contains("变更文件"), "stale detail: {text}");
+        // The region keeps its header (§6.5 draws it unconditionally) but the
+        // stale paths of the previous commit must be gone.
+        assert!(!text.contains("src/main.rs"), "stale detail: {text}");
+        assert!(!text.contains("src/lib.rs"), "stale detail: {text}");
+    }
+
+    /// §6.5 + §3.1: `Tab` moves the focus between 正文 and 变更文件, and the
+    /// focused region is the one wearing `border_focus`.
+    #[test]
+    fn tab_moves_the_focus_border_to_the_file_list() {
+        let mut app = app_with_commit();
+
+        let on_body = render_app(&mut app);
+        let body = body_region_row(&on_body);
+        let file = file_region_row(&on_body);
+        assert_ne!(body, file, "the two regions must be drawn apart");
+        assert_eq!(
+            buffer(&on_body)[(1, body)].fg,
+            color::BORDER_FOCUS,
+            "正文 opens focused"
+        );
+        assert_eq!(
+            buffer(&on_body)[(1, file)].fg,
+            color::BORDER,
+            "变更文件 opens unfocused"
+        );
+
+        app.cycle_panel_focus(true);
+        let on_file = render_app(&mut app);
+        assert_eq!(
+            buffer(&on_file)[(1, body)].fg,
+            color::BORDER,
+            "正文 drops the focus border"
+        );
+        assert_eq!(
+            buffer(&on_file)[(1, file)].fg,
+            color::BORDER_FOCUS,
+            "变更文件 takes the focus border"
+        );
+    }
+
+    /// §6.5: `Enter` on the changed-file row is not offered this release — the
+    /// git layer exposes no per-file diff inside a commit, and the hint row
+    /// deliberately withholds `⏎ 文件diff` rather than advertising a screen the
+    /// app cannot open.
+    #[test]
+    fn enter_on_a_file_row_is_inert() {
+        let mut app = app_with_commit();
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.commit_file_state.selected(), Some(1));
+
+        assert!(app.dispatch_key(KeyEvent::new(
+            KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::NONE
+        )));
+        assert_eq!(app.view, View::CommitDetail, "no drill-in");
+        assert_eq!(app.commit_file_state.selected(), Some(1), "no cursor move");
+    }
+
+    /// §3.1: the file rows carry the `▌` cursor only while their region has
+    /// the focus.
+    #[test]
+    fn the_cursor_follows_the_focused_region() {
+        let mut app = app_with_commit();
+        press(&mut app, KeyCode::Tab);
+        assert!(
+            rows_with(render_app(&mut app).backend().buffer(), "▌src/main.rs").len() == 1,
+            "the focused file list must paint the §3.1 cursor"
+        );
+
+        press(&mut app, KeyCode::Tab);
+        let text = compact(render_app(&mut app).backend().buffer());
+        assert!(
+            !text.contains('▌'),
+            "an unfocused region draws no cursor: {text}"
+        );
+    }
+
+    /// §6.5: `j` scrolls 正文 while the body holds the focus and walks the
+    /// changed-file cursor once the file list has it.
+    #[test]
+    fn j_scrolls_the_body_then_the_file_list() {
+        let mut app = app_with_commit();
+
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.commit_detail_scroll, 1, "正文 scrolls first");
+        assert_eq!(
+            app.commit_file_state.selected(),
+            Some(0),
+            "the unfocused file list keeps its own cursor"
+        );
+
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            app.commit_detail_scroll, 1,
+            "the file list does not scroll 正文"
+        );
+        assert_eq!(app.commit_file_state.selected(), Some(1));
     }
 
     #[test]
     fn render_load_error_lands_on_the_panel_not_the_status_row() {
         let mut app = app_with_commit();
-        app.view = View::CommitDetail;
-        populate_commit(&mut app);
         app.load_error = Some("加载提交详情失败: boom".to_string());
-        let terminal = render_app(&app);
-        let text = compact(&terminal);
+        let terminal = render_app(&mut app);
+        let text = compact(terminal.backend().buffer());
         assert!(text.contains("加载失败"), "missing error title: {text}");
         assert!(
             text.contains("加载提交详情失败:boom"),
@@ -281,13 +473,17 @@ mod tests {
         // §4.3: the load failure lands on the panel's error state, not on the
         // footer status row (row 22 in an 80x24 frame).
         assert!(
-            !rows_with(&terminal, "加载提交详情失败:boom").contains(&22),
+            !rows_with(terminal.backend().buffer(), "加载提交详情失败:boom").contains(&22),
             "load failure must not reach the footer status row: {text}"
         );
     }
 
+    /// §2.3: the view segment carries only the two verbs the screen owns. The
+    /// `Esc 返回` / `q 退出` pair belongs to the global segment, and `⏎
+    /// 文件diff` is withheld because the file rows are read-only — so the
+    /// rendered row is pinned on all three counts at once.
     #[test]
-    fn commit_detail_hints_show_scroll_back_and_quit() {
+    fn commit_detail_view_segment_holds_only_the_screen_s_own_verbs() {
         let row = commit_detail_hints();
         let text: String = row
             .view
@@ -296,17 +492,15 @@ mod tests {
             .map(|s| s.content.to_string())
             .collect();
         let compacted: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(compacted, "j/k滚动Tab面板", "§6.5 view segment");
+
+        let terminal = render_app(&mut app_with_commit());
+        let row = compact(terminal.backend().buffer());
+        assert!(row.contains("Esc返回"), "global segment missing: {row}");
+        assert!(row.contains("q退出"), "global segment missing: {row}");
         assert!(
-            compacted.contains("j/k滚动"),
-            "missing scroll hint: {compacted}"
-        );
-        assert!(
-            compacted.contains("Esc返回"),
-            "missing back hint: {compacted}"
-        );
-        assert!(
-            compacted.contains("q退出"),
-            "missing quit hint: {compacted}"
+            !row.contains("文件diff"),
+            "⏎ 文件diff must not be advertised: {row}"
         );
     }
 
@@ -316,10 +510,8 @@ mod tests {
     #[test]
     fn render_with_scroll_offset_loses_the_first_body_line() {
         let mut app = app_with_commit();
-        app.view = View::CommitDetail;
-        populate_commit(&mut app);
         app.commit_detail_scroll = 1;
-        let text = compact(&render_app(&app));
+        let text = compact(render_app(&mut app).backend().buffer());
         assert!(
             text.contains("提交abc1234"),
             "title must stay visible: {text}"

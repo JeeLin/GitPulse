@@ -171,13 +171,10 @@ fn split_history(content: Rect) -> (Rect, Rect, Rect) {
 }
 
 /// Footer hint row for the history view (§2.3): list navigation, then the
-/// two keys that return to the repo view.
+/// drill-in verb. `Esc` 返回 is already the global segment and `q 退出` is a
+/// global verb too (§0), so neither may be repeated here as a view verb.
 pub(crate) fn history_hints() -> HintRow {
-    HintRow::new(join_hints([
-        hint("j/k", "选择"),
-        hint("⏎", "提交详情"),
-        hint("q/Esc", "返回"),
-    ]))
+    HintRow::new(join_hints([hint("j/k", "选择"), hint("⏎", "提交详情")]))
 }
 
 /// Commit list, or the empty-state copy for a repository without history.
@@ -495,7 +492,7 @@ mod tests {
             text.contains("选择一个提交查看详情"),
             "missing detail placeholder: {text}"
         );
-        assert!(text.contains("q/Esc返回"), "missing back hint: {text}");
+        assert!(text.contains("Esc返回"), "missing global back hint: {text}");
     }
 
     /// A loaded list whose detail could not be attached (failed reload)

@@ -13,6 +13,20 @@ pub struct StatusLine {
     pub is_error: bool,
 }
 
+impl StatusLine {
+    /// Whether this is a non-error success line: the design's `✓ ` prefix with
+    /// `is_error == false`, so the status row renders it green (§3.2
+    /// `success-flash` / §4.2).
+    ///
+    /// The glyph is the contract, not a flag — [`crate::App`] cannot grow a
+    /// dedicated success field without breaking every view and test that
+    /// builds a `StatusLine` literal, so the tone is detected from the message
+    /// the way the renderer already reads error status from `is_error`.
+    pub fn is_success(&self) -> bool {
+        !self.is_error && self.message.starts_with("✓ ")
+    }
+}
+
 /// Push/pull feedback rendered on the status line (convention 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteStatus {

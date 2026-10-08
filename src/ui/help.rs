@@ -63,9 +63,7 @@ pub fn render_help(f: &mut Frame, app: &App) {
     lines.push(Line::from(""));
     lines.push(close);
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .style(Style::default().bg(color::SURFACE));
+    let paragraph = Paragraph::new(lines).block(block);
 
     f.render_widget(Clear, popup);
     f.render_widget(paragraph, popup);
@@ -86,7 +84,6 @@ pub fn render_palette(f: &mut Frame, app: &mut App) {
 
     let list = List::new(items)
         .block(block)
-        .style(Style::default().bg(color::SURFACE))
         .highlight_style(
             Style::default()
                 .bg(color::SURFACE_ALT)
