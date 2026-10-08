@@ -1,19 +1,19 @@
 //! The two-row footer (§4): the status row plus the one canonical hint row.
 //!
-//! [`render_footer`] draws both rows into the bottom two rows of the frame;
-//! [`split_area`] hands every view the content area above them, so the hint
-//! row has exactly one owner — no panel draws a status line or a key-hint row
-//! of its own any more (des-9: "提示行位置/格式漂移").
+//! [`render_footer`] draws both rows into the bottom two rows of the frame; the
+//! content area above them is carved out by
+//! [`crate::ui::components::header::split_area`], so the hint row has exactly
+//! one owner — no panel draws a status line or a key-hint row of its own any
+//! more (des-9: "提示行位置/格式漂移").
 //!
 //! §2.3 makes this module the *only* source of the hint row: [`hint`] builds
 //! one key/desc pair and [`hints`] joins pairs with the two-cell
 //! [`spacing::HINT_GAP`], so a view segment can never collapse into the glued
 //! `j/k 选择g 进入` form. [`global_hints`], the view segment dispatched by
-//! [`crate::ui::view_hints`] and the optional [`tail_hints`] are laid out by
+//! [`crate::ui::view_hints`] and the tail that screen earns
+//! ([`panel_tail`] / [`tab_tail`] / [`tail_hints`]) are laid out by
 //! [`compose_hint_row`] in the fixed order global → view → tail, the global
 //! segment never truncated and the other two right-truncated with `…`.
-
-#![allow(dead_code)]
 
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -31,10 +31,39 @@ use super::theme::{role, spacing};
 /// pointless stub (`Tab …` costs more attention than it saves).
 const MIN_TAIL_CELLS: usize = 6;
 
+/// The tail segment for a screen that draws more than one panel (§2.3 item 3:
+/// `Tab 面板`). The §6 layouts that earn it are the dashboard's repository list
+/// beside its preview (§6.1) and the repo workspaces that draw a preview pane
+/// beside their list (§6.2.1 / §6.2.3).
+pub fn panel_tail() -> Line<'static> {
+    hints([hint("Tab", "面板")])
+}
+
+/// The tail segment for a screen that carries more than one context tag
+/// (§2.3 item 3: `< > 切换`). The §6 layouts that earn it are the dashboard's
+/// `仓库 │ 远端中心 │ 配置` (§6.1) and the repo-workspace / remote-hub tab
+/// strips (§6.2, §6.3).
+pub fn tab_tail() -> Line<'static> {
+    hints([hint("< >", "切换")])
+}
+
+/// The tail of a screen that has both a second panel and context tags, in the
+/// §2.3 order — `Tab 面板` then `< > 切换` — as the §6.1 / §6.2 hint rows
+/// draw it.
+pub fn tail_hints() -> Line<'static> {
+    hints([panel_tail(), tab_tail()])
+}
+
 /// Split the frame into the content area and the footer: everything but the
 /// bottom [`spacing::FOOTER_ROWS`] rows goes to the view, those rows are the
 /// footer (§4.1 — the footer is always exactly 2 rows, whatever the view
 /// shows).
+///
+/// Production frames are split by [`crate::ui::components::header::split_area`],
+/// which also carves the title and tag strips and hands the footer rect straight
+/// to [`render_footer`]; this two-value form survives for the test frame helper
+/// [`draw_frame`], which needs the same 2-row reservation without the rest.
+#[cfg(test)]
 pub fn split_area(area: Rect) -> (Rect, Rect) {
     let rows = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
@@ -125,13 +154,6 @@ pub fn global_hints() -> Line<'static> {
     ])
 }
 
-/// The tail segment of the hint row (§2.3 item 3): only screens with more
-/// than one panel or more than one context tab carry it, and it is the first
-/// part of the row to give up cells on a narrow terminal.
-pub fn tail_hints() -> Line<'static> {
-    hints([hint("Tab", "面板"), hint("< >", "切换")])
-}
-
 /// The canonical hint row: a view segment (the focus panel's own verbs, in
 /// priority order) plus the optional tail segment.
 ///
@@ -141,23 +163,27 @@ pub fn tail_hints() -> Line<'static> {
 pub struct HintRow {
     /// View segment: ordered by importance, right-truncated first.
     pub view: Line<'static>,
-    /// Tail segment (`Tab 面板  < > 切换`), present only on screens with
-    /// several panels or context tabs — and dropped while a modal owns focus.
+    /// Tail segment (`Tab 面板  < > 切换`), present only on screens that draw
+    /// more than one panel or carry more than one context tag (§2.3 item 3).
+    /// Composed by [`panel_tail`] / [`tab_tail`] into [`tail_hints`] and attached
+    /// per screen by [`crate::ui::view_hints`].
     pub tail: Option<Line<'static>>,
 }
 
 impl HintRow {
-    /// Single-panel screen: view segment only.
+    /// Single-panel screen, no context tags: view segment only.
     pub fn new(view: Line<'static>) -> Self {
         Self { view, tail: None }
     }
 
-    /// Screen with several panels / context tabs: view segment plus the
-    /// [`tail_hints`] segment.
-    pub fn with_tail(view: Line<'static>) -> Self {
+    /// Attach an optional tail segment — the §2.3 dispatcher
+    /// ([`crate::ui::view_hints`]) hands each screen the segment(s) it earns via
+    /// [`panel_tail`] / [`tab_tail`] / [`tail_hints`], and single-panel screens
+    /// pass `None` so neither tail is advertised.
+    pub fn with_tail_segment(self, tail: Option<Line<'static>>) -> Self {
         Self {
-            view,
-            tail: Some(tail_hints()),
+            view: self.view,
+            tail,
         }
     }
 }
@@ -347,7 +373,7 @@ mod tests {
     /// switches (§2.3 item 3).
     #[test]
     fn hint_row_shows_the_tail_segment_when_there_is_room() {
-        let row = HintRow::with_tail(hints([hint("j/k", "选择")]));
+        let row = HintRow::new(hints([hint("j/k", "选择")])).with_tail_segment(Some(tail_hints()));
         let (_, hint_row) = render_rows(StatusRow::plain(None), &row, 120);
         let text = compact(&hint_row);
         assert!(text.contains("Tab面板"), "missing tail: {text}");
@@ -358,13 +384,14 @@ mod tests {
     /// first, and the row never exceeds the 80-column floor.
     #[test]
     fn hint_row_truncates_the_tail_and_stays_within_80_columns() {
-        let row = HintRow::with_tail(hints([
+        let row = HintRow::new(hints([
             hint("j/k", "选择"),
             hint("s/u", "暂存切换"),
             hint("c", "commit"),
             hint("p/l", "push/pull"),
             hint("b/h/t", "面板"),
-        ]));
+        ]))
+        .with_tail_segment(Some(tail_hints()));
         let (_, hint_row) = render_rows(StatusRow::plain(None), &row, 80);
         assert!(row_cells(&hint_row) <= 80, "row is too wide: {hint_row}");
         let text = compact(&hint_row);

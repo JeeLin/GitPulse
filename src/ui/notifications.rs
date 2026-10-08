@@ -13,11 +13,9 @@ use crate::app::App;
 use crate::platform::{notifications_label, NotificationSummary};
 use crate::ui::components::theme::color;
 
-use super::pulls::{
-    meta_budget, render_disconnected, render_load_error, render_receipts_empty,
-    render_receipts_loading, render_receipts_rows, row_width, META_GAP,
-};
+use super::pulls::{meta_budget, META_GAP};
 use crate::ui::components::cells;
+use crate::ui::components::receipts::{render_receipts_list, ReceiptPanel};
 
 /// Empty-state copy: nothing to review. Zero rows is a valid state — a failed
 /// load paints the panel's `error` state.
@@ -36,46 +34,19 @@ pub fn render_notifications(f: &mut Frame, content: Rect, app: &App) {
     // different objects sharing one receipt slot, so the title names which one
     // the remote actually has. The word itself comes from `platform` so the
     // footer hint and the command palette row cannot drift from this title.
-    let label = notifications_label(app.github_state.kind());
-    if let Some(message) = app.load_error.as_deref() {
-        render_load_error(
-            f,
-            content,
-            label,
-            app.github_state.owner(),
-            app.github_state.repo(),
-            message,
-        );
-        return;
-    }
-    if !app.github_state.connected() {
-        render_disconnected(f, content, label, app.github_state.kind(), app);
-        return;
-    }
-
-    if app.github_loading() {
-        render_receipts_loading(f, content, label, app, "正在拉取通知…");
-        return;
-    }
-
+    let meta = ReceiptPanel {
+        label: notifications_label(app.github_state.kind()),
+        load_sub: "正在拉取通知…",
+        empty_copy: EMPTY_NOTIFICATIONS,
+        empty_description: "这个仓库没有新通知",
+    };
     let notifications = &app.github_state.notifications;
-    if notifications.is_empty() {
-        render_receipts_empty(
-            f,
-            content,
-            label,
-            app,
-            EMPTY_NOTIFICATIONS,
-            "这个仓库没有新通知",
-        );
-    } else {
-        let width = row_width(content);
-        let items = notifications
+    render_receipts_list(f, content, meta, app, app.github_state.selected, |width| {
+        notifications
             .iter()
             .map(|note| notification_item(note, width))
-            .collect();
-        render_receipts_rows(f, content, label, app, items, app.github_state.selected);
-    }
+            .collect()
+    });
 }
 
 /// One notification row: `subject_title [subject_type]` after the unread dot,
@@ -128,16 +99,14 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::config::Config;
-    use crate::ui::pulls::{draw_receipt_frame, offline_client};
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
+    use crate::ui::components::receipts;
 
     /// Connected app: the `octo/demo` remote resolved and the readiness gate
     /// built, so the panel renders the real title instead of the `—` fallback.
     fn connected_app() -> App {
         let mut app = App::new(Config::default());
         app.github_state.remote = Some(crate::ui::github_remote());
-        app.github_state.client = Some(offline_client());
+        app.github_state.client = Some(receipts::offline_client());
         app
     }
 
@@ -156,29 +125,12 @@ mod tests {
     /// The panel plus its footer: the hint row the panel no longer draws
     /// reaches the buffer through [`crate::ui::components::footer`]
     /// (§2.3), so a test that skipped it would miss the row entirely.
-    fn render(app: &App) -> Terminal<TestBackend> {
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                draw_receipt_frame(f, app, false, |f, body| render_notifications(f, body, app))
-            })
-            .unwrap();
-        terminal
+    fn receipt_buffer(app: &App) -> ratatui::buffer::Buffer {
+        receipts::render_receipt_buffer(app, false, render_notifications)
     }
 
     fn render_text(app: &App) -> String {
-        compact_text(render(app).backend().buffer())
-    }
-
-    /// Whitespace-stripped text of the whole frame (wide CJK glyphs leave
-    /// padding cells).
-    fn compact_text(buffer: &ratatui::buffer::Buffer) -> String {
-        let mut raw = String::new();
-        for cell in buffer.content() {
-            raw.push_str(cell.symbol());
-        }
-        raw.chars().filter(|c| !c.is_whitespace()).collect()
+        receipts::compact(&receipt_buffer(app))
     }
 
     #[test]
@@ -211,8 +163,7 @@ mod tests {
             note("Unread one", "Issue", true),
         ];
         app.github_state.selected = 0;
-        let terminal = render(&app);
-        let buffer = terminal.backend().buffer();
+        let buffer = receipt_buffer(&app);
         let mut dot: Option<(u16, u16)> = None;
         for y in 0..buffer.area.height {
             for x in 0..buffer.area.width {
@@ -253,15 +204,15 @@ mod tests {
         let mut app = App::new(Config::default());
         app.set_error("gh 不可用，无法自动获取 token");
         app.github_state.notifications = vec![note("ghost", "Issue", true)];
-        let buffer = render(&app).backend().buffer().clone();
-        let text = compact_text(&buffer);
+        let buffer = receipt_buffer(&app);
+        let text = receipts::compact(&buffer);
         // No resolved remote means `kind == None`, which falls back to the
         // GitHub gate copy, verbatim as in v0.5.0.
         assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
         assert!(!text.contains("ghost"), "no rows without a client: {text}");
         assert!(!text.contains('●'), "no marker without a client: {text}");
         assert_eq!(
-            crate::ui::pulls::rows_with(&buffer, "gh不可用，无法自动获取token"),
+            receipts::rows_with(&buffer, "gh不可用，无法自动获取token"),
             vec![buffer.area.height - 2],
             "the reason belongs on the footer status row only: {text}"
         );

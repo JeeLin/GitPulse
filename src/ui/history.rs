@@ -99,7 +99,17 @@ pub fn render_history(f: &mut Frame, content: Rect, mut state: HistoryRender<'_>
         // failed list has no rows at all, a failed detail keeps them.
         if state.commits.is_empty() {
             let title = named_title("提交历史", state.repo_name, 0);
-            state_panel::render_state_panel(f, list_area, &title, &PanelState::Error { message });
+            // The list is the pane that lost its content, and with its rows
+            // gone it is the only candidate for focus, so the error state
+            // carries the panel's own flag (§3.1) — the call
+            // [`render_commit_list`] makes for `empty` / `ready`.
+            state_panel::render_state_panel_with_focus(
+                f,
+                list_area,
+                &title,
+                &PanelState::Error { message },
+                state.focused,
+            );
             return;
         }
         let title = detail_pane_title(&state);
@@ -114,12 +124,6 @@ pub fn render_history(f: &mut Frame, content: Rect, mut state: HistoryRender<'_>
     render_detail(f, detail_area, &state);
 }
 
-/// §5.4 split gate for the history view (DAG + list + detail): side by side
-/// only when the frame funds the DAG column plus both floors — otherwise the
-/// detail pane stacks beneath the list so the list never gets squeezed below
-/// [`theme_width::LIST_MIN`] (§6.2.3). Mirrors the dashboard's
-/// compare-width-then-decide structure, with the DAG column as history's
-/// extra fixed pane.
 /// §5.4 split gate for the history view (DAG + list + detail): side by side
 /// only when the frame funds the DAG column plus both floors — otherwise the
 /// detail pane stacks beneath the list so the list never gets squeezed below
@@ -169,7 +173,11 @@ fn split_history(content: Rect) -> (Rect, Rect, Rect) {
 /// Footer hint row for the history view (§2.3): list navigation, then the
 /// two keys that return to the repo view.
 pub(crate) fn history_hints() -> HintRow {
-    HintRow::new(join_hints([hint("j/k", "选择"), hint("q/Esc", "返回")]))
+    HintRow::new(join_hints([
+        hint("j/k", "选择"),
+        hint("⏎", "提交详情"),
+        hint("q/Esc", "返回"),
+    ]))
 }
 
 /// Commit list, or the empty-state copy for a repository without history.

@@ -1,22 +1,43 @@
-//! Pull-request hub: the open-PR list and the detail panel, plus the small
-//! helpers the sibling receipt panels (checks / issues / notifications)
-//! share — panel titles, row fitting, the status/hint footer and the check
-//! palette.
+//! Pull-request hub: the open-PR list and the detail panel, plus the check
+//! palette the detail's sub-list needs.
+//!
+//! The receipts spine's shared layer — panel titles, the five-state dispatch,
+//! the row budget, the platform gate and the status/hint footer — lives in
+//! [`crate::ui::components::receipts`], which this view and the three sibling
+//! receipt panels (checks / issues / notifications) all draw through.
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, ListItem, Paragraph, Wrap},
     Frame,
 };
 
-use super::hint;
 use crate::app::App;
 use crate::platform::{CheckSummary, PrDetail, PrSummary};
 use crate::ui::components::cells;
-use crate::ui::components::footer::{hints as join_hints, HintRow};
+use crate::ui::components::receipts::{
+    render_disconnected, render_load_error, render_receipts_list, ReceiptPanel,
+};
 use crate::ui::components::theme::color;
+
+// The receipts spine's shared layer lives in `components::receipts`; these
+// re-exports keep the sibling views, the footer dispatch and the local-git
+// panels addressing the hint rows, the panel title and the row budget the way
+// they always have.
+pub(crate) use crate::ui::components::receipts::{
+    issue_detail_hints, panel_title, pull_detail_hints, receipt_hints, row_width,
+};
+
+#[cfg(test)]
+pub(crate) use crate::ui::components::receipts::{draw_receipt_frame, offline_client, rows_with};
+
+/// Cells a paragraph row may use inside `area`'s block: minus the borders
+/// only (no cursor on paragraph rows).
+pub(crate) fn block_width(area: Rect) -> usize {
+    area.width.saturating_sub(2) as usize
+}
 
 /// Empty-state copy of the pull list: zero open pulls is a valid state, not
 /// a failure — the status row below covers failed loads.
@@ -24,11 +45,6 @@ const EMPTY_PULLS: &str = "—（暂无 PR）";
 
 /// Placeholder of the detail view while its payload has not arrived yet.
 const DETAIL_PLACEHOLDER: &str = "按 Enter 查看详情 · Esc 返回";
-
-/// Columns a list row gives up to the block border (2) and the highlight
-/// symbol (2): [`List`] indents every line of the selected item by
-/// [`HIGHLIGHT_SYMBOL`], so rows are fitted to what remains.
-const ROW_GUTTER: u16 = 4;
 
 /// Blank columns between a row's head and its trailing meta part.
 pub(crate) const META_GAP: &str = "  ";
@@ -60,113 +76,6 @@ pub(crate) fn meta_budget(meta: &str, width: usize) -> usize {
     } else {
         0
     }
-}
-
-/// Panel title: `label · owner/repo`, falling back to `—` while the remote
-/// pair is unknown (a failed hub entry never fills it in).
-pub(crate) fn panel_title(label: &str, owner: Option<&str>, repo: Option<&str>) -> String {
-    match (owner, repo) {
-        (Some(owner), Some(repo)) if !owner.is_empty() && !repo.is_empty() => {
-            format!("{label} · {owner}/{repo}")
-        }
-        _ => format!("{label} · —"),
-    }
-}
-
-/// The two lines the disconnected body prints above the status line: the
-/// gate headline plus the credential hint of the platform that owns the
-/// resolved remote. Both are `&'static str` so a family only ever grows one
-/// entry here instead of a copy per panel.
-pub(crate) struct DisconnectedCopy {
-    /// Headline: which platform the client is not connected to.
-    pub title: &'static str,
-    /// How to obtain a credential for that platform, and the retry key.
-    /// Built from [`PlatformKind::token_var`] / [`PlatformKind::cli_hint`]
-    /// so the variable names live in one place only.
-    pub hint: String,
-}
-
-/// Credential guidance for `kind`. An unresolved remote (`None`) falls back to
-/// the GitHub copy, not to neutral wording: v0.5.0 knew no platform but
-/// GitHub, so this state rendered exactly that text and the GitHub path keeps
-/// its v0.5.0 wording verbatim.
-///
-/// Self-hosted is a dead-end credential path (`build_client` always rejects
-/// such remotes), so its hint states the limitation instead of asking for a
-/// token the app will never read.
-pub(crate) fn disconnected_copy(kind: Option<crate::platform::PlatformKind>) -> DisconnectedCopy {
-    use crate::platform::PlatformKind;
-    match kind {
-        Some(PlatformKind::GitHub) => DisconnectedCopy {
-            title: "尚未连接 GitHub",
-            hint: credential_hint(PlatformKind::GitHub),
-        },
-        Some(PlatformKind::GitLab) => DisconnectedCopy {
-            title: "尚未连接 GitLab",
-            hint: credential_hint(PlatformKind::GitLab),
-        },
-        Some(PlatformKind::Gitea) => DisconnectedCopy {
-            title: "尚未连接 Gitea",
-            hint: credential_hint(PlatformKind::Gitea),
-        },
-        Some(PlatformKind::SelfHosted) => DisconnectedCopy {
-            title: "尚未连接自托管平台",
-            hint: credential_hint(PlatformKind::SelfHosted),
-        },
-        None => DisconnectedCopy {
-            title: "尚未连接 GitHub",
-            hint: credential_hint(PlatformKind::GitHub),
-        },
-    }
-}
-
-/// Retry hint for an instance this app does not support. It is deliberately
-/// *not* a token prompt: self-hosted hosts are rejected before any credential
-/// lookup, so telling the user to configure a token would be a dead end.
-const SELF_HOSTED_HINT: &str = "该实例暂不支持（当前支持 github.com / gitea.com / gitlab.com）";
-
-/// Compose the retry hint from the platform's own token variable and CLI name.
-///
-/// An empty [`token_var`](crate::platform::PlatformKind::token_var) means the
-/// platform registers no variable, which only self-hosted does: it is out of
-/// scope rather than short of a credential, so it gets the unsupported-instance
-/// wording. An empty [`cli_hint`](crate::platform::PlatformKind::cli_hint)
-/// means the platform has no auth CLI (Gitea), so only the variable is named.
-fn credential_hint(kind: crate::platform::PlatformKind) -> String {
-    let var = kind.token_var();
-    if var.is_empty() {
-        return SELF_HOSTED_HINT.to_string();
-    }
-    let cli = kind.cli_hint();
-    if cli.is_empty() {
-        format!("配置 {var} 后按 r 重试")
-    } else {
-        format!("配置 {var} 或 {cli} 登录后按 r 重试")
-    }
-}
-
-/// Cursor for a `len`-row list: `None` for an empty list, otherwise the
-/// requested index clamped to the last row. `App::github_list_len` is private
-/// to the app module, so the panels clamp against the vec they display — the
-/// same `saturating_sub(1)` the app-side clamp applies.
-pub(crate) fn list_cursor(selected: usize, len: usize) -> Option<usize> {
-    if len == 0 {
-        None
-    } else {
-        Some(selected.min(len.saturating_sub(1)))
-    }
-}
-
-/// Cells a list row may use inside `area`: minus the block borders and the
-/// highlight symbol.
-pub(crate) fn row_width(area: Rect) -> usize {
-    area.width.saturating_sub(ROW_GUTTER) as usize
-}
-
-/// Cells a paragraph row may use inside `area`'s block: minus the borders
-/// only (no highlight symbol on paragraph rows).
-pub(crate) fn block_width(area: Rect) -> usize {
-    area.width.saturating_sub(2) as usize
 }
 
 /// Palette of a pull/issue state: open reads success, closed danger, any
@@ -254,281 +163,21 @@ fn column(value: &str) -> String {
     }
 }
 
-/// Bottom hint row of every receipt panel: hub entry, the four tabs, the
-/// refresh and the two ways out.
-///
-/// `show_enter` adds `Enter 详情`, which is only useful on the Pulls and
-/// Issues *lists* (where it opens the selected item's detail); pass `false` for
-/// the Checks / Notifications / detail views, where Enter is a no-op.
-///
-/// `kind` is the remote's platform, so the fourth tab's name matches the
-/// notification panel's own title: it comes from
-/// [`crate::platform::notifications_label`], the single source for that slot.
-/// GitHub and Gitea call it `通知`, GitLab `To-Dos` — a footer still saying
-/// `通知` under a `To-Dos` title would name two different things on one screen.
-pub(crate) fn receipt_hints(
-    show_enter: bool,
-    kind: Option<crate::platform::PlatformKind>,
-) -> HintRow {
-    let mut hints: Vec<Line<'static>> = vec![
-        hint("g", "进入"),
-        hint("p", "PR"),
-        hint("c", "checks"),
-        hint("i", "issues"),
-        hint("n", crate::platform::notifications_label(kind)),
-        hint("r", "刷新"),
-        hint("q/Esc", "返回"),
-    ];
-    if show_enter {
-        hints.push(hint("Enter", "详情"));
-    }
-    HintRow::new(join_hints(hints))
-}
-
-/// Footer hint row for the pull-detail panel (§2.3): the receipt hub keys
-/// minus `Enter 详情`, which is a no-op once a detail is open. `kind` carries
-/// the platform, see [`receipt_hints`].
-pub(crate) fn pull_detail_hints(kind: Option<crate::platform::PlatformKind>) -> HintRow {
-    receipt_hints(false, kind)
-}
-
-/// Footer hint row for the issue-detail panel (§2.3): the same keys as the
-/// pull detail — the hub keys without the `Enter` no-op. `kind` carries the
-/// platform, see [`receipt_hints`].
-pub(crate) fn issue_detail_hints(kind: Option<crate::platform::PlatformKind>) -> HintRow {
-    receipt_hints(false, kind)
-}
-
-/// Frame a receipt panel the way `ui::render` does: the panel draws content
-/// only (§2.3) and [`crate::ui::components::footer::draw_frame`] adds the
-/// footer, so a panel test that skips it would assert against a missing
-/// status/hint row.
-#[cfg(test)]
-pub(crate) fn draw_receipt_frame(
-    f: &mut Frame,
-    app: &App,
-    show_enter: bool,
-    content: impl FnOnce(&mut Frame, Rect),
-) {
-    let status = crate::ui::view_status(app);
-    let hints = receipt_hints(show_enter, app.github_state.kind());
-    crate::ui::components::footer::draw_frame(f, status, &hints, content);
-}
-
-/// Rows of a rendered frame whose whitespace-stripped text contains `needle`
-/// — how a receipt test checks that one async result landed on the footer
-/// status row (`height - 2`) and nowhere else (§4.1).
-#[cfg(test)]
-pub(crate) fn rows_with(buffer: &ratatui::buffer::Buffer, needle: &str) -> Vec<u16> {
-    (0..buffer.area.height)
-        .filter(|y| {
-            let row: String = (0..buffer.area.width)
-                .map(|x| buffer[(x, *y)].symbol().to_string())
-                .collect();
-            let row: String = row.chars().filter(|c| !c.is_whitespace()).collect();
-            row.contains(needle)
-        })
-        .collect()
-}
-
-/// Readiness-gate client for the panel tests.
-///
-/// `GithubClient::new` only resolves a token (the environment wins) and
-/// builds an octocrab instance — but octocrab spawns its tower buffer task,
-/// which needs a Tokio context, so the build runs inside a throwaway
-/// runtime. That task is never driven: these tests only render a frame, they
-/// never issue a request.
-#[cfg(test)]
-pub(crate) fn offline_client() -> Box<dyn crate::platform::PlatformClient> {
-    if std::env::var("GITHUB_TOKEN").is_err() {
-        std::env::set_var("GITHUB_TOKEN", "test-token");
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let _guard = runtime.enter();
-    Box::new(crate::github::GithubClient::new("octo", "demo").expect("offline client"))
-}
-
-/// Panel body shown while the platform client is not ready: the platform's own
-/// gate copy above the retry guidance, instead of a list that could never
-/// load. The reason the client is missing is the gate copy itself — nothing is
-/// repeated on the status row (§4.1).
-pub(crate) fn render_disconnected(
-    f: &mut Frame,
-    area: Rect,
-    label: &str,
-    kind: Option<crate::platform::PlatformKind>,
-    app: &App,
-) {
-    let block = Block::default()
-        .title(panel_title(
-            label,
-            app.github_state.owner(),
-            app.github_state.repo(),
-        ))
-        .borders(Borders::ALL);
-
-    let copy = disconnected_copy(kind);
-    let lines = vec![
-        Line::from(Span::styled(
-            copy.title,
-            Style::default()
-                .fg(color::WARNING)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            copy.hint,
-            Style::default().fg(color::FG_MUTED),
-        )),
-    ];
-    f.render_widget(Paragraph::new(lines).block(block), area);
-}
-
-/// The panel's `error` state for a failed load of its own content (§4.3):
-/// `加载失败`, the reason and `按 r 重试`, on a `danger` shell that keeps the
-/// panel title.
-///
-/// Local git panels ask for the same shape through
-/// [`crate::ui::components::state_panel`]; the receipts panels share this one
-/// wrapper because they all read [`App::load_error`] straight off the app.
-pub(crate) fn render_load_error(
-    f: &mut Frame,
-    area: Rect,
-    label: &str,
-    owner: Option<&str>,
-    repo: Option<&str>,
-    message: &str,
-) {
-    crate::ui::components::state_panel::render_state_panel(
-        f,
-        area,
-        &panel_title(label, owner, repo),
-        &crate::ui::components::state_panel::PanelState::Error { message },
-    );
-}
-
-/// Shared `ready` body for the receipts lists (§3.2 + §3.1): the four panels
-/// hand their rows in and get the same focused, bordered shell they'd wear in
-/// `empty` / `error` / `loading` — one geometry instead of four near-copies.
-///
-/// `selected` is the row the cursor lands on (§3.1), and `rows` are already
-/// width-fitted by each caller so they need no padding here.
-pub(crate) fn render_receipts_rows(
-    f: &mut Frame,
-    area: Rect,
-    label: &str,
-    app: &App,
-    rows: Vec<ListItem<'static>>,
-    selected: usize,
-) {
-    let title = panel_title(label, app.github_state.owner(), app.github_state.repo());
-    let inner = crate::ui::components::state_panel::render_state_panel_with_focus(
-        f,
-        area,
-        &title,
-        &crate::ui::components::state_panel::PanelState::Ready,
-        true,
-    );
-    if rows.is_empty() {
-        return;
-    }
-    let mut state = ListState::default();
-    state.select(list_cursor(selected, rows.len()));
-    let list = List::new(rows)
-        .highlight_style(super::list_highlight())
-        .highlight_symbol(super::HIGHLIGHT_SYMBOL);
-    f.render_stateful_widget(list, inner, &mut state);
-}
-
-/// The receipts panels' `loading` state (§3.2), entered whenever the receipts
-/// fetch is still in flight ([`App::github_loading`]).
-///
-/// This is the only honest source of a `loading` frame in the app: the four
-/// receipts lists are the only panels that load asynchronously. The platform
-/// gate is checked by the caller, because a client that was never built can
-/// have no fetch in flight.
-pub(crate) fn render_receipts_loading(
-    f: &mut Frame,
-    area: Rect,
-    label: &str,
-    app: &App,
-    sub: &str,
-) {
-    crate::ui::components::state_panel::render_state_panel(
-        f,
-        area,
-        &panel_title(label, app.github_state.owner(), app.github_state.repo()),
-        &crate::ui::components::state_panel::loading_state(Some(sub)),
-    );
-}
-
-/// The receipts panels' `empty` state (§3.2): the zero-row copy the panel
-/// already printed, one line naming what was read, and the key that re-reads
-/// it — the receipts' own `r` (§6.3).
-///
-/// The action takes the `key` role of §5.3 through [`hint`], so the key cap
-/// reads like every other key in the app.
-pub(crate) fn render_receipts_empty(
-    f: &mut Frame,
-    area: Rect,
-    label: &str,
-    app: &App,
-    empty_copy: &'static str,
-    description: &'static str,
-) {
-    crate::ui::components::state_panel::render_state_panel(
-        f,
-        area,
-        &panel_title(label, app.github_state.owner(), app.github_state.repo()),
-        &crate::ui::components::state_panel::empty_state(
-            empty_copy,
-            description,
-            Some(hint("r", "重新拉取")),
-        ),
-    );
-}
-
 /// Render the open-pull list (the receipts hub entry point).
+///
+/// The five-state dispatch, the shell and the cursor live in
+/// [`crate::ui::components::receipts`]; this view only supplies its own rows.
 pub fn render_pulls(f: &mut Frame, content: Rect, app: &App) {
-    if let Some(message) = app.load_error.as_deref() {
-        render_load_error(
-            f,
-            content,
-            "PR 列表",
-            app.github_state.owner(),
-            app.github_state.repo(),
-            message,
-        );
-        return;
-    }
-
-    if !app.github_state.connected() {
-        render_disconnected(f, content, "PR 列表", app.github_state.kind(), app);
-        return;
-    }
-
-    if app.github_loading() {
-        render_receipts_loading(f, content, "PR 列表", app, "正在拉取 PR…");
-        return;
-    }
-
+    let meta = ReceiptPanel {
+        label: "PR 列表",
+        load_sub: "正在拉取 PR…",
+        empty_copy: EMPTY_PULLS,
+        empty_description: "这个仓库没有开放的 PR",
+    };
     let pulls = &app.github_state.pulls;
-    if pulls.is_empty() {
-        render_receipts_empty(
-            f,
-            content,
-            "PR 列表",
-            app,
-            EMPTY_PULLS,
-            "这个仓库没有开放的 PR",
-        );
-    } else {
-        let width = row_width(content);
-        let items: Vec<ListItem> = pulls.iter().map(|pr| pull_item(pr, width)).collect();
-        render_receipts_rows(f, content, "PR 列表", app, items, app.github_state.selected);
-    }
+    render_receipts_list(f, content, meta, app, app.github_state.selected, |width| {
+        pulls.iter().map(|pr| pull_item(pr, width)).collect()
+    });
 }
 
 /// One pull row: `#N title (state)` plus a `草稿` badge when the pull is a
@@ -567,9 +216,7 @@ pub fn render_pull_detail(f: &mut Frame, content: Rect, app: &App) {
         render_load_error(
             f,
             content,
-            "PR 详情",
-            app.github_state.owner(),
-            app.github_state.repo(),
+            &panel_title("PR 详情", app.github_state.owner(), app.github_state.repo()),
             message,
         );
         return;
@@ -826,8 +473,6 @@ mod tests {
         app.github_state.selected = 99;
         let text = render_text(&app, render_pulls, true);
         assert!(text.contains("#2"), "last row must stay selected: {text}");
-        assert_eq!(list_cursor(99, 2), Some(1));
-        assert_eq!(list_cursor(0, 0), None, "empty list has no cursor");
     }
 
     #[test]
@@ -945,80 +590,6 @@ mod tests {
         assert_eq!(meta_budget(&"m".repeat(40), 20), 0);
         // Empty meta never claims cells.
         assert_eq!(meta_budget("", 40), 0);
-    }
-
-    #[test]
-    fn panel_title_falls_back_while_the_remote_pair_is_unknown() {
-        assert_eq!(
-            panel_title("PR 列表", Some("octo"), Some("demo")),
-            "PR 列表 · octo/demo"
-        );
-        assert_eq!(panel_title("PR 列表", None, None), "PR 列表 · —");
-        assert_eq!(panel_title("通知", Some("octo"), None), "通知 · —");
-        assert_eq!(
-            panel_title("通知", Some("octo"), Some("")),
-            "通知 · —",
-            "an empty segment still counts as unknown"
-        );
-    }
-
-    /// U4: the disconnected body names the platform that owns the remote, so
-    /// the credential hint always matches the token the client wants.
-    #[test]
-    fn disconnected_copy_names_the_credential_of_each_platform() {
-        use crate::platform::PlatformKind;
-        assert_eq!(
-            disconnected_copy(Some(PlatformKind::GitHub)).title,
-            "尚未连接 GitHub"
-        );
-        assert_eq!(
-            disconnected_copy(Some(PlatformKind::GitHub)).hint,
-            "配置 GITHUB_TOKEN 或 gh 登录后按 r 重试"
-        );
-        assert_eq!(
-            disconnected_copy(Some(PlatformKind::GitLab)).title,
-            "尚未连接 GitLab"
-        );
-        assert_eq!(
-            disconnected_copy(Some(PlatformKind::GitLab)).hint,
-            "配置 GITLAB_TOKEN 或 glab 登录后按 r 重试"
-        );
-        assert_eq!(
-            disconnected_copy(Some(PlatformKind::Gitea)).title,
-            "尚未连接 Gitea"
-        );
-        assert_eq!(
-            disconnected_copy(Some(PlatformKind::Gitea)).hint,
-            "配置 GITEA_TOKEN 后按 r 重试"
-        );
-        assert_eq!(
-            disconnected_copy(Some(PlatformKind::SelfHosted)).title,
-            "尚未连接自托管平台"
-        );
-        // Self-hosted remotes are rejected by `build_client`, so asking for a
-        // token would send the user down a path that cannot succeed.
-        let self_hosted = disconnected_copy(Some(PlatformKind::SelfHosted));
-        assert!(
-            !self_hosted.hint.contains("令牌"),
-            "no credential is asked for: {}",
-            self_hosted.hint
-        );
-        assert!(
-            self_hosted.hint.contains("暂不支持"),
-            "the limitation is stated: {}",
-            self_hosted.hint
-        );
-        // No remote resolved: the gate falls back to the GitHub copy, because
-        // v0.5.0 (which had no platform concept yet) always printed it.
-        let unknown = disconnected_copy(None);
-        assert_eq!(unknown.title, "尚未连接 GitHub");
-        assert_eq!(unknown.hint, "配置 GITHUB_TOKEN 或 gh 登录后按 r 重试");
-        let github = disconnected_copy(Some(PlatformKind::GitHub));
-        assert_eq!(
-            (unknown.title, unknown.hint),
-            (github.title, github.hint),
-            "the fallback is exactly the GitHub copy"
-        );
     }
 
     /// U4: a GitLab/Gitea remote must reach the body, not just the helper.

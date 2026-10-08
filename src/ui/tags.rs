@@ -66,11 +66,15 @@ pub struct TagsRender<'a> {
 /// reports on the status row.
 pub fn render_tags(f: &mut Frame, content: Rect, mut state: TagsRender<'_>) {
     if let Some(message) = state.load_error {
-        state_panel::render_state_panel(
+        // Focus is a property of the panel, not of the state it happens to be
+        // in (§3.1), so the `error` state carries the panel's own flag — the
+        // same call [`render_tag_list`] makes for `empty` / `ready`.
+        state_panel::render_state_panel_with_focus(
             f,
             content,
             &named_title("标签", state.repo_name, 0),
             &PanelState::Error { message },
+            state.focused,
         );
         return;
     }

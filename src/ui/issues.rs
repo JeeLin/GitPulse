@@ -12,11 +12,12 @@ use crate::app::App;
 use crate::platform::{IssueDetail, IssueSummary};
 use crate::ui::components::theme::color;
 
-use super::pulls::{
-    meta_budget, panel_title, render_disconnected, render_load_error, render_receipts_empty,
-    render_receipts_loading, render_receipts_rows, row_width, state_style, META_GAP,
-};
+use super::pulls::{meta_budget, panel_title, state_style, META_GAP};
 use crate::ui::components::cells;
+use crate::ui::components::receipts::{
+    render_disconnected, render_load_error, render_receipts_list, ReceiptPanel,
+};
+
 /// Empty-state copy: no open issues. Zero rows is a valid state — a failed load
 /// paints the panel's `error` state.
 const EMPTY_ISSUES: &str = "—（暂无 Issues）";
@@ -24,45 +25,19 @@ const EMPTY_ISSUES: &str = "—（暂无 Issues）";
 /// Render the open-issues list (excluding pull requests).
 ///
 /// The panel draws its content only (§4.1): the status row and the hint row
-/// are both painted once by the footer.
+/// are both painted once by the footer. The five-state dispatch is the
+/// receipts spine's shared one, see [`crate::ui::components::receipts`].
 pub fn render_issues(f: &mut Frame, content: Rect, app: &App) {
-    if let Some(message) = app.load_error.as_deref() {
-        render_load_error(
-            f,
-            content,
-            "Issues",
-            app.github_state.owner(),
-            app.github_state.repo(),
-            message,
-        );
-        return;
-    }
-
-    if !app.github_state.connected() {
-        render_disconnected(f, content, "Issues", app.github_state.kind(), app);
-        return;
-    }
-
-    if app.github_loading() {
-        render_receipts_loading(f, content, "Issues", app, "正在拉取 Issues…");
-        return;
-    }
-
+    let meta = ReceiptPanel {
+        label: "Issues",
+        load_sub: "正在拉取 Issues…",
+        empty_copy: EMPTY_ISSUES,
+        empty_description: "这个仓库没有开放的 Issue",
+    };
     let issues = &app.github_state.issues;
-    if issues.is_empty() {
-        render_receipts_empty(
-            f,
-            content,
-            "Issues",
-            app,
-            EMPTY_ISSUES,
-            "这个仓库没有开放的 Issue",
-        );
-    } else {
-        let width = row_width(content);
-        let items = issues.iter().map(|i| issue_item(i, width)).collect();
-        render_receipts_rows(f, content, "Issues", app, items, app.github_state.selected);
-    }
+    render_receipts_list(f, content, meta, app, app.github_state.selected, |width| {
+        issues.iter().map(|i| issue_item(i, width)).collect()
+    });
 }
 
 /// Placeholder of the issue detail while its payload has not arrived yet.
@@ -80,9 +55,11 @@ pub fn render_issue_detail(f: &mut Frame, content: Rect, app: &App) {
         render_load_error(
             f,
             content,
-            "Issue 详情",
-            app.github_state.owner(),
-            app.github_state.repo(),
+            &panel_title(
+                "Issue 详情",
+                app.github_state.owner(),
+                app.github_state.repo(),
+            ),
             message,
         );
         return;
@@ -257,7 +234,7 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::config::Config;
-    use crate::ui::pulls::{draw_receipt_frame, offline_client};
+    use crate::ui::components::receipts;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -266,7 +243,7 @@ mod tests {
     fn connected_app() -> App {
         let mut app = App::new(Config::default());
         app.github_state.remote = Some(crate::ui::github_remote());
-        app.github_state.client = Some(offline_client());
+        app.github_state.client = Some(receipts::offline_client());
         app
     }
 
@@ -286,32 +263,13 @@ mod tests {
     /// reaches the buffer through [`crate::ui::components::footer`]
     /// (§2.3), so a test that skipped it would miss the row entirely.
     fn render_text(app: &App) -> String {
-        render_text_sized(app, 80)
-    }
-
-    fn render_text_sized(app: &App, width: u16) -> String {
-        compact_text(&render_buffer_sized(app, width))
-    }
-
-    /// Whitespace-stripped text of the whole frame (wide CJK glyphs leave
-    /// padding cells).
-    fn compact_text(buffer: &ratatui::buffer::Buffer) -> String {
-        let mut raw = String::new();
-        for cell in buffer.content() {
-            raw.push_str(cell.symbol());
-        }
-        raw.chars().filter(|c| !c.is_whitespace()).collect()
+        receipts::compact(&receipt_buffer(app))
     }
 
     /// The rendered frame, so a test can address the single row an async
     /// result landed on (§4.1).
-    fn render_buffer_sized(app: &App, width: u16) -> ratatui::buffer::Buffer {
-        let backend = TestBackend::new(width, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| draw_receipt_frame(f, app, true, |f, body| render_issues(f, body, app)))
-            .unwrap();
-        terminal.backend().buffer().clone()
+    fn receipt_buffer(app: &App) -> ratatui::buffer::Buffer {
+        receipts::render_receipt_buffer(app, true, render_issues)
     }
 
     #[test]
@@ -374,8 +332,8 @@ mod tests {
         let mut app = App::new(Config::default());
         app.set_error("GitHub 认证失败");
         app.github_state.issues = vec![issue(1, "ghost", "open", &[])];
-        let buffer = render_buffer_sized(&app, 80);
-        let text = compact_text(&buffer);
+        let buffer = receipt_buffer(&app);
+        let text = receipts::compact(&buffer);
         // No resolved remote means `kind == None`, which falls back to the
         // GitHub gate copy, verbatim as in v0.5.0.
         assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
@@ -384,7 +342,7 @@ mod tests {
             "no rows without a client: {text}"
         );
         assert_eq!(
-            crate::ui::pulls::rows_with(&buffer, "GitHub认证失败"),
+            receipts::rows_with(&buffer, "GitHub认证失败"),
             vec![buffer.area.height - 2],
             "the reason belongs on the footer status row only: {text}"
         );

@@ -3,6 +3,7 @@
 pub mod branches;
 pub mod checks;
 pub mod commit;
+pub mod commit_detail;
 pub mod components;
 pub mod config;
 pub mod dashboard;
@@ -306,10 +307,7 @@ fn tail_scroll(line: &Line, inner_width: usize) -> u16 {
 /// mock data source). Every arm is a thin `render_*_view` wrapper so this
 /// function only dispatches (G12).
 pub fn render(f: &mut Frame, app: &mut App) {
-    let has_context_tags = matches!(
-        app.view,
-        View::Repo | View::Branches | View::History | View::Tags
-    );
+    let has_context_tags = active_context_tab(app.view).is_some();
     let (title_area, tags_area, content, footer_area) =
         components::header::split_area(f.area(), has_context_tags);
     components::header::render_title_bar(f, title_area, &crumb(app), &view_right(app));
@@ -331,6 +329,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         View::Repo => render_repo_view(f, content, app),
         View::Diff => diff::render_diff(f, content, app),
         View::Commit => render_commit_view(f, content, app),
+        View::CommitDetail => commit_detail::render_commit_detail(f, content, app),
         View::Branches => render_branches_view(f, content, app),
         View::Config => render_config_view(f, content, app),
         View::History => render_history_view(f, content, app),
@@ -382,6 +381,7 @@ fn crumb(app: &App) -> String {
         }
         View::Diff => "Diff",
         View::Commit => "提交",
+        View::CommitDetail => "提交详情",
         View::Config => return "仪表盘 › 配置".to_string(),
         // The receipts spine hangs off the repo's remote hub (§1.2), so its
         // crumb names the repo before the tab, not the dashboard.
@@ -463,11 +463,15 @@ pub(crate) fn view_status(app: &App) -> StatusRow<'_> {
 /// helper; receipt views reuse the shared one from `pulls` (G3). The hint row
 /// itself is a `pub(crate)` helper so receipt-view tests can reuse it.
 pub(crate) fn view_hints(app: &App) -> HintRow {
-    match app.view {
+    // Each view builds its own view segment; the §2.3 item-3 tail is a property
+    // of the *screen* (it draws >1 panel or >1 context tab), so `view_hints`
+    // attaches it once here — keeping every `{view}_hints` focused on verbs.
+    let row = match app.view {
         View::Dashboard => dashboard::dashboard_hints(),
         View::Repo => repo::repo_hints(app.show_discard_confirm),
         View::Diff => diff::diff_hints(),
         View::Commit => commit::commit_hints(),
+        View::CommitDetail => commit_detail::commit_detail_hints(),
         View::Branches => {
             branches::branches_hints(app.show_branch_input, app.show_branch_delete_confirm)
         }
@@ -484,6 +488,41 @@ pub(crate) fn view_hints(app: &App) -> HintRow {
         View::Issues => pulls::receipt_hints(true, app.github_state.kind()),
         View::IssueDetail => pulls::issue_detail_hints(app.github_state.kind()),
         View::Notifications => pulls::receipt_hints(false, app.github_state.kind()),
+    };
+    row.with_tail_segment(view_tail(app.view))
+}
+
+/// The §2.3 item-3 tail segment `view` earns, so each `{view}_hints` only ever
+/// speaks for its panel's verbs and the dispatcher owns the screen-level tail:
+/// [`footer::panel_tail`] (`Tab 面板`) for a screen that draws more than one
+/// panel, [`footer::tab_tail`] (`< > 切换`) for a screen with more than one
+/// context tag, both in that §2.3 order on screens that earn both, `None`
+/// otherwise.
+fn view_tail(view: View) -> Option<Line<'static>> {
+    use crate::ui::components::footer::{tab_tail, tail_hints};
+    match view {
+        // §6.1 dashboard: the list beside its preview, under the
+        // `仓库 │ 远端中心 │ 配置` context tags — both tails (§6.1:269).
+        View::Dashboard => Some(tail_hints()),
+        // §6.2.1 工作区 (file list + diff preview) and §6.2.3 历史 (commit list
+        // + summary) sit in the five-tag strip, so each carries both tails
+        // (§6.2:304).
+        View::Repo | View::History => Some(tail_hints()),
+        // §6.2.2 / §6.2.4: single-panel lists inside that strip — tabs only.
+        View::Branches | View::Tags => Some(tab_tail()),
+        // §6.3 remote hub: one list under the `PR │ 检查 │ 问题 │ 通知` strip
+        // (§6.3:430).
+        View::Pulls | View::Checks | View::Issues | View::Notifications => Some(tab_tail()),
+        // §6.4 / §6.6 are single panels with no tags; §6.5 / §6.7 / §6.9 carry
+        // the switch key inside their own view segment (`Tab 面板` / `< > 标签`)
+        // rather than the tail, and the commit view is a modal popup that owns
+        // focus.
+        View::Diff
+        | View::Config
+        | View::Commit
+        | View::CommitDetail
+        | View::PullDetail
+        | View::IssueDetail => None,
     }
 }
 
@@ -519,10 +558,12 @@ fn render_dashboard_view(f: &mut Frame, content: Rect, app: &mut App) {
     dashboard::render_dashboard(f, content, &mut state);
 }
 
-/// Repo arm of [`render`]: the file list plus the discard confirmation.
+/// Repo arm of [`render`]: the file list plus its inline diff preview, plus
+/// the discard confirmation overlay when it is open.
 fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
     let sel = app.file_state.selected();
     let focused = app.panel_is_focused(PanelFocus::Primary);
+    let focused_preview = app.panel_is_focused(PanelFocus::Preview);
     let confirm_file = if app.show_discard_confirm {
         sel.and_then(|i| app.file_entries.get(i))
     } else {
@@ -535,6 +576,11 @@ fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
         confirm_file,
         load_error: app.load_error.as_deref(),
         focused,
+        flash: app.panel_flash.as_deref(),
+        line_counts: &app.file_line_counts,
+        preview_content: app.preview_diff.as_deref(),
+        preview_scroll: app.preview_scroll,
+        focused_preview,
     };
     repo::render_repo(f, content, state);
 }
@@ -543,6 +589,7 @@ fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
 /// top.
 fn render_commit_view(f: &mut Frame, content: Rect, app: &mut App) {
     let focused = app.panel_is_focused(PanelFocus::Primary);
+    let focused_preview = app.panel_is_focused(PanelFocus::Preview);
     let state = repo::RepoState {
         entries: &app.file_entries,
         list_state: &mut app.file_state,
@@ -550,6 +597,11 @@ fn render_commit_view(f: &mut Frame, content: Rect, app: &mut App) {
         confirm_file: None,
         load_error: app.load_error.as_deref(),
         focused,
+        flash: app.panel_flash.as_deref(),
+        line_counts: &app.file_line_counts,
+        preview_content: app.preview_diff.as_deref(),
+        preview_scroll: app.preview_scroll,
+        focused_preview,
     };
     repo::render_repo(f, content, state);
     commit::render_commit_popup(f, &app.commit_message);
@@ -586,6 +638,9 @@ fn render_branches_view(f: &mut Frame, content: Rect, app: &mut App) {
 
 /// Config panel arm of [`render`].
 fn render_config_view(f: &mut Frame, content: Rect, app: &mut App) {
+    // Read the focus flag before the cursor borrow below: the accessor takes
+    // `&App`, which cannot coexist with `&mut app.config_state` (§3.1).
+    let focused = app.panel_is_focused(PanelFocus::Primary);
     // Field-level borrow of `app.config` coexists with the
     // `&mut app.config_state` below (disjoint fields).
     let state = config::ConfigState {
@@ -599,6 +654,7 @@ fn render_config_view(f: &mut Frame, content: Rect, app: &mut App) {
         picker_entries: &app.picker_entries,
         picker_state: &mut app.picker_state,
         load_error: app.load_error.as_deref(),
+        focused,
     };
     config::render_config(f, content, state);
 }
@@ -679,6 +735,18 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| render(f, app)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    /// Whitespace-stripped text of a hint [`Line`], so a test can assert which
+    /// tail segment a screen carries (`Tab 面板` vs `< > 切换` vs none).
+    fn line_text(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
     }
 
     /// Display text of one row: ratatui stores a wide (CJK) glyph in two
@@ -842,6 +910,61 @@ mod tests {
         }
     }
 
+    /// §2.3 item 3: the tail is a screen-level segment, so it is derived from the
+    /// view alone — `Tab 面板 < > 切换` where §6 draws a second panel *and* context
+    /// tags, `< > 切换` where §6 only draws the tag strip, and absent on a single
+    /// panel with no tags (§6.4 / §6.6 / §6.5 modal / §6.7 and §6.9 which keep the
+    /// switch key in their own view segment).
+    #[test]
+    fn hint_row_tail_derives_from_the_screen_layout() {
+        let cases: &[(View, &str, &str)] = &[
+            (View::Dashboard, "both", "Tab面板<>切换"),
+            (View::Repo, "both", "Tab面板<>切换"),
+            (View::History, "both", "Tab面板<>切换"),
+            (View::Branches, "tabs", "<>切换"),
+            (View::Tags, "tabs", "<>切换"),
+            (View::Pulls, "tabs", "<>切换"),
+            (View::Checks, "tabs", "<>切换"),
+            (View::Issues, "tabs", "<>切换"),
+            (View::Notifications, "tabs", "<>切换"),
+            (View::Diff, "none", ""),
+            (View::Config, "none", ""),
+            (View::Commit, "none", ""),
+            (View::CommitDetail, "none", ""),
+            (View::PullDetail, "none", ""),
+            (View::IssueDetail, "none", ""),
+        ];
+        for (view, kind, expect) in cases {
+            let mut app = base_app();
+            app.view = *view;
+            let tail = view_hints(&app).tail;
+            match *kind {
+                "both" => {
+                    let text = line_text(tail.as_ref().expect("both tail"));
+                    assert!(
+                        text.contains("Tab面板") && text.contains("<>切换"),
+                        "view {view:?} tail must carry both: {text}"
+                    );
+                    assert_eq!(text, *expect, "view {view:?} tail: {text}");
+                }
+                "tabs" => {
+                    let text = line_text(tail.as_ref().expect("tabs tail"));
+                    assert!(
+                        text.contains("<>切换") && !text.contains("Tab面板"),
+                        "view {view:?} tail must be the tag switch only: {text}"
+                    );
+                    assert_eq!(text, *expect, "view {view:?} tail: {text}");
+                }
+                "none" => assert!(
+                    tail.is_none(),
+                    "view {view:?} must not carry a tail: {:?}",
+                    tail
+                ),
+                _ => unreachable!("unknown tail kind {kind}"),
+            }
+        }
+    }
+
     /// §2.3 assertion 4: when the view segment does not fit it is the one
     /// that goes, and the cut is marked with `…`.
     #[test]
@@ -905,6 +1028,7 @@ mod tests {
             View::Config,
             View::History,
             View::Tags,
+            View::CommitDetail,
         ] {
             let mut app = base_app();
             app.view = view;
@@ -1431,6 +1555,61 @@ mod tests {
         );
     }
 
+    /// §3.1 border-role on the four receipts tabs: each is the same single-panel
+    /// screen, so the one panel is always the focused one — its full ring
+    /// (`border_focus` on the corners, the top row, the bottom row and both side
+    /// rails) must be painted, and no cell may keep the muted `border`.
+    #[test]
+    fn receipt_panels_earn_the_focus_border_on_every_tab() {
+        let frame = Rect::new(0, 0, 80, 24);
+        // §6.3 screens have no context-tag strip — one title row over the content.
+        let (_, _, content, _footer) = components::header::split_area(frame, false);
+
+        for view in [View::Pulls, View::Checks, View::Issues, View::Notifications] {
+            let mut app = connected_app();
+            app.view = view;
+            let buffer = render_buffer(&mut app);
+
+            let focused: Vec<_> = border_cells(&buffer, color::BORDER_FOCUS);
+            let muted: Vec<_> = border_cells(&buffer, color::BORDER);
+            assert!(
+                !focused.is_empty(),
+                "view {view:?} must paint a border_focus ring"
+            );
+            assert!(
+                muted.is_empty(),
+                "view {view:?} must not keep a muted border cell: {muted:?}"
+            );
+
+            // Geometry: the ring hugs the panel's content rect exactly — the
+            // four corners and the two edge rails — and leaves the two footer
+            // rows untouched beneath it.
+            let (x0, y0, x1, y1) = (
+                content.left(),
+                content.top(),
+                content.right() - 1,
+                content.bottom() - 1,
+            );
+            for (x, y) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
+                assert_eq!(
+                    buffer[(x, y)].fg,
+                    color::BORDER_FOCUS,
+                    "view {view:?} corner ({x},{y}) must carry the focus border"
+                );
+            }
+            assert_eq!(
+                buffer[(x0, y0 + 1)].fg,
+                color::BORDER_FOCUS,
+                "view {view:?} left rail must carry the focus border"
+            );
+            assert_eq!(
+                buffer[(x1, y1 - 1)].fg,
+                color::BORDER_FOCUS,
+                "view {view:?} right rail must carry the focus border"
+            );
+        }
+    }
+
     /// §6.2: Branches / History / Tags are context tabs of the repo workspace,
     /// not pushed screens — so they share the repo crumb with `Repo` instead of
     /// appending `› 分支` / `› 历史` / `› 标签`, which §6.2 forbids.
@@ -1521,6 +1700,21 @@ mod tests {
             !row_text(&buffer, 1).contains("工作区"),
             "dashboard must not draw the context-tag strip"
         );
+    }
+
+    /// Every cell whose foreground is `want` (§3.1), so a border-role assertion
+    /// counts the painted ring instead of matching glyphs.
+    fn border_cells(
+        buffer: &ratatui::buffer::Buffer,
+        want: ratatui::style::Color,
+    ) -> Vec<(u16, u16)> {
+        (0..buffer.area.height)
+            .flat_map(|y| {
+                (0..buffer.area.width)
+                    .filter(move |x| buffer[(*x, y)].fg == want)
+                    .map(move |x| (x, y))
+            })
+            .collect()
     }
 
     /// Positions of every `▌` in the frame, so a test can assert the cursor

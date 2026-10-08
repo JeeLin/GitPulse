@@ -4,10 +4,8 @@ use ratatui::{layout::Rect, widgets::ListItem, Frame};
 
 use crate::app::App;
 
-use super::pulls::{
-    check_line, render_disconnected, render_load_error, render_receipts_empty,
-    render_receipts_loading, render_receipts_rows, row_width,
-};
+use super::pulls::check_line;
+use crate::ui::components::receipts::{render_receipts_list, ReceiptPanel};
 
 /// Empty-state copy: no selected pull, or a pull without check runs. Zero
 /// runs is a valid state — a failed load paints the panel's `error` state.
@@ -16,48 +14,22 @@ const EMPTY_CHECKS: &str = "—（暂无检查记录）";
 /// Render the head-commit check runs for the selected pull request.
 ///
 /// The panel draws its content only (§4.1): the status row and the hint row
-/// are both painted once by the footer.
+/// are both painted once by the footer. The five-state dispatch is the
+/// receipts spine's shared one, see [`crate::ui::components::receipts`].
 pub fn render_checks(f: &mut Frame, content: Rect, app: &App) {
-    if let Some(message) = app.load_error.as_deref() {
-        render_load_error(
-            f,
-            content,
-            "CI 检查",
-            app.github_state.owner(),
-            app.github_state.repo(),
-            message,
-        );
-        return;
-    }
-
-    if !app.github_state.connected() {
-        render_disconnected(f, content, "CI 检查", app.github_state.kind(), app);
-        return;
-    }
-
-    if app.github_loading() {
-        render_receipts_loading(f, content, "CI 检查", app, "正在拉取检查记录…");
-        return;
-    }
-
+    let meta = ReceiptPanel {
+        label: "CI 检查",
+        load_sub: "正在拉取检查记录…",
+        empty_copy: EMPTY_CHECKS,
+        empty_description: "选中的 PR 没有检查记录",
+    };
     let checks = &app.github_state.checks;
-    if checks.is_empty() {
-        render_receipts_empty(
-            f,
-            content,
-            "CI 检查",
-            app,
-            EMPTY_CHECKS,
-            "选中的 PR 没有检查记录",
-        );
-    } else {
-        let width = row_width(content);
-        let items = checks
+    render_receipts_list(f, content, meta, app, app.github_state.selected, |width| {
+        checks
             .iter()
             .map(|c| ListItem::new(check_line(c, width)))
-            .collect();
-        render_receipts_rows(f, content, "CI 检查", app, items, app.github_state.selected);
-    }
+            .collect()
+    });
 }
 
 #[cfg(test)]
@@ -66,8 +38,8 @@ mod tests {
     use crate::app::App;
     use crate::config::Config;
     use crate::platform::CheckSummary;
+    use crate::ui::components::receipts;
     use crate::ui::components::theme::color;
-    use crate::ui::pulls::{draw_receipt_frame, offline_client};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -76,7 +48,7 @@ mod tests {
     fn connected_app() -> App {
         let mut app = App::new(Config::default());
         app.github_state.remote = Some(crate::ui::github_remote());
-        app.github_state.client = Some(offline_client());
+        app.github_state.client = Some(receipts::offline_client());
         app
     }
 
@@ -93,32 +65,13 @@ mod tests {
     /// reaches the buffer through [`crate::ui::components::footer`]
     /// (§2.3), so a test that skipped it would miss the row entirely.
     fn render_text(app: &App) -> String {
-        render_text_sized(app, 80)
-    }
-
-    fn render_text_sized(app: &App, width: u16) -> String {
-        compact_text(&render_buffer_sized(app, width))
-    }
-
-    /// Whitespace-stripped text of the whole frame (wide CJK glyphs leave
-    /// padding cells).
-    fn compact_text(buffer: &ratatui::buffer::Buffer) -> String {
-        let mut raw = String::new();
-        for cell in buffer.content() {
-            raw.push_str(cell.symbol());
-        }
-        raw.chars().filter(|c| !c.is_whitespace()).collect()
+        receipts::compact(&receipt_buffer(app))
     }
 
     /// The rendered frame, so a test can address the single row an async
     /// result landed on (§4.1).
-    fn render_buffer_sized(app: &App, width: u16) -> ratatui::buffer::Buffer {
-        let backend = TestBackend::new(width, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| draw_receipt_frame(f, app, false, |f, body| render_checks(f, body, app)))
-            .unwrap();
-        terminal.backend().buffer().clone()
+    fn receipt_buffer(app: &App) -> ratatui::buffer::Buffer {
+        receipts::render_receipt_buffer(app, false, render_checks)
     }
 
     #[test]
@@ -182,14 +135,14 @@ mod tests {
         let mut app = App::new(Config::default());
         app.set_error("解析远端失败: 未配置远端");
         app.github_state.checks = vec![check("unit", "completed", "success")];
-        let buffer = render_buffer_sized(&app, 80);
-        let text = compact_text(&buffer);
+        let buffer = receipt_buffer(&app);
+        let text = receipts::compact(&buffer);
         // No resolved remote means `kind == None`, which falls back to the
         // GitHub gate copy, verbatim as in v0.5.0.
         assert!(text.contains("尚未连接GitHub"), "missing gate copy: {text}");
         assert!(!text.contains("unit"), "no rows without a client: {text}");
         assert_eq!(
-            crate::ui::pulls::rows_with(&buffer, "解析远端失败:未配置远端"),
+            receipts::rows_with(&buffer, "解析远端失败:未配置远端"),
             vec![buffer.area.height - 2],
             "the reason belongs on the footer status row only: {text}"
         );

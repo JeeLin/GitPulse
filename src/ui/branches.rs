@@ -4,7 +4,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState},
+    widgets::{ListItem, ListState},
     Frame,
 };
 
@@ -12,9 +12,14 @@ use crate::git::BranchInfo;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 
 use super::components::state_panel::{self, PanelState};
-use super::components::theme::{color, role};
-use super::{hint, pulls};
+use super::components::theme::color;
+use super::{hint, named_title, pulls};
 use crate::ui::components::cells;
+
+/// Copy the branch panel's `empty` state leads with: zero branches is a valid
+/// state rather than a failure, so the panel says so instead of showing an
+/// empty list.
+const EMPTY_BRANCHES: &str = "暂无分支";
 
 /// Borrowed render state for the branch panel, referencing `App.branches`
 /// directly so no mock data source exists (checkpoint 2).
@@ -55,7 +60,7 @@ pub fn render_branches(f: &mut Frame, content: Rect, mut state: BranchesState<'_
         state_panel::render_state_panel_with_focus(
             f,
             content,
-            &branch_title(state.repo_name, 0),
+            &named_title("分支", state.repo_name, 0),
             &PanelState::Error { message },
             state.focused,
         );
@@ -108,30 +113,23 @@ pub(crate) fn branches_hints(show_input: bool, show_delete_confirm: bool) -> Hin
     HintRow::new(key_hints(show_input, show_delete_confirm))
 }
 
-/// Panel title: `分支 [repo] (count)` — shared by the list and the `error`
-/// state so a failed load still names the panel it belongs to.
-fn branch_title(repo_name: &str, count: usize) -> String {
-    format!("分支 [{repo_name}] ({count})")
+/// The branch panel's §3.2 `empty` state: zero branches is a valid state
+/// rather than a failure (checkpoint 2), so the panel says so instead of
+/// showing an empty list.
+fn empty_branches_state() -> PanelState<'static> {
+    state_panel::empty_state(
+        EMPTY_BRANCHES,
+        "这个仓库还没有分支",
+        Some(hint("n", "新建第一个分支")),
+    )
 }
 
+/// Branch list, or the empty-state copy for a repository without branches.
+///
+/// A repository with no branches is a valid state rather than a failure
+/// (checkpoint 2): the `error` status (rendered by the caller) covers failed
+/// loads.
 fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) {
-    let title = branch_title(state.repo_name, state.branches.len());
-
-    if state.branches.is_empty() {
-        state_panel::render_state_panel_with_focus(
-            f,
-            area,
-            &title,
-            &state_panel::empty_state(
-                "暂无分支",
-                "这个仓库还没有分支",
-                Some(hint("n", "新建第一个分支")),
-            ),
-            state.focused,
-        );
-        return;
-    }
-
     let width = pulls::row_width(area);
     let items: Vec<ListItem> = state
         .branches
@@ -166,13 +164,18 @@ fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) 
         })
         .collect();
 
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(role::border(state.focused));
-
-    let list = super::with_cursor(List::new(items).block(block), state.focused);
-    f.render_stateful_widget(list, area, state.list_state);
+    super::render_named_list(
+        f,
+        area,
+        super::NamedPanel {
+            label: "分支",
+            repo_name: state.repo_name,
+            empty: &empty_branches_state(),
+            focused: state.focused,
+        },
+        items,
+        state.list_state,
+    );
 }
 
 /// Single-line create input (convention 9): Enter creates, Esc cancels.

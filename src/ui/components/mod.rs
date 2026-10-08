@@ -10,5 +10,6 @@
 pub mod cells;
 pub mod footer;
 pub mod header;
+pub(crate) mod receipts;
 pub mod state_panel;
 pub mod theme;

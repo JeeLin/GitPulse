@@ -2,12 +2,9 @@
 //! roles.
 //!
 //! Every panel, overlay and the footer read their colors from here instead of
-//! naming a raw [`Color`], so a theme change is one edit and no view can drift
-//! into its own palette (the des-9 consistency debt this module removes).
-
-#![allow(dead_code, unused_imports)]
-
-use ratatui::style::{Color, Modifier};
+//! naming a raw [`ratatui::style::Color`], so a theme change is one edit and no
+//! view can drift into its own palette (the des-9 consistency debt this module
+//! removes).
 
 /// Color roles of the dark theme (§5.1).
 ///
@@ -16,7 +13,12 @@ use ratatui::style::{Color, Modifier};
 pub mod color {
     use ratatui::style::Color;
 
-    /// Application background.
+    /// Application background (§5.1 `bg`).
+    ///
+    /// Reserved: §5.1 paints the app background in the root render
+    /// (`ui::render`, outside this lane) and no call site names the token yet,
+    /// so the number stays pinned here rather than duplicated.
+    #[allow(dead_code)]
     pub const BG: Color = Color::Rgb(0x1a, 0x1b, 0x26);
     /// Panel background / modal surface.
     pub const SURFACE: Color = Color::Rgb(0x24, 0x28, 0x3b);
@@ -47,7 +49,13 @@ pub mod color {
     pub const GIT_MOD: Color = WARNING;
     /// Working-tree file: deleted.
     pub const GIT_DEL: Color = DANGER;
-    /// Working-tree file: renamed.
+    /// Working-tree file: renamed (§5.1 `git_renamed`).
+    ///
+    /// Reserved: `git::FileState` has no `Renamed` variant — `src/git/file.rs`
+    /// is frozen this release — and `file_state_symbol` (ui/mod.rs, outside
+    /// this lane) stops at the four tracked states, so no call site names this
+    /// alias yet; kept for §5 token parity with the rest of the `git_*` set.
+    #[allow(dead_code)]
     pub const GIT_RENAMED: Color = INFO;
 
     /// CI run: success.
@@ -64,6 +72,11 @@ pub mod color {
 /// gutter and the fixed heights of the vertical structure.
 pub mod spacing {
     /// Horizontal padding inside a panel (left and right, in cells).
+    ///
+    /// Reserved: §5.2's number of record. Views build their own `Block`s and
+    /// none applies it as a `Padding` yet, so it stays the single source future
+    /// panels pad from rather than a magic `1` copied per view.
+    #[allow(dead_code)]
     pub const PADDING_X: u16 = 1;
     /// Gutter between two panels.
     pub const GUTTER: u16 = 1;
@@ -115,9 +128,9 @@ pub mod role {
         Style::default().add_modifier(Modifier::BOLD)
     }
 
-    /// Body text.
+    /// Body text: the primary foreground (§5.1 `fg`).
     pub fn body() -> Style {
-        Style::default()
+        Style::default().fg(color::FG)
     }
 
     /// Caption / secondary text: muted foreground.
@@ -151,6 +164,8 @@ pub mod role {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::style::{Color, Modifier};
+
     use super::*;
 
     /// §5.1: the token values are the design's, hex by hex — a typo here
@@ -205,7 +220,7 @@ mod tests {
         assert_eq!(role::title().fg, Some(color::ACCENT));
         assert!(role::title().add_modifier.contains(Modifier::BOLD));
         assert!(role::heading().add_modifier.contains(Modifier::BOLD));
-        assert_eq!(role::body().fg, None);
+        assert_eq!(role::body().fg, Some(color::FG));
     }
 
     /// §3.1: the focus is visible — the focused panel's border is

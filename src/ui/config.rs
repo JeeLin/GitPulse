@@ -16,7 +16,7 @@ use super::repo::centered_rect;
 use crate::git::show_path;
 use crate::ui::components::cells;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
-use crate::ui::components::theme::color;
+use crate::ui::components::theme::{color, role};
 
 /// Borrowed render state for the config panel, referencing `App.config.scan_dirs`
 /// directly so no mock data source exists (checkpoint 2).
@@ -44,6 +44,9 @@ pub struct ConfigState<'a> {
     /// itself is in-memory config and never fails to load, so it keeps its
     /// rows — a rejected path stays an operation result on the status row.
     pub load_error: Option<&'a str>,
+    /// Whether this panel holds the screen's focus (§3.1): it picks the
+    /// border color and whether the list draws the `▌` / `surface_alt` cursor.
+    pub focused: bool,
 }
 
 /// Render the scan-dir list plus the add-scan-dir overlays (directory picker
@@ -63,6 +66,7 @@ pub fn render_config(f: &mut Frame, content: Rect, mut state: ConfigState<'_>) {
             state.picker_entries,
             state.picker_state,
             state.load_error,
+            state.focused,
         );
     }
     if state.show_input {
@@ -134,6 +138,9 @@ pub(crate) fn config_hints(
 /// `error` state (§4.3): the listing is content that did not load, so `r`
 /// retry comes with it. The reason already names the directory, which is why
 /// the path line gives way to it.
+///
+/// `focused` is the config panel's own focus (§3.1): the popup is modal, so it
+/// wears the focus border exactly while the panel behind it is focused.
 fn render_dir_picker(
     f: &mut Frame,
     area: Rect,
@@ -141,6 +148,7 @@ fn render_dir_picker(
     entries: &[PathBuf],
     list_state: &mut ListState,
     load_error: Option<&str>,
+    focused: bool,
 ) {
     // Fit the popup to small terminals instead of overflowing the frame.
     let height = area.height.saturating_sub(4).clamp(6, 16).min(area.height);
@@ -148,18 +156,20 @@ fn render_dir_picker(
     f.render_widget(Clear, popup_area);
 
     if let Some(message) = load_error {
-        state_panel::render_state_panel(
+        state_panel::render_state_panel_with_focus(
             f,
             popup_area,
             "选择扫描目录",
             &PanelState::Error { message },
+            focused,
         );
         return;
     }
 
     let block = Block::default()
         .title(format!("选择扫描目录 ({})", entries.len()))
-        .borders(Borders::ALL);
+        .borders(Borders::ALL)
+        .border_style(role::border(focused));
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
     if inner.width == 0 || inner.height == 0 {
@@ -198,9 +208,7 @@ fn render_dir_picker(
         )))
     }));
 
-    let list = List::new(items)
-        .highlight_style(super::list_highlight())
-        .highlight_symbol(super::HIGHLIGHT_SYMBOL);
+    let list = super::with_cursor(List::new(items), focused);
     f.render_stateful_widget(list, rows[1], list_state);
 }
 
@@ -250,7 +258,13 @@ fn render_dir_list(f: &mut Frame, area: Rect, state: &mut ConfigState<'_>) {
     let title = format!("扫描目录配置 ({})", state.scan_dirs.len());
 
     if state.scan_dirs.is_empty() {
-        state_panel::render_state_panel(f, area, &title, &empty_scan_dirs_state());
+        state_panel::render_state_panel_with_focus(
+            f,
+            area,
+            &title,
+            &empty_scan_dirs_state(),
+            state.focused,
+        );
         return;
     }
 
@@ -260,13 +274,12 @@ fn render_dir_list(f: &mut Frame, area: Rect, state: &mut ConfigState<'_>) {
         .map(|dir| ListItem::new(Line::raw(show_path(dir))))
         .collect();
 
-    let block = Block::default().title(title).borders(Borders::ALL);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(role::border(state.focused));
 
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(super::list_highlight())
-        .highlight_symbol(super::HIGHLIGHT_SYMBOL);
-
+    let list = super::with_cursor(List::new(items).block(block), state.focused);
     f.render_stateful_widget(list, area, state.list_state);
 }
 
@@ -352,7 +365,8 @@ mod tests {
             .to_string()
     }
 
-    /// Base render state: list mode, no overlays; picker fields inert.
+    /// Base render state: focused panel, list mode, no overlays; picker
+    /// fields inert.
     fn base_state<'a>(
         scan_dirs: &'a [PathBuf],
         list_state: &'a mut ListState,
@@ -369,6 +383,7 @@ mod tests {
             picker_entries: &[],
             picker_state,
             load_error: None,
+            focused: true,
         }
     }
 

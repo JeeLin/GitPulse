@@ -127,6 +127,7 @@ fn screen_label(view: View, kind: Option<crate::platform::PlatformKind>) -> &'st
         View::Repo => "仓库工作区",
         View::Diff => "文件差异",
         View::Commit => "提交信息",
+        View::CommitDetail => "提交详情",
         View::Branches => "分支",
         View::Config => "扫描目录配置",
         View::History => "提交历史",

@@ -59,22 +59,16 @@ pub enum PanelState<'a> {
     },
     /// Content with a cursor: the caller fills the returned inner rect.
     Ready,
-    /// `ready` plus the transient success flash — the same green line the
-    /// status row shows, kept on the panel while the flash lasts (§3.2).
+    /// `ready` plus the success flash: the panel keeps its rows (the caller
+    /// fills the returned inner rect as in `ready`) and the flash line rides
+    /// above them — the same green `✓ result` the status row shows (§3.2).
     ///
-    /// Not one of the ten panels of §3.3 renders this variant. The table puts
-    /// the flash where it belongs: the *status row* carries the transient
-    /// green result, and the panel itself keeps the rows of `ready` — §4.3
-    /// gives operation results the status row and nothing else. The variant
-    /// stays here as the rendered form of that half of the state, reachable by
-    /// a panel whose flash is not an operation result.
-    ///
-    /// `#[allow(dead_code)]` is confined to this variant because it is the one
-    /// state no panel constructs yet: the flash lives on the status row (§4.3)
-    /// rather than on a green panel line. Keeping the variant present documents
-    /// the full five-state surface of §3.2 without wiring a green line the
-    /// design deliberately keeps off the panel.
-    #[allow(dead_code)]
+    /// §3.2 puts the transient *green result* on the status row; this variant
+    /// is the panel half of that state, for the operation whose result is not
+    /// only a status row (a panel that grew a row, a refreshed list). It stays
+    /// until the next state change or input — §4.4 rules out a self-clearing
+    /// timer, since the terminal only repaints on input, so nothing would
+    /// remove the flash until the user touched a key anyway.
     Success {
         /// Result of the operation that just completed.
         message: &'a str,
@@ -110,6 +104,19 @@ pub fn loading_state<'a>(sub: Option<&'a str>) -> PanelState<'a> {
         label: "加载中…",
         sub,
     }
+}
+
+/// The `success-flash` body of a panel (§3.2): the panel stays in `ready` —
+/// the caller fills the returned inner rect exactly as it does for
+/// [`PanelState::Ready`] — and `message` rides above the rows as the green
+/// `✓ result` line.
+///
+/// Per §4.4 the flash carries no timer: the platform repaints only on input,
+/// so a self-expiring flash would never be seen expire. The panel therefore
+/// stays in this state until its owner hands it the next state (or the user
+/// presses a key).
+pub fn success_state<'a>(message: &'a str) -> PanelState<'a> {
+    PanelState::Success { message }
 }
 
 /// Draw `area` as a bordered panel titled `title` in state `state` and
@@ -408,33 +415,24 @@ mod tests {
         assert_eq!(buffer[(0, 0)].symbol(), "╭", "rounded corners per §5.3");
     }
 
-    /// The success flash is the ready panel plus its green result line.
+    /// §3.2: the flash is `ready` plus the green result line — the panel keeps
+    /// its shell and title, and the message rides in green.
     #[test]
     fn success_state_shows_the_flash_and_keeps_the_shell() {
-        let text = render_text(
-            "文件状态",
-            &PanelState::Success {
-                message: "已暂存 src/main.rs",
-            },
-        );
+        let state = success_state("已暂存 src/main.rs");
+        let text = render_text("文件状态", &state);
         assert!(text.contains("✓"), "missing flash glyph: {text}");
         assert!(
             text.contains("已暂存src/main.rs"),
             "missing flash message: {text}"
         );
+        assert!(text.contains("文件状态"), "title must survive: {text}");
 
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                render_state_panel(
-                    f,
-                    f.area(),
-                    "文件状态",
-                    &PanelState::Success {
-                        message: "已暂存 src/main.rs",
-                    },
-                );
+                render_state_panel(f, f.area(), "文件状态", &state);
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
@@ -447,6 +445,37 @@ mod tests {
             }
         }
         assert_eq!(flash_fg, Some(color::SUCCESS), "flash reads success");
+    }
+
+    /// §3.2 `success-flash` is `ready` plus the flash, so the caller fills the
+    /// same inner rect it fills for `ready` — the flash never costs the panel a
+    /// row of its own.
+    #[test]
+    fn success_state_hands_back_the_same_inner_rect_as_ready() {
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut ready_inner = Rect::default();
+        let mut flash_inner = Rect::default();
+        terminal
+            .draw(|f| {
+                ready_inner =
+                    render_state_panel(f, f.area(), "分支 [demo] (2)", &PanelState::Ready);
+            })
+            .unwrap();
+        terminal
+            .draw(|f| {
+                flash_inner = render_state_panel(
+                    f,
+                    f.area(),
+                    "分支 [demo] (2)",
+                    &success_state("✓ 已切换到 dev"),
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            ready_inner, flash_inner,
+            "the flash must not shrink the rows the caller fills"
+        );
     }
 
     /// Every state keeps the panel title: a loading panel still says which

@@ -34,6 +34,8 @@ pub enum View {
     Diff,
     /// Commit message input.
     Commit,
+    /// Commit-detail sub-screen (§6.5), pushed from the history view by `Enter`.
+    CommitDetail,
     /// Branch panel.
     Branches,
     /// Scan-dir configuration panel.
@@ -57,14 +59,15 @@ pub enum View {
 }
 
 /// Every screen the command palette can jump to (DESIGN §6.11). The drill-down
-/// states — `Commit`, `Diff`, `PullDetail`, `IssueDetail` — are reached by
-/// `Enter` inside their hub, not as direct palette targets, but they are listed
-/// anyway so the palette's screen list stays in step with `View`.
-pub(crate) const SCREENS: [View; 14] = [
+/// states — `Commit`, `CommitDetail`, `Diff`, `PullDetail`, `IssueDetail` — are
+/// reached by `Enter` inside their hub, not as direct palette targets, but they
+/// are listed anyway so the palette's screen list stays in step with `View`.
+pub(crate) const SCREENS: [View; 15] = [
     View::Dashboard,
     View::Repo,
     View::Diff,
     View::Commit,
+    View::CommitDetail,
     View::Branches,
     View::Config,
     View::History,
@@ -141,13 +144,15 @@ impl PanelFocus {
     /// The focusable panels `view` actually draws, in `Tab` order — the cycle
     /// `Tab` / `BackTab` walks (§0: 在**当前屏**的多个面板间循环焦点).
     ///
-    /// Every screen has a primary panel; the history screen is the one that
-    /// draws a preview pane beside its commit list. A screen with a single
-    /// entry has nothing to cycle, which leaves the focus where it is instead
-    /// of inventing a second panel to land on.
+    /// Every screen has a primary panel; the repo workspace and the history
+    /// view are the ones that draw a preview pane beside their primary list. A
+    /// screen with a single entry has nothing to cycle, which leaves the focus
+    /// where it is instead of inventing a second panel to land on.
     pub fn panels_of(view: View) -> &'static [PanelFocus] {
         match view {
-            View::History => &[PanelFocus::Primary, PanelFocus::Preview],
+            // §6.2.1 / §6.2.3: a list beside its preview — `Tab` switches the
+            // focus between the file list and the diff pane.
+            View::Repo | View::History => &[PanelFocus::Primary, PanelFocus::Preview],
             _ => &[PanelFocus::Primary],
         }
     }
@@ -549,10 +554,33 @@ pub struct App {
     pub file_entries: Vec<FileEntry>,
     /// Selection cursor for the file status list in single-repo view.
     pub file_state: ListState,
+    /// Added / removed line counts of every entry of `file_entries`, in the
+    /// same order, for the list's 增删行数 column (§6.2.1). `None` is an entry
+    /// whose diff could not be read at all (an untracked file has none yet),
+    /// which is not the same as a file that changed no line.
+    pub file_line_counts: Vec<Option<(usize, usize)>>,
+    /// Diff of the file the repo view's preview pane shows (§6.2.1). `None`
+    /// while nothing is selected or the selected file has no readable diff —
+    /// the pane's placeholder, not a failure.
+    pub preview_diff: Option<String>,
+    /// Scroll offset of the repo view's preview pane, driven by `j`/`k` while
+    /// the pane holds focus (§3.1).
+    pub preview_scroll: u16,
     /// Scroll offset for the diff viewer.
     pub diff_scroll: u16,
+    /// Scroll offset of the commit-detail sub-screen (§6.5).
+    pub commit_detail_scroll: u16,
     /// Whether the discard confirmation dialog is shown.
     pub show_discard_confirm: bool,
+    /// Transient panel-level success flash (§3.2 `success-flash`), set by an
+    /// operation whose result changed the panel itself — staging a file, for
+    /// instance, which is why the §6.2.1 file list flashes `✓ 已暂存 …` above
+    /// its rows instead of only reporting on the status row.
+    ///
+    /// §4.4 rules out a self-clearing timer: the platform repaints on input
+    /// only, so nothing would remove the flash until the user touched a key
+    /// anyway. [`App::clear_feedback`] therefore drops it on the next input.
+    pub panel_flash: Option<String>,
     /// Current diff content for the selected file.
     pub diff_content: String,
     /// Single-line commit message being typed in the Commit view (convention 9).
@@ -639,8 +667,13 @@ impl App {
             current_repo: None,
             file_entries: Vec::new(),
             file_state: ListState::default(),
+            file_line_counts: Vec::new(),
+            preview_diff: None,
+            preview_scroll: 0,
             diff_scroll: 0,
+            commit_detail_scroll: 0,
             show_discard_confirm: false,
+            panel_flash: None,
             diff_content: String::new(),
             commit_message: String::new(),
             remote_status: None,
@@ -746,8 +779,7 @@ impl App {
             View::History => self.load_history(),
             View::Tags => self.load_tags(),
             View::Repo => {
-                self.clear_error();
-                self.clear_load_error();
+                self.clear_feedback();
             }
             _ => {}
         }
@@ -788,6 +820,19 @@ impl App {
     /// Clear the status line.
     pub fn clear_error(&mut self) {
         self.status = None;
+    }
+
+    /// Drop both transient feedback faces at once: the status line and the panel
+    /// load failure.
+    ///
+    /// §4.3 keeps them apart when *setting* (load failure → panel `error`
+    /// state, operation result → status row), but a fresh view or a successful
+    /// reload legitimately clears both, so this is the single call site for
+    /// that reset.
+    pub fn clear_feedback(&mut self) {
+        self.clear_error();
+        self.clear_load_error();
+        self.panel_flash = None;
     }
 
     /// Drop the settled push/pull (or receipt) feedback so the next status
@@ -853,8 +898,7 @@ impl App {
         match git::discover_repos(&self.config.scan_dirs) {
             Ok(repos) => {
                 self.repos = repos;
-                self.clear_error();
-                self.clear_load_error();
+                self.clear_feedback();
             }
             Err(e) => {
                 self.set_load_error(format!("扫描仓库失败: {e}"));
@@ -888,8 +932,7 @@ impl App {
             if i < self.repos.len() {
                 self.view = View::Repo;
                 self.current_repo = Some(i);
-                self.clear_error();
-                self.clear_load_error();
+                self.clear_feedback();
                 self.load_file_entries();
                 self.file_state.select(Some(0));
             }
@@ -904,8 +947,8 @@ impl App {
                 match git::list_file_status(&repo_path) {
                     Ok(entries) => {
                         self.file_entries = entries;
-                        self.clear_error();
-                        self.clear_load_error();
+                        self.load_file_line_counts(&repo_path);
+                        self.clear_feedback();
                         if self.file_entries.is_empty() {
                             self.file_state.select(None);
                         } else {
@@ -913,15 +956,85 @@ impl App {
                             let new_sel = sel.min(self.file_entries.len() - 1);
                             self.file_state.select(Some(new_sel));
                         }
+                        self.load_preview_diff();
                     }
                     Err(e) => {
                         self.set_load_error(format!("加载文件列表失败: {e}"));
                         self.file_entries.clear();
                         self.file_state.select(None);
+                        // The counts and the preview both describe the entries
+                        // that just went away — they may not outlive them.
+                        self.file_line_counts.clear();
+                        self.preview_diff = None;
                     }
                 }
             }
         }
+    }
+
+    /// Added / removed line counts of every entry of `file_entries`, read in
+    /// the same order so the list and its counts cannot drift apart. An entry
+    /// whose diff cannot be read at all is `None` rather than `(0, 0)`: an
+    /// untracked file has no diff yet, which is not the same claim as "this
+    /// file changed no line".
+    ///
+    /// Known limitation (G38), shared with [`App::load_history_detail`]: the
+    /// per-file diffs run synchronously on the UI thread, once per load. The
+    /// git layer is frozen this release, so the batched `git diff --numstat`
+    /// that would answer all of them in one call is a follow-up.
+    fn load_file_line_counts(&mut self, repo_path: &std::path::Path) {
+        self.file_line_counts = self
+            .file_entries
+            .iter()
+            .map(|entry| {
+                git::diff_file(repo_path, &entry.path)
+                    .ok()
+                    .map(|diff| crate::ui::repo::patch_counts(&diff))
+            })
+            .collect();
+    }
+
+    /// Load the diff of the highlighted file for the repo view's preview pane
+    /// (§6.2.1).
+    ///
+    /// The pane is a *summary of the selection*, not a screen of its own, so a
+    /// file with nothing to preview is a valid state: [`App::preview_diff`]
+    /// stays `None` and the pane draws its placeholder. Nothing here raises
+    /// `error` on the file list — a missing preview is never a failed load
+    /// (§4.3).
+    ///
+    /// Known limitation (G38): the diff runs synchronously on the UI thread,
+    /// once per cursor move that actually moved — the same trade
+    /// [`App::load_history_detail`] makes.
+    pub fn load_preview_diff(&mut self) {
+        self.preview_diff = self.selected_file_diff();
+        self.preview_scroll = 0;
+    }
+
+    /// The highlighted file's diff, or `None` when there is nothing to preview:
+    /// no file selected, no repository open, or a file with no readable diff.
+    fn selected_file_diff(&self) -> Option<String> {
+        let file = self
+            .file_state
+            .selected()
+            .and_then(|idx| self.file_entries.get(idx))?;
+        let repo_path = self.current_repo_path()?;
+        git::diff_file(&repo_path, &file.path).ok()
+    }
+
+    /// `Enter` on the history view (§6.2.3): open the highlighted commit's
+    /// detail sub-screen (§6.5) — one stack level, like `View::Diff`.
+    ///
+    /// The sub-screen reads the detail the history pane already holds, so this
+    /// is a drill-in and not a second fetch: an empty history has nothing to
+    /// drill into, so `Enter` stays inert there instead of opening a screen
+    /// with nothing to show.
+    pub fn open_commit_detail(&mut self) {
+        if self.history.selected_commit().is_none() {
+            return;
+        }
+        self.commit_detail_scroll = 0;
+        self.view = View::CommitDetail;
     }
 
     /// View the diff of the currently selected file.
@@ -952,6 +1065,7 @@ impl App {
                 match git::stage(&repo_path, &file_path) {
                     Ok(()) => {
                         self.clear_error();
+                        self.panel_flash = Some(format!("✓ 已暂存 {}", file_path.display()));
                         self.load_file_entries();
                     }
                     Err(e) => self.set_error(format!("stage 失败: {e}")),
@@ -969,6 +1083,7 @@ impl App {
                 match git::unstage(&repo_path, &file_path) {
                     Ok(()) => {
                         self.clear_error();
+                        self.panel_flash = Some(format!("✓ 已取消暂存 {}", file_path.display()));
                         self.load_file_entries();
                     }
                     Err(e) => self.set_error(format!("unstage 失败: {e}")),
@@ -992,6 +1107,7 @@ impl App {
                 match git::discard(&repo_path, &file_path) {
                     Ok(()) => {
                         self.clear_error();
+                        self.panel_flash = Some(format!("✓ 已丢弃 {}", file_path.display()));
                         self.load_file_entries();
                     }
                     Err(e) => self.set_error(format!("discard 失败: {e}")),
@@ -1192,8 +1308,7 @@ impl App {
         let platform = self.github_state.kind();
         self.reset_github_state();
         self.view = View::Pulls;
-        self.clear_error();
-        self.clear_load_error();
+        self.clear_feedback();
 
         let Some(repo) = self.current_repo_path() else {
             self.set_load_error(match platform.and_then(platform_display_name) {
@@ -1760,8 +1875,7 @@ impl App {
         self.show_branch_input = false;
         self.show_branch_delete_confirm = false;
         self.branch_input.clear();
-        self.clear_error();
-        self.clear_load_error();
+        self.clear_feedback();
     }
 
     /// The repository an index into `repos` points at, when that index is
@@ -1811,8 +1925,7 @@ impl App {
     /// Leave the history view back to the repo view (`Esc`).
     pub fn leave_history(&mut self) {
         self.view = View::Repo;
-        self.clear_error();
-        self.clear_load_error();
+        self.clear_feedback();
     }
 
     /// Load the history list for the current repository and select the first
@@ -1878,8 +1991,7 @@ impl App {
         match git::commit_detail(&path, &id) {
             Ok(detail) => {
                 self.history.detail = Some(detail);
-                self.clear_error();
-                self.clear_load_error();
+                self.clear_feedback();
             }
             Err(e) => {
                 self.history.detail = None;
@@ -1902,8 +2014,7 @@ impl App {
         self.tags_state.clear();
         // Stale push feedback would outrank the load status below.
         self.clear_finished_push_feedback();
-        self.clear_error();
-        self.clear_load_error();
+        self.clear_feedback();
         self.load_tags();
     }
 
@@ -1911,8 +2022,7 @@ impl App {
     pub fn leave_tags(&mut self) {
         self.view = View::Repo;
         self.tags_state.modal = None;
-        self.clear_error();
-        self.clear_load_error();
+        self.clear_feedback();
     }
 
     /// Load (or reload) the tag list for the current repository, keeping the
@@ -1931,8 +2041,7 @@ impl App {
         match git::list_tags(&path) {
             Ok(tags) => {
                 self.tags_state.set_tags(tags);
-                self.clear_error();
-                self.clear_load_error();
+                self.clear_feedback();
             }
             Err(e) => {
                 self.set_load_error(format!("加载标签列表失败: {e}"));
@@ -2131,8 +2240,7 @@ impl App {
         // Stale push feedback must not survive into the view; a push still
         // in flight keeps its receiver (G3/G19).
         self.clear_finished_push_feedback();
-        self.clear_error();
-        self.clear_load_error();
+        self.clear_feedback();
     }
 
     /// Leave the configuration panel back to the dashboard (`Esc`).
@@ -2140,8 +2248,7 @@ impl App {
         self.view = View::Dashboard;
         self.cancel_config_add();
         self.show_config_delete_confirm = false;
-        self.clear_error();
-        self.clear_load_error();
+        self.clear_feedback();
     }
 
     /// Open the interactive directory picker overlay (config panel `a`).
@@ -2207,8 +2314,7 @@ impl App {
                 self.picker_dir = dir;
                 self.picker_entries = entries;
                 self.picker_state.select(Some(0));
-                self.clear_error();
-                self.clear_load_error();
+                self.clear_feedback();
             }
             Err(err) => self.set_load_error(format!("无法读取目录 {}: {err}", show_path(&dir))),
         }
@@ -2433,8 +2539,7 @@ impl App {
                 };
                 self.branches = branches;
                 self.branch_state.select(selected);
-                self.clear_error();
-                self.clear_load_error();
+                self.clear_feedback();
             }
             Err(e) => {
                 self.set_load_error(format!("加载分支列表失败: {e}"));
@@ -2679,6 +2784,7 @@ impl App {
             View::Diff => self.handle_diff_key(key),
             // Unreachable: an open input is caught by the focus trap above.
             View::Commit => true,
+            View::CommitDetail => self.handle_commit_detail_key(key),
             View::Branches => self.handle_branches_key(key),
             View::Config => self.handle_config_key(key),
             View::History => self.handle_history_key(key),
@@ -2800,6 +2906,13 @@ impl App {
             }
             // Defensive: the commit input is an overlay, closed by the trap.
             View::Commit => self.cancel_commit(),
+            // §6.5: the detail sub-screen is a drill-in on the history pane's
+            // own payload — `Esc` returns to the history that opened it and
+            // drops the load failure it surfaced (§4.3).
+            View::CommitDetail => {
+                self.view = View::History;
+                self.clear_load_error();
+            }
             View::Branches => self.leave_branches(),
             View::Config => self.leave_config(),
             View::History => self.leave_history(),
@@ -2840,6 +2953,10 @@ impl App {
             // Re-read the diff of the highlighted file (resets the scroll).
             View::Diff => self.view_file_diff(),
             View::Commit => {}
+            // §6.5: the detail pane reads its payload from the history state the
+            // history view already loaded — a sub-screen has nothing of its own
+            // to reload, so `r` is inert here (pop to history to refresh).
+            View::CommitDetail => {}
             View::Branches => self.load_branches(),
             // The scan-dir list is in-memory; `r` re-runs the scan it shows.
             View::Config => self.refresh_repos(),
@@ -2862,7 +2979,16 @@ impl App {
         let head = matches!(code, KeyCode::Char('g') | KeyCode::Home);
         match self.view {
             View::Dashboard => jump_selection(&mut self.dashboard_state, self.repos.len(), head),
-            View::Repo => jump_selection(&mut self.file_state, self.file_entries.len(), head),
+            View::Repo => {
+                let before = self.file_state.selected();
+                jump_selection(&mut self.file_state, self.file_entries.len(), head);
+                // The preview follows the cursor, like `j`/`k` do — but only when
+                // the jump actually moved it, so an edge press never re-reads
+                // the file's diff (G38: a clamped `g`/`G` skips the reload).
+                if self.file_state.selected() != before {
+                    self.load_preview_diff();
+                }
+            }
             View::Diff => {
                 if head {
                     self.diff_scroll = 0;
@@ -2876,6 +3002,24 @@ impl App {
                 }
             }
             View::Commit => {}
+            // §6.5: no list cursor to jump, only a scrollable body — `g` lands
+            // the body on its first line, `G` on its last.
+            View::CommitDetail => {
+                if head {
+                    self.commit_detail_scroll = 0;
+                } else {
+                    // The same logical-line heuristic the diff viewer uses: a
+                    // wrapped line is one logical line, the closest safe last
+                    // row without rendering a blank panel.
+                    let body = self.history.detail.as_ref().map_or(0, |d| {
+                        // subject/body + blank separator + the files header +
+                        // one row per changed path.
+                        d.message.lines().count() + 1 + 1 + d.files.len()
+                    });
+                    self.commit_detail_scroll =
+                        u16::try_from(body.saturating_sub(1)).unwrap_or(u16::MAX);
+                }
+            }
             View::Branches => jump_selection(&mut self.branch_state, self.branches.len(), head),
             View::Config => {
                 jump_selection(&mut self.config_state, self.config.scan_dirs.len(), head)
@@ -3095,7 +3239,11 @@ impl App {
                 self.github_state.selected = 0;
             }
             // Drill-down states reached by Enter inside a screen, not a jump.
-            View::Diff | View::Commit | View::PullDetail | View::IssueDetail => {}
+            View::Diff
+            | View::Commit
+            | View::CommitDetail
+            | View::PullDetail
+            | View::IssueDetail => {}
         }
     }
 
@@ -3148,14 +3296,26 @@ impl App {
     /// `g`/`G`/`Home`/`End` jumps — except `g`, which still opens the
     /// receipts hub until the 远端 context tab takes over; the discard
     /// confirmation is caught by the focus trap before this runs.
+    ///
+    /// The view is two panels (§6.2.1: file list + diff preview). `j`/`k` move
+    /// the list cursor when the list holds focus and scroll the preview when
+    /// the preview does (§3.1: the preview carries no cursor of its own).
     fn handle_repo_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                move_selection(&mut self.file_state, self.file_entries.len(), true);
+                if self.panel_is_focused(PanelFocus::Preview) {
+                    self.preview_scroll = self.preview_scroll.saturating_add(1);
+                } else {
+                    self.move_file_selection(true);
+                }
                 true
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                move_selection(&mut self.file_state, self.file_entries.len(), false);
+                if self.panel_is_focused(PanelFocus::Preview) {
+                    self.preview_scroll = self.preview_scroll.saturating_sub(1);
+                } else {
+                    self.move_file_selection(false);
+                }
                 true
             }
             // `Enter` = 打开 (§0): open the highlighted file's diff sub-screen
@@ -3226,6 +3386,23 @@ impl App {
         }
     }
 
+    /// Key handler for the commit-detail sub-screen (§6.5): vertical scroll
+    /// only — `Esc` (back to the history view) and `q` (quit) belong to
+    /// [`App::dispatch_key`].
+    fn handle_commit_detail_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.commit_detail_scroll = self.commit_detail_scroll.saturating_add(1);
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.commit_detail_scroll = self.commit_detail_scroll.saturating_sub(1);
+                true
+            }
+            _ => true,
+        }
+    }
+
     /// Key handler for the branch panel: list navigation and its two overlay
     /// openers. The open overlays and the global verbs (`Esc` back, `q` quit,
     /// `r` reload) are handled before this runs.
@@ -3256,15 +3433,36 @@ impl App {
     }
 
     /// Key handler for the commit history view: `j/k` and the arrow keys move
-    /// the selection and reload the highlighted commit's detail. `Esc` (back
-    /// to the repo view) and `q` (quit) belong to [`App::dispatch_key`].
+    /// the selection and reload the highlighted commit's detail. `Enter`
+    /// drills into the commit-detail sub-screen (§6.5); `Esc` (back to the repo
+    /// view) and `q` (quit) belong to [`App::dispatch_key`].
     fn handle_history_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.move_history_selection(true),
             KeyCode::Char('k') | KeyCode::Up => self.move_history_selection(false),
+            // `Enter` = 打开 (§0): a stack push onto the selected commit's detail.
+            KeyCode::Enter => {
+                self.open_commit_detail();
+            }
             _ => {}
         }
         true
+    }
+
+    /// Move the file-list selection one row and reload the preview pane for
+    /// the newly highlighted file — the same cursor-then-reload pair the
+    /// history view runs for its detail pane (§6.2.1).
+    ///
+    /// A press that cannot move the cursor (empty list, already at the edge)
+    /// skips the reload: it re-reads the file's diff synchronously, and a
+    /// clamped press would otherwise pay for that on every repeat (G38, the
+    /// trade [`App::load_history_detail`] makes).
+    fn move_file_selection(&mut self, down: bool) {
+        let before = self.file_state.selected();
+        move_selection(&mut self.file_state, self.file_entries.len(), down);
+        if self.file_state.selected() != before {
+            self.load_preview_diff();
+        }
     }
 
     /// Move the history selection one row and reload the highlighted
@@ -3754,6 +3952,7 @@ mod tests {
             View::Checks,
             View::Issues,
             View::IssueDetail,
+            View::CommitDetail,
             View::Notifications,
         ] {
             let mut app = App::new(Config::default());
@@ -7170,6 +7369,21 @@ mod tests {
         assert_eq!(app.remote_status, Some(RemoteStatus::Success));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §4.3 separates the two feedback faces when they are *set*; the reset that
+    /// opens a fresh context drops both at once, so one helper owns that pair.
+    #[test]
+    fn clear_feedback_drops_the_status_row_and_the_panel_error_state() {
+        let mut app = App::new(Config::default());
+        app.set_info("已切换到分支 dev");
+        app.set_load_error("加载提交历史失败: boom");
+        assert!(app.status.is_some() && app.load_error.is_some());
+
+        app.clear_feedback();
+
+        assert!(app.status.is_none(), "the status row is dropped");
+        assert!(app.load_error.is_none(), "the panel error state is dropped");
     }
 
     // ---------- tags panel ----------
