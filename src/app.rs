@@ -3423,7 +3423,11 @@ impl App {
             KeyCode::Char(c) => {
                 match c {
                     'p' => self.start_remote("push"),
-                    'l' => self.start_remote("pull"),
+                    // §2.2 / §6.2.1: `p` pushes, `P` pulls. The hint row spells
+                    // the pair `p/P 推送/拉取`, so `P` has to be a live key — an
+                    // advertised key the handler drops is a §2.3 lie. `l` stays
+                    // as the pre-redesign pull alias.
+                    'P' | 'l' => self.start_remote("pull"),
                     'b' => self.enter_branches(),
                     'h' => self.enter_history(),
                     't' => self.enter_tags(),
@@ -5616,6 +5620,26 @@ mod tests {
         assert!(!app.dispatch_key(key(KeyCode::Char('q'))));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// DESIGN §2.2 / §6.2.1 put `p`/`P` on push/pull, and §6.2.1:332 spells
+    /// the hint row `⏎ 查看diff  s 暂存  u 取消  c 提交  p 推送  P 拉取`. The
+    /// handler therefore has to bind uppercase `P` too: a key the hint row
+    /// advertises but `handle_repo_key` drops is a §2.3 lie, and lowercase `l`
+    /// alone left `P` inert.
+    #[tokio::test]
+    async fn repo_view_uppercase_p_pulls_so_the_advertised_key_is_live() {
+        let dir = temp_dir("repo-upper-p");
+        init_repo_with_commit(&dir);
+
+        let mut app = app_with_repo_at(&dir);
+        app.dashboard_state.select(Some(0));
+        app.enter_repo();
+        assert_eq!(app.view, View::Repo);
+
+        assert!(app.dispatch_key(key(KeyCode::Char('P'))));
+        assert_eq!(app.remote_op, "pull", "§6.2.1: P is the pull key");
+        assert!(app.remote_rx.is_some());
     }
 
     #[test]
