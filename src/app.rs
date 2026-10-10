@@ -1,6 +1,7 @@
 //! Application state and the TUI event loop.
 
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -1038,56 +1039,70 @@ impl App {
         self.view = View::CommitDetail;
     }
 
+    /// The open repository's path together with the highlighted file's path,
+    /// or `None` when there is no selection to act on.
+    ///
+    /// Every working-tree verb (`view_file_diff`, `stage_current`,
+    /// `unstage_current`, `toggle_staged`, `confirm_discard`) is keyed on the
+    /// same pair, so the guard lives here once: an index out of range means
+    /// the panel was not reloaded after the repository or file list changed,
+    /// and there is nothing to act on (B4-04).
+    ///
+    /// The two paths are cloned because the caller mutates `self` (reloading
+    /// the file entries, moving the view) while the git call is in flight.
+    fn selected_file_paths(&self) -> Option<(PathBuf, PathBuf)> {
+        let repo_idx = self.current_repo?;
+        let file_idx = self.file_state.selected()?;
+        if repo_idx >= self.repos.len() || file_idx >= self.file_entries.len() {
+            return None;
+        }
+        Some((
+            self.repos[repo_idx].path.clone(),
+            self.file_entries[file_idx].path.clone(),
+        ))
+    }
+
     /// View the diff of the currently selected file.
     pub fn view_file_diff(&mut self) {
-        if let (Some(repo_idx), Some(file_idx)) = (self.current_repo, self.file_state.selected()) {
-            if repo_idx < self.repos.len() && file_idx < self.file_entries.len() {
-                let repo_path = self.repos[repo_idx].path.clone();
-                let file_path = self.file_entries[file_idx].path.clone();
-                match git::diff_file(&repo_path, &file_path) {
-                    Ok(diff) => {
-                        self.diff_content = diff;
-                        self.view = View::Diff;
-                        self.diff_scroll = 0;
-                        self.clear_load_error();
-                    }
-                    Err(e) => self.set_load_error(format!("加载 diff 失败: {e}")),
-                }
+        let Some((repo_path, file_path)) = self.selected_file_paths() else {
+            return;
+        };
+        match git::diff_file(&repo_path, &file_path) {
+            Ok(diff) => {
+                self.diff_content = diff;
+                self.view = View::Diff;
+                self.diff_scroll = 0;
+                self.clear_load_error();
             }
+            Err(e) => self.set_load_error(format!("加载 diff 失败: {e}")),
         }
     }
 
     /// Stage the currently selected file.
     pub fn stage_current(&mut self) {
-        if let (Some(repo_idx), Some(file_idx)) = (self.current_repo, self.file_state.selected()) {
-            if repo_idx < self.repos.len() && file_idx < self.file_entries.len() {
-                let repo_path = self.repos[repo_idx].path.clone();
-                let file_path = self.file_entries[file_idx].path.clone();
-                match git::stage(&repo_path, &file_path) {
-                    Ok(()) => {
-                        self.load_file_entries();
-                        self.set_info(format!("✓ 已暂存 {}", file_path.display()));
-                    }
-                    Err(e) => self.set_error(format!("stage 失败: {e}")),
-                }
+        let Some((repo_path, file_path)) = self.selected_file_paths() else {
+            return;
+        };
+        match git::stage(&repo_path, &file_path) {
+            Ok(()) => {
+                self.load_file_entries();
+                self.set_info(format!("✓ 已暂存 {}", file_path.display()));
             }
+            Err(e) => self.set_error(format!("stage 失败: {e}")),
         }
     }
 
     /// Unstage the currently selected file.
     pub fn unstage_current(&mut self) {
-        if let (Some(repo_idx), Some(file_idx)) = (self.current_repo, self.file_state.selected()) {
-            if repo_idx < self.repos.len() && file_idx < self.file_entries.len() {
-                let repo_path = self.repos[repo_idx].path.clone();
-                let file_path = self.file_entries[file_idx].path.clone();
-                match git::unstage(&repo_path, &file_path) {
-                    Ok(()) => {
-                        self.load_file_entries();
-                        self.set_info(format!("✓ 已取消暂存 {}", file_path.display()));
-                    }
-                    Err(e) => self.set_error(format!("unstage 失败: {e}")),
-                }
+        let Some((repo_path, file_path)) = self.selected_file_paths() else {
+            return;
+        };
+        match git::unstage(&repo_path, &file_path) {
+            Ok(()) => {
+                self.load_file_entries();
+                self.set_info(format!("✓ 已取消暂存 {}", file_path.display()));
             }
+            Err(e) => self.set_error(format!("unstage 失败: {e}")),
         }
     }
 
@@ -1100,15 +1115,16 @@ impl App {
     /// entry and stages everything else, mirroring `s`/`u` without inventing a
     /// `staged` column the git layer does not expose.
     pub fn toggle_staged(&mut self) {
-        if let (Some(repo_idx), Some(file_idx)) = (self.current_repo, self.file_state.selected()) {
-            if repo_idx < self.repos.len() && file_idx < self.file_entries.len() {
-                let is_staged = self.file_entries[file_idx].state == git::FileState::Added;
-                if is_staged {
-                    self.unstage_current();
-                } else {
-                    self.stage_current();
-                }
-            }
+        let Some(file_idx) = self.file_state.selected() else {
+            return;
+        };
+        let Some(entry) = self.file_entries.get(file_idx) else {
+            return;
+        };
+        if entry.state == git::FileState::Added {
+            self.unstage_current();
+        } else {
+            self.stage_current();
         }
     }
 
@@ -1145,18 +1161,15 @@ impl App {
     /// Execute the discard for the currently selected file.
     pub fn confirm_discard(&mut self) {
         self.show_discard_confirm = false;
-        if let (Some(repo_idx), Some(file_idx)) = (self.current_repo, self.file_state.selected()) {
-            if repo_idx < self.repos.len() && file_idx < self.file_entries.len() {
-                let repo_path = self.repos[repo_idx].path.clone();
-                let file_path = self.file_entries[file_idx].path.clone();
-                match git::discard(&repo_path, &file_path) {
-                    Ok(()) => {
-                        self.load_file_entries();
-                        self.set_info(format!("✓ 已丢弃 {}", file_path.display()));
-                    }
-                    Err(e) => self.set_error(format!("discard 失败: {e}")),
-                }
+        let Some((repo_path, file_path)) = self.selected_file_paths() else {
+            return;
+        };
+        match git::discard(&repo_path, &file_path) {
+            Ok(()) => {
+                self.load_file_entries();
+                self.set_info(format!("✓ 已丢弃 {}", file_path.display()));
             }
+            Err(e) => self.set_error(format!("discard 失败: {e}")),
         }
     }
 
