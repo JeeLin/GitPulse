@@ -22,10 +22,10 @@ use ratatui::{
     Frame,
 };
 
-use crate::ui::status::{RemoteStatus, StatusLine};
-
 use super::cells;
-use super::theme::{role, spacing};
+use super::remote;
+use super::status::{RemoteStatus, StatusLine};
+use super::theme::{color, role, spacing};
 
 /// Cells below which the tail segment is dropped instead of shown as a
 /// pointless stub (`Tab …` costs more attention than it saves).
@@ -188,6 +188,57 @@ impl HintRow {
     }
 }
 
+/// Draw the status row of the footer (§4.2): errors render on `danger`, a
+/// success (non-error carrying the design's `✓ ` glyph) renders on the
+/// `success` token, and anything else keeps the default style. `None` leaves
+/// the row blank.
+///
+/// Called through [`render_footer`] — views never draw the row themselves.
+///
+/// The green tone is derived from the glyph rather than a dedicated field:
+/// [`StatusLine`] is built by struct literal in views and tests alike, so a
+/// new flag would be a breaking change across every one of them. `✓ ` is the
+/// design's own success marker (§3.2 `success-flash`), which is why the stage /
+/// unstage / discard verdicts carry it — see [`StatusLine::is_success`].
+pub fn render_status_line(f: &mut Frame, area: Rect, status: Option<&StatusLine>) {
+    if let Some(status) = status {
+        let style = if status.is_error {
+            ratatui::style::Style::default().fg(color::DANGER)
+        } else if status.is_success() {
+            ratatui::style::Style::default().fg(color::SUCCESS)
+        } else {
+            ratatui::style::Style::default()
+        };
+        f.render_widget(
+            ratatui::widgets::Paragraph::new(status.message.clone()).style(style),
+            area,
+        );
+    }
+}
+
+/// Render the bottom status row as push/pull feedback when a remote result
+/// is present, and as the plain status line otherwise (G6).
+///
+/// The two panels that own remote feedback (repo, tags) used to duplicate
+/// this `remote_status` / `status_line` split verbatim; keeping it here also
+/// keeps the notice written while an operation runs visible beside it, see
+/// [`remote::render_remote_status`].
+///
+/// The §3.2 states belong to the panel body ([`super::state_panel`]); this is
+/// only the §4.2 status-row split, so the shapes never overlap.
+pub fn render_status_or_remote(
+    f: &mut Frame,
+    area: Rect,
+    remote_status: Option<&RemoteStatus>,
+    remote_op: &str,
+    status: Option<&StatusLine>,
+) {
+    match remote_status {
+        Some(remote) => remote::render_remote_status(f, area, remote, remote_op, status),
+        None => render_status_line(f, area, status),
+    }
+}
+
 /// Render the 2-line footer into `area` (§4.1): the status row on top,
 /// the single canonical hint row below it.
 pub fn render_footer(f: &mut Frame, area: Rect, status: StatusRow<'_>, hints: &HintRow) {
@@ -196,7 +247,7 @@ pub fn render_footer(f: &mut Frame, area: Rect, status: StatusRow<'_>, hints: &H
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(area);
 
-    crate::ui::render_status_or_remote(
+    render_status_or_remote(
         f,
         rows[0],
         status.remote_status,

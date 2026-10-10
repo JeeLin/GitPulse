@@ -8,8 +8,9 @@ use ratatui::{
     Frame,
 };
 
-use crate::ui::components::theme::color;
-use crate::ui::status::{RemoteStatus, StatusLine};
+use super::footer::render_status_line;
+use super::status::{RemoteStatus, StatusLine};
+use super::theme::color;
 
 /// Blank columns reserved between the remote feedback and the pending
 /// notice: two cells keep a long feedback label from touching the notice text.
@@ -106,7 +107,7 @@ pub fn render_remote_status(
     }
     // Painted after the feedback so a long label can never cover it.
     if let Some((rect, note)) = notice_area {
-        super::render_status_line(f, rect, Some(note));
+        render_status_line(f, rect, Some(note));
     }
 }
 

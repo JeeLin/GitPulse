@@ -13,9 +13,7 @@ pub mod history;
 pub mod issues;
 pub mod notifications;
 pub mod pulls;
-pub mod remote;
 pub mod repo;
-pub mod status;
 pub mod tags;
 
 use ratatui::{
@@ -29,42 +27,20 @@ use ratatui::{
 use crate::app::{App, PanelFocus, View};
 use crate::git::{FileState, RepoInfo};
 use crate::ui::components::footer::hints as join_hints;
-use crate::ui::components::footer::{self, HintRow, StatusRow};
+use crate::ui::components::footer::{self, HintRow};
 use crate::ui::components::state_panel;
 use crate::ui::components::theme::{self, color};
 use crate::ui::dashboard::DashboardState;
-use crate::ui::status::{RemoteStatus, StatusLine};
 
 /// Key/desc fragment of every hint row, re-exported from the footer so the
 /// views keep building their segments through `super::hint`.
 pub(crate) use crate::ui::components::footer::hint;
 
-/// Shared selection style of the focused list's cursor row (§3.1): the
-/// canonical `surface_alt` background, and nothing else — the design picked
-/// the background over an accent foreground for the cursor.
-pub(crate) fn list_highlight() -> Style {
-    Style::default().bg(color::SURFACE_ALT)
-}
-
-/// Marker rendered at the row start of the focused list's selected row
-/// (§3.1: 行首 `▌` + `surface_alt` 底色). One cell wide, so a selected row
-/// keeps every column the unselected rows use.
-pub(crate) const HIGHLIGHT_SYMBOL: &str = "▌";
-
-/// Wire the §3.1 cursor onto a list panel: when `focused`, the selected row
-/// carries `▌` over the `surface_alt` background; otherwise the list shows
-/// neither, because the cursor exists only in the focused list panel.
-///
-/// One place, so every list in the app draws the same cursor — a panel cannot
-/// keep a private marker or a private highlight.
-pub(crate) fn with_cursor(list: List<'static>, focused: bool) -> List<'static> {
-    if focused {
-        list.highlight_style(list_highlight())
-            .highlight_symbol(HIGHLIGHT_SYMBOL)
-    } else {
-        list.highlight_symbol("")
-    }
-}
+/// Status-line types, the remote/status row renderers, and the per-view status
+/// dispatch — all owned by [`components`] and re-exported here so the views
+/// keep reaching for `super::status::…` (B4-03).
+pub use crate::ui::components::status;
+pub(crate) use crate::ui::components::{view_status, with_cursor, HIGHLIGHT_SYMBOL};
 
 /// Bottom hint row of every y/n confirmation overlay (convention 8): the
 /// `y` / `n` wording of the overlay itself plus the dismiss key. Every panel
@@ -87,52 +63,6 @@ pub(crate) fn confirm_hints() -> Line<'static> {
 /// the manual config input), while the row shape is shared (G5).
 pub(crate) fn submit_hints(submit: &str) -> Line<'static> {
     join_hints([hint("Enter", submit), hint("Esc", "取消")])
-}
-
-/// Draw the status row of the footer (§4.2): errors render on `danger`, a
-/// success (non-error carrying the design's `✓ ` glyph) renders on the
-/// `success` token, and anything else keeps the default style. `None` leaves
-/// the row blank.
-///
-/// Called through [`footer::render_footer`] — views never draw the row
-/// themselves.
-///
-/// The green tone is derived from the glyph rather than a dedicated field:
-/// [`StatusLine`] is built by struct literal in views and tests alike, so a
-/// new flag would be a breaking change across every one of them. `✓ ` is the
-/// design's own success marker (§3.2 `success-flash`), which is why the stage /
-/// unstage / discard verdicts carry it — see [`StatusLine::is_success`].
-pub fn render_status_line(f: &mut Frame, area: Rect, status: Option<&StatusLine>) {
-    if let Some(status) = status {
-        let style = if status.is_error {
-            Style::default().fg(color::DANGER)
-        } else if status.is_success() {
-            Style::default().fg(color::SUCCESS)
-        } else {
-            Style::default()
-        };
-        f.render_widget(Paragraph::new(status.message.clone()).style(style), area);
-    }
-}
-
-/// Render the bottom status row as push/pull feedback when a remote result
-/// is present, and as the plain status line otherwise (G6).
-///
-/// The two panels that own remote feedback (repo, tags) used to duplicate
-/// this `remote_status` / `status_line` split verbatim; keeping it here also
-/// keeps the notice written while an operation runs visible beside it, see
-/// [`remote::render_remote_status`].
-pub fn render_status_or_remote(
-    f: &mut Frame,
-    area: Rect,
-    remote_status: Option<&RemoteStatus>,
-    remote_op: &str,
-    status: Option<&StatusLine>,
-) {
-    match remote_status {
-        Some(remote) => remote::render_remote_status(f, area, remote, remote_op, status),
-        None => render_status_line(f, area, status),
-    }
 }
 
 /// Panel title of the two named-item lists: `label [repo] (count)`.
@@ -437,35 +367,6 @@ fn view_right(app: &App) -> String {
     }
 }
 
-/// Footer status row for the current view (§4.2) — the one place an async
-/// result reaches the screen: local git messages and GitHub receipts alike
-/// land on this row, whether or not a remote is connected.
-///
-/// `Repo` / `Tags` / `Commit` and every receipt tab own remote feedback, so
-/// they carry the remote triple and label it with their own operation name;
-/// the rest (dashboard / branches / history / config / diffs) take the plain
-/// status line. No panel reads these fields any more (§4.1).
-pub(crate) fn view_status(app: &App) -> StatusRow<'_> {
-    match app.view {
-        View::Repo | View::Tags | View::Commit => StatusRow::new(
-            app.status.as_ref(),
-            app.remote_status.as_ref(),
-            app.remote_op,
-        ),
-        View::Pulls
-        | View::PullDetail
-        | View::Issues
-        | View::IssueDetail
-        | View::Checks
-        | View::Notifications => StatusRow::new(
-            app.status.as_ref(),
-            app.remote_status.as_ref(),
-            app.receipt_op_label(),
-        ),
-        _ => StatusRow::plain(app.status.as_ref()),
-    }
-}
-
 /// Footer hint row for the current view (§2.3).
 ///
 /// Views build one through their exported `{view}_hints(..)` exporter via this
@@ -715,6 +616,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::git::{BranchInfo, FileEntry, FileState};
+    use crate::ui::status::{RemoteStatus, StatusLine};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::fs;

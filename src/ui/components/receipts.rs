@@ -185,11 +185,7 @@ fn render_rows(
     let mut state = ListState::default();
     state.select(list_cursor(selected, rows.len()));
     // The shell is already drawn, so the list carries only the §3.1 cursor.
-    f.render_stateful_widget(
-        crate::ui::with_cursor(List::new(rows), true),
-        inner,
-        &mut state,
-    );
+    f.render_stateful_widget(super::with_cursor(List::new(rows), true), inner, &mut state);
 }
 
 /// One `loading` / `empty` / `error` / `ready` panel body in the shared
@@ -358,7 +354,7 @@ pub(crate) fn draw_receipt_frame(
     show_enter: bool,
     content: impl FnOnce(&mut Frame, Rect),
 ) {
-    let status = crate::ui::view_status(app);
+    let status = super::view_status(app);
     let hints = receipt_hints(show_enter, app.github_state.kind());
     super::footer::draw_frame(f, status, &hints, content);
 }
