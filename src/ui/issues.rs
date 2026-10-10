@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, ListItem, Paragraph, Wrap},
+    widgets::{ListItem, Paragraph},
     Frame,
 };
 
@@ -12,11 +12,9 @@ use crate::app::App;
 use crate::platform::{IssueDetail, IssueSummary};
 use crate::ui::components::theme::color;
 
-use super::pulls::{meta_budget, panel_title, state_style, META_GAP};
+use super::pulls::{body_pane, meta_budget, receipt_detail_gate, state_style, META_GAP};
 use crate::ui::components::cells;
-use crate::ui::components::receipts::{
-    render_disconnected, render_load_error, render_receipts_list, ReceiptPanel,
-};
+use crate::ui::components::receipts::{render_receipts_list, ReceiptPanel};
 
 /// Empty-state copy: no open issues. Zero rows is a valid state — a failed load
 /// paints the panel's `error` state.
@@ -45,54 +43,28 @@ const ISSUE_DETAIL_PLACEHOLDER: &str = "—（暂无 Issue 详情）";
 
 /// Render the selected issue's detail (summary head + wrapped body).
 ///
-/// Mirrors the pull detail panel (`render_pull_detail`): a disconnected gate
-/// while the GitHub client is not ready, the placeholder while the detail
-/// payload has not landed, then a bordered shell split into a summary head
-/// (identification + metadata) and a soft-wrapped body. Issues carry no
-/// check sub-list, so there is no third pane.
+/// Mirrors the pull detail panel (`render_pull_detail`) through the shared
+/// [`receipt_detail_gate`]: a disconnected gate while the GitHub client is not
+/// ready, the placeholder while the detail payload has not landed, then a
+/// bordered shell split into a summary head (identification + metadata) and a
+/// soft-wrapped body. Issues carry no check sub-list, so there is no third
+/// pane.
 pub fn render_issue_detail(f: &mut Frame, content: Rect, app: &App) {
-    if let Some(message) = app.load_error.as_deref() {
-        render_load_error(
-            f,
-            content,
-            &panel_title(
-                "Issue 详情",
-                app.github_state.owner(),
-                app.github_state.repo(),
-            ),
-            message,
-        );
-        return;
-    }
-
-    if !app.github_state.connected() {
-        render_disconnected(f, content, "Issue 详情", app.github_state.kind(), app);
-        return;
-    }
-
-    let block = Block::default()
-        .title(panel_title(
-            "Issue 详情",
-            app.github_state.owner(),
-            app.github_state.repo(),
-        ))
-        .borders(Borders::ALL);
-
-    let Some(detail) = app.github_state.issue_detail.as_ref() else {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                ISSUE_DETAIL_PLACEHOLDER,
-                Style::default().fg(color::FG_MUTED),
-            ))
-            .block(block),
-            content,
-        );
-        return;
-    };
-
-    let inner = block.inner(content);
-    f.render_widget(block, content);
-    render_detail_panes(f, detail, inner);
+    receipt_detail_gate(
+        f,
+        content,
+        app,
+        "Issue 详情",
+        ISSUE_DETAIL_PLACEHOLDER,
+        |f, inner| {
+            let detail = app
+                .github_state
+                .issue_detail
+                .as_ref()
+                .expect("detail gate only proceeds when the payload landed");
+            render_detail_panes(f, detail, inner);
+        },
+    );
 }
 
 /// Split the issue detail shell into its two panes — the summary head and the
@@ -119,21 +91,7 @@ fn render_detail_panes(f: &mut Frame, detail: &IssueDetail, inner: Rect) {
 /// trimming the leading whitespace markdown relies on; an empty body renders
 /// the empty-state copy instead of a blank pane.
 fn body_paragraph(detail: &IssueDetail) -> Paragraph<'static> {
-    let body: Vec<Line> = if detail.body.trim().is_empty() {
-        vec![Line::from(Span::styled(
-            "（无正文）",
-            Style::default().fg(color::FG_MUTED),
-        ))]
-    } else {
-        detail
-            .body
-            .lines()
-            .map(|l| Line::from(l.to_string()))
-            .collect()
-    };
-    Paragraph::new(body)
-        .block(Block::default().title("正文").borders(Borders::ALL))
-        .wrap(Wrap { trim: false })
+    body_pane(&detail.body, "正文", "（无正文）")
 }
 
 /// Summary head of the issue detail: `#N title (state)` over a dark meta line

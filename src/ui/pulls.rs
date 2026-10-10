@@ -218,44 +218,86 @@ fn pull_item(pr: &PrSummary, width: usize) -> ListItem<'static> {
 /// Render the detail of the highlighted pull request: the bordered shell,
 /// the placeholder while its payload has not arrived, and the three panes.
 pub fn render_pull_detail(f: &mut Frame, content: Rect, app: &App) {
+    receipt_detail_gate(
+        f,
+        content,
+        app,
+        "PR 详情",
+        DETAIL_PLACEHOLDER,
+        |f, inner| {
+            let detail = app
+                .github_state
+                .detail
+                .as_ref()
+                .expect("detail panel gate only proceeds when the payload landed");
+            render_detail_panes(f, detail, inner, app.github_state.kind());
+        },
+    );
+}
+
+/// The four gates every receipt-detail panel shares (B4-06): a failed load
+/// paints the panel's `error` state, a disconnected client its own state, a
+/// payload that has not landed the placeholder — and only then the bordered
+/// shell, drawn around `body`.
+///
+/// Returns whether `body` ran. The order is the §4.3 rule: a load failure is a
+/// panel state, not a status-row message, and it outranks the "not connected"
+/// and "no payload yet" states.
+///
+/// `placeholder` is the copy this panel shows while loading, and the returned
+/// `bool` lets each caller keep its own pane layout — a pull detail splits
+/// into three panes, an issue detail into two.
+///
+/// The payload check is "neither kind of detail landed" because the two panels
+/// read different fields of the same [`App`]; each closure re-reads its own
+/// field and the one it needs is guaranteed present by that point.
+pub(crate) fn receipt_detail_gate(
+    f: &mut Frame,
+    content: Rect,
+    app: &App,
+    label: &str,
+    placeholder: &str,
+    body: impl FnOnce(&mut Frame, Rect),
+) -> bool {
     if let Some(message) = app.load_error.as_deref() {
         render_load_error(
             f,
             content,
-            &panel_title("PR 详情", app.github_state.owner(), app.github_state.repo()),
+            &panel_title(label, app.github_state.owner(), app.github_state.repo()),
             message,
         );
-        return;
+        return false;
     }
 
     if !app.github_state.connected() {
-        render_disconnected(f, content, "PR 详情", app.github_state.kind(), app);
-        return;
+        render_disconnected(f, content, label, app.github_state.kind(), app);
+        return false;
     }
 
     let block = Block::default()
         .title(panel_title(
-            "PR 详情",
+            label,
             app.github_state.owner(),
             app.github_state.repo(),
         ))
         .borders(Borders::ALL);
 
-    let Some(detail) = app.github_state.detail.as_ref() else {
+    if app.github_state.detail.is_none() && app.github_state.issue_detail.is_none() {
         f.render_widget(
             Paragraph::new(Span::styled(
-                DETAIL_PLACEHOLDER,
+                placeholder,
                 Style::default().fg(color::FG_MUTED),
             ))
             .block(block),
             content,
         );
-        return;
-    };
+        return false;
+    }
 
     let inner = block.inner(content);
     f.render_widget(block, content);
-    render_detail_panes(f, detail, inner, app.github_state.kind());
+    body(f, inner);
+    true
 }
 
 /// Split the detail shell into its three panes — summary head, wrapped
@@ -286,28 +328,32 @@ fn render_detail_panes(
         Paragraph::new(summary_lines(detail, panes[0].width as usize, kind)),
         panes[0],
     );
-    f.render_widget(body_paragraph(detail), panes[1]);
+    f.render_widget(body_pane(&detail.body, "描述", "（无描述）"), panes[1]);
     render_checks_pane(f, detail, panes[2]);
 }
 
-/// The pull's markdown body inside its `描述` block, soft-wrapped without
-/// trimming the leading whitespace markdown relies on; an empty body renders
-/// the empty-state copy instead of a blank pane.
-fn body_paragraph(detail: &PrDetail) -> Paragraph<'static> {
-    let body: Vec<Line> = if detail.body.trim().is_empty() {
+/// A detail pane's markdown body inside its titled block, soft-wrapped
+/// without trimming the leading whitespace markdown relies on; an empty body
+/// renders the empty-state copy instead of a blank pane.
+///
+/// The two detail panels word the block differently (`描述` / `正文`, and the
+/// matching empty copy), so the label and its empty copy are the caller's —
+/// everything else, the wrap and the muted empty copy, is shared (B4-06).
+pub(crate) fn body_pane(body: &str, label: &str, empty_copy: &str) -> Paragraph<'static> {
+    let lines: Vec<Line> = if body.trim().is_empty() {
         vec![Line::from(Span::styled(
-            "（无描述）",
+            empty_copy.to_string(),
             Style::default().fg(color::FG_MUTED),
         ))]
     } else {
-        detail
-            .body
-            .lines()
-            .map(|l| Line::from(l.to_string()))
-            .collect()
+        body.lines().map(|l| Line::from(l.to_string())).collect()
     };
-    Paragraph::new(body)
-        .block(Block::default().title("描述").borders(Borders::ALL))
+    Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(label.to_string())
+                .borders(Borders::ALL),
+        )
         .wrap(Wrap { trim: false })
 }
 
