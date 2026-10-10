@@ -448,17 +448,23 @@ fn render_batch_log(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
 }
 
 /// The dashboard's `empty` state (§3.2): the title, one line of why it is
-/// empty, and the key that fills it — the panel's own `暂无仓库` copy over the
-/// configuration entry point the hint row already advertises as `c`.
+/// empty, and the key that fills it.
+///
+/// The copy is §6.1:288 verbatim — `还没有仓库` + `按 n 添加扫描目录，或按
+/// ? 查看帮助` — and the action hint names `n`, the same key the hint row's
+/// view segment advertises (`⏎ 进入仓库  n 添加目录`). It used to advertise
+/// `c`, which the dashboard has no binding for: `l/f/b/c` were dropped as
+/// stale dispatch surfaces (§6.1 KEYS), so the empty state pointed at a key
+/// that did nothing — a §2.3 lie of the same shape as the `P` pull key (B4-09).
 fn render_empty_state(f: &mut Frame, area: Rect, focused: bool) {
     state_panel::render_state_panel_with_focus(
         f,
         area,
         &dashboard_title(0),
         &state_panel::empty_state(
-            "暂无仓库",
-            "按 c 管理扫描目录，或按 ? 查看帮助",
-            Some(super::hint("c", "管理扫描目录")),
+            "还没有仓库",
+            "按 n 添加扫描目录，或按 ? 查看帮助",
+            Some(super::hint("n", "添加扫描目录")),
         ),
         focused,
     );
@@ -750,11 +756,12 @@ mod tests {
     }
 
     /// §3.2: the dashboard's `empty` state is the three-part shape — the
-    /// title, one line of description and the action that fills it. The
-    /// assertion is on the copy plus the action, not on the old one-liner's
-    /// em-dash phrasing, which the three-part shape replaces.
+    /// title, one line of description and the action that fills it, all three
+    /// verbatim from DESIGN §6.1:288. The negative assertion is the point of
+    /// this test: `c` was advertised here while the dashboard binds no `c`, so
+    /// an empty dashboard pointed at a key that did nothing (B4-09).
     #[test]
-    fn render_empty_repos_shows_config_hint_and_title() {
+    fn render_empty_repos_shows_the_design_copy_and_no_dead_key() {
         let mut list_state = ListState::default();
         let text = render_to_text(&mut DashboardState {
             repos: &[],
@@ -767,16 +774,21 @@ mod tests {
         });
         let compact = compact(&text);
         assert!(
-            compact.contains("暂无仓库"),
+            compact.contains("还没有仓库"),
             "missing empty-state title: {compact}"
         );
         assert!(
-            compact.contains("按c管理扫描目录，或按?查看帮助"),
+            compact.contains("按n添加扫描目录，或按?查看帮助"),
             "missing empty-state description: {compact}"
         );
         assert!(
-            compact.contains("c管理扫描目录"),
+            compact.contains("n添加扫描目录"),
             "missing empty-state action: {compact}"
+        );
+        assert!(
+            !compact.contains("按c管理扫描目录"),
+            "empty state advertises `c`, which the dashboard does not bind \
+             (§2.3): {compact}"
         );
         assert!(
             compact.contains("GitPulse仓库状态(0)"),
