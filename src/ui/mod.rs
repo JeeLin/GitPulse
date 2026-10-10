@@ -466,21 +466,31 @@ fn render_dashboard_view(f: &mut Frame, content: Rect, app: &mut App) {
     dashboard::render_dashboard(f, content, &mut state);
 }
 
-/// Repo arm of [`render`]: the file list plus its inline diff preview, plus
-/// the discard confirmation overlay when it is open.
-fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
-    let sel = app.file_state.selected();
-    let focused = app.panel_is_focused(PanelFocus::Primary);
-    let focused_preview = app.panel_is_focused(PanelFocus::Preview);
-    let confirm_file = if app.show_discard_confirm {
-        sel.and_then(|i| app.file_entries.get(i))
+/// The [`repo::RepoState`] both workspace arms draw (B4-05): the file list,
+/// its inline diff preview and the panel focus / load state that go with them.
+///
+/// The repo and commit arms differ in exactly one thing — whether the discard
+/// confirmation is open — so it is the only parameter: the commit arm sits on
+/// top of the repo view and owns the file mutations, hence no discard overlay
+/// there. Everything else is read once, here, so the two arms cannot drift
+/// apart the way two field-by-field copies did.
+fn repo_state(app: &mut App, allow_discard: bool) -> repo::RepoState<'_> {
+    let show_discard_confirm = allow_discard && app.show_discard_confirm;
+    let confirm_file = if show_discard_confirm {
+        app.file_state
+            .selected()
+            .and_then(|i| app.file_entries.get(i))
     } else {
         None
     };
-    let state = repo::RepoState {
+    // Read before the struct literal takes `&mut app.file_state`, so the
+    // focus queries do not compete with the cursor borrow.
+    let focused = app.panel_is_focused(PanelFocus::Primary);
+    let focused_preview = app.panel_is_focused(PanelFocus::Preview);
+    repo::RepoState {
         entries: &app.file_entries,
         list_state: &mut app.file_state,
-        show_discard_confirm: app.show_discard_confirm,
+        show_discard_confirm,
         confirm_file,
         load_error: app.load_error.as_deref(),
         focused,
@@ -488,28 +498,19 @@ fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
         preview_content: app.preview_diff.as_deref(),
         preview_scroll: app.preview_scroll,
         focused_preview,
-    };
-    repo::render_repo(f, content, state);
+    }
+}
+
+/// Repo arm of [`render`]: the file list plus its inline diff preview, plus
+/// the discard confirmation overlay when it is open.
+fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
+    repo::render_repo(f, content, repo_state(app, true));
 }
 
 /// Commit arm of [`render`]: repo view as background, commit input popup on
 /// top.
 fn render_commit_view(f: &mut Frame, content: Rect, app: &mut App) {
-    let focused = app.panel_is_focused(PanelFocus::Primary);
-    let focused_preview = app.panel_is_focused(PanelFocus::Preview);
-    let state = repo::RepoState {
-        entries: &app.file_entries,
-        list_state: &mut app.file_state,
-        show_discard_confirm: false,
-        confirm_file: None,
-        load_error: app.load_error.as_deref(),
-        focused,
-        line_counts: &app.file_line_counts,
-        preview_content: app.preview_diff.as_deref(),
-        preview_scroll: app.preview_scroll,
-        focused_preview,
-    };
-    repo::render_repo(f, content, state);
+    repo::render_repo(f, content, repo_state(app, false));
     commit::render_commit_popup(f, &app.commit_message);
 }
 
