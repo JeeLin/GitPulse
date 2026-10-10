@@ -11,7 +11,7 @@ use ratatui::{
 use crate::git::{CommitDetail, CommitRow, RefKind};
 
 use super::components::state_panel::{self, PanelState};
-use super::{hint, named_title, pulls};
+use super::{commit_detail, hint, named_title, pulls};
 use crate::ui::components::cells;
 use crate::ui::components::footer::{hints as join_hints, HintRow};
 use crate::ui::components::theme::{color, role, spacing, width as theme_width};
@@ -331,7 +331,7 @@ fn render_detail(f: &mut Frame, area: Rect, state: &HistoryRender<'_>) {
                 lines.push(Line::from(""));
             }
             lines.push(Line::from(Span::styled(
-                format!("变更文件 ({})", detail.files.len()),
+                commit_detail::changed_file_title(Some(detail)),
                 Style::default().fg(color::INFO),
             )));
             for file in &detail.files {

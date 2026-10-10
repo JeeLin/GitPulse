@@ -124,7 +124,12 @@ fn render_commit_detail_content(f: &mut Frame, area: Rect, app: &mut crate::app:
 }
 
 /// Title of the changed-file region: the §6.5 `变更文件 (N)` header.
-fn changed_file_title(detail: Option<&CommitDetail>) -> String {
+///
+/// Shared with [`crate::ui::history`], whose single-region detail pane (§6.2.3)
+/// prints the same header inline. Only the *formatting* is shared: the §6.5
+/// split here keeps the header in its own region title and leaves the body to
+/// paths alone, while `history` inlines both — see `render_commit_detail_content`.
+pub(crate) fn changed_file_title(detail: Option<&CommitDetail>) -> String {
     let count = detail.map_or(0, |d| d.files.len());
     format!("变更文件 ({count})")
 }
