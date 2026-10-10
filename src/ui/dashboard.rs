@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, ListItem, ListState, Paragraph},
     Frame,
 };
 
@@ -276,13 +276,14 @@ fn render_repo_list(f: &mut Frame, area: Rect, state: &mut DashboardState<'_>) {
         .map(|repo| ListItem::new(repo_row(repo, budget)))
         .collect();
 
-    let block = Block::default()
-        .title(dashboard_title(state.repos.len()))
-        .borders(Borders::ALL)
-        .border_style(role::border(state.focused));
-
-    let list = super::with_cursor(List::new(items).block(block), state.focused);
-    f.render_stateful_widget(list, area, state.list_state);
+    super::render_list_panel(
+        f,
+        area,
+        dashboard_title(state.repos.len()),
+        items,
+        state.focused,
+        state.list_state,
+    );
 }
 
 /// One repository row fitted to `budget` cells (§5.4). The High columns (name,

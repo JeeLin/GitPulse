@@ -121,12 +121,33 @@ pub(crate) fn render_named_list(
         return;
     }
 
+    render_list_panel(f, area, title, items, meta.focused, list_state);
+}
+
+/// The ready-state list shell every list panel draws (B4-08): titled border,
+/// §3.1 cursor, stateful widget — the three lines that were re-typed verbatim
+/// by [`render_named_list`], the dashboard repo list and the config dir list.
+///
+/// Only the title and the rows are per-panel; the border role comes from
+/// `focused` alone, so a panel cannot draw a list that contradicts §3.1.
+///
+/// The §3.2 non-ready states stay with the caller: emptiness is a panel's own
+/// judgement (which copy it shows), and a failed load belongs to
+/// [`state_panel`] — this shell is the `ready` body only.
+pub(crate) fn render_list_panel(
+    f: &mut Frame,
+    area: Rect,
+    title: String,
+    items: Vec<ListItem<'static>>,
+    focused: bool,
+    list_state: &mut ListState,
+) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(theme::role::border(meta.focused));
+        .border_style(theme::role::border(focused));
 
-    let list = with_cursor(List::new(items).block(block), meta.focused);
+    let list = with_cursor(List::new(items).block(block), focused);
     f.render_stateful_widget(list, area, list_state);
 }
 

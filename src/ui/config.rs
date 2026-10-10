@@ -272,13 +272,7 @@ fn render_dir_list(f: &mut Frame, area: Rect, state: &mut ConfigState<'_>) {
         .map(|dir| ListItem::new(Line::raw(show_path(dir))))
         .collect();
 
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(role::border(state.focused));
-
-    let list = super::with_cursor(List::new(items).block(block), state.focused);
-    f.render_stateful_widget(list, area, state.list_state);
+    super::render_list_panel(f, area, title, items, state.focused, state.list_state);
 }
 
 #[cfg(test)]
