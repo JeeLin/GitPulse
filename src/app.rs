@@ -3985,6 +3985,7 @@ mod tests {
                 ahead: 0,
                 behind: 0,
                 last_commit: Default::default(),
+                remote: None,
             })
             .collect();
         app
@@ -6962,6 +6963,7 @@ mod tests {
             ahead: 0,
             behind: 0,
             last_commit: Default::default(),
+            remote: None,
         });
         app.current_repo = Some(0);
         let (tx, rx) = mpsc::unbounded_channel();

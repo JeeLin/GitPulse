@@ -1401,6 +1401,7 @@ mod tests {
             ahead: 0,
             behind: 0,
             last_commit: Default::default(),
+            remote: None,
         }];
         app.dashboard_state.select(Some(0));
 
@@ -1553,6 +1554,7 @@ mod tests {
             ahead: 0,
             behind: 0,
             last_commit: Default::default(),
+            remote: None,
         }];
         app.current_repo = Some(0);
 

@@ -112,6 +112,7 @@ mod tests {
             ahead: 0,
             behind: 0,
             last_commit: Default::default(),
+            remote: None,
         }
     }
 

@@ -50,6 +50,13 @@ pub struct RepoInfo {
     pub behind: usize,
     /// Most recent commit.
     pub last_commit: CommitInfo,
+    /// Fetch URL of the primary remote (`origin` → `upstream` → first), if any.
+    ///
+    /// `None` for a local-only worktree with no configured remote; the dashboard
+    /// renders this as "no remote" rather than the row becoming a load error
+    /// (sub-task 3, checkpoint ③). Populated in [`query_status`] by reusing the
+    /// already-open `Repository` — no extra `Repository::open`.
+    pub remote: Option<String>,
 }
 
 /// Query the current status of a git repository.
@@ -60,6 +67,7 @@ pub fn query_status(repo_path: &Path) -> Result<RepoInfo> {
     let dirty = compute_dirty_stats(&repo)?;
     let (ahead, behind) = compute_ahead_behind(&repo)?;
     let last_commit = resolve_last_commit(&repo)?;
+    let remote = resolve_remote(&repo);
 
     let name = repo_display_name(repo_path);
 
@@ -71,7 +79,38 @@ pub fn query_status(repo_path: &Path) -> Result<RepoInfo> {
         ahead,
         behind,
         last_commit,
+        remote,
     })
+}
+
+/// Fetch URL of the repository's primary remote (`origin` → `upstream` → first
+/// configured remote), if configured and valid UTF-8.
+///
+/// Returns `None` (rather than erroring) when the repository has no remote or
+/// its fetch URL is not valid UTF-8 — a local worktree's normal state is "no
+/// remote", and the dashboard must still render that row. This deliberately does
+/// *not* reuse the `remote_url` helper, which bails on a remote-less repo
+/// (`bail!("未配置远端")`); the dashboard's steady state is precisely the case
+/// that has to surface as `None` (sub-task 3, checkpoint ③). Reuses the
+/// already-open `Repository` handle, so there is no additional `Repository::open`.
+fn resolve_remote(repo: &Repository) -> Option<String> {
+    let remotes = repo.remotes().ok()?;
+    // Walk by index (V5: `iter().flatten()` would silently drop non-UTF-8
+    // remote names, making a repo look remote-less or picking a wrong one).
+    let mut names: Vec<&str> = Vec::with_capacity(remotes.len());
+    for index in 0..remotes.len() {
+        if let Some(name) = remotes.get(index) {
+            names.push(name);
+        }
+    }
+    // Priority: origin → upstream → first configured remote.
+    let name = names
+        .iter()
+        .find(|n| **n == "origin")
+        .or_else(|| names.iter().find(|n| **n == "upstream"))
+        .or_else(|| names.first())?;
+    let remote = repo.find_remote(name).ok()?;
+    remote.url().map(str::to_string)
 }
 
 /// SHA-1 of the current `HEAD` commit (full 40 hex), used by the Checks tab to
@@ -230,5 +269,57 @@ mod tests {
     fn head_sha_missing_repo_errors_readably() {
         let err = head_sha(Path::new("/nonexistent/gitpulse")).unwrap_err();
         assert!(err.to_string().contains("打开仓库失败"));
+    }
+
+    /// Empty temp git repo under a unique path (used by remote-fixture tests).
+    fn temp_repo(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("gitpulse-status-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn query_status_remote_resolution() {
+        let dir = temp_repo("remote");
+        let repo = Repository::init(&dir).unwrap();
+
+        // No remote configured: the row must still render — `query_status`
+        // returns Ok and surfaces `None`, never bailing like `remote_url` would
+        // (sub-task 3 regression hook).
+        let info = query_status(&dir).unwrap();
+        assert_eq!(info.remote, None);
+
+        // Priority: origin → upstream → first configured remote.
+        repo.remote("origin", "https://github.com/o/origin.git")
+            .unwrap();
+        repo.remote("upstream", "https://github.com/o/upstream.git")
+            .unwrap();
+        repo.remote("fork", "https://github.com/o/fork.git")
+            .unwrap();
+        let info = query_status(&dir).unwrap();
+        assert_eq!(
+            info.remote.as_deref(),
+            Some("https://github.com/o/origin.git")
+        );
+
+        // origin removed entirely → upstream wins.
+        repo.remote_delete("origin").unwrap();
+        let info = query_status(&dir).unwrap();
+        assert_eq!(
+            info.remote.as_deref(),
+            Some("https://github.com/o/upstream.git")
+        );
+
+        // no origin/upstream → first configured remote wins.
+        repo.remote_delete("upstream").unwrap();
+        let info = query_status(&dir).unwrap();
+        assert_eq!(
+            info.remote.as_deref(),
+            Some("https://github.com/o/fork.git")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
