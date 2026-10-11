@@ -84,6 +84,21 @@ pub(crate) fn meta_budget(meta: &str, width: usize) -> usize {
     }
 }
 
+/// Cells the head and the trailing meta part each get in a `width`-wide row:
+/// the meta keeps whatever [`meta_budget`] grants it, the head keeps what is
+/// left once the gap between them is paid for, and a meta that could not be
+/// squeezed in (`budget == 0`) is dropped so the head keeps the full width.
+///
+/// Every receipt row splits its width the same way — the pull and issue lists,
+/// the issue detail summary and the notification list — so the arithmetic lives
+/// here once and the rows cannot drift apart.
+pub(crate) fn head_meta_widths(meta: &str, width: usize) -> (usize, usize) {
+    match meta_budget(meta, width) {
+        0 => (width, 0),
+        budget => (width - budget - cells::width(META_GAP), budget),
+    }
+}
+
 /// Palette of a pull/issue state: open reads success, closed danger, any
 /// other value (GitHub keeps inventing them) falls back to muted.
 pub(crate) fn state_style(state: &str) -> Style {
@@ -642,6 +657,25 @@ mod tests {
         assert_eq!(meta_budget(&"m".repeat(40), 20), 0);
         // Empty meta never claims cells.
         assert_eq!(meta_budget("", 40), 0);
+    }
+
+    #[test]
+    fn head_meta_widths_split_the_row_the_way_every_receipt_row_does() {
+        // Budget > 0: the meta takes exactly its budget, the head keeps the
+        // rest minus the gap, and head + gap + meta still fills the row.
+        assert_eq!(head_meta_widths("alice  2026", 40), (27, 11));
+        assert_eq!(head_meta_widths(&"m".repeat(200), 72), (46, 24));
+        for width in 24..=120 {
+            let (head, meta) = head_meta_widths(&"m".repeat(200), width);
+            if meta > 0 {
+                assert_eq!(head + cells::width(META_GAP) + meta, width, "width {width}");
+            }
+        }
+        // Budget == 0: the meta is dropped whole and the head keeps the full
+        // row — no gap is paid for a part that is not drawn.
+        assert_eq!(head_meta_widths(&"m".repeat(40), 20), (20, 0));
+        assert_eq!(head_meta_widths("", 40), (40, 0));
+        assert_eq!(head_meta_widths(&"m".repeat(40), 0), (0, 0));
     }
 
     /// U4: a GitLab/Gitea remote must reach the body, not just the helper.

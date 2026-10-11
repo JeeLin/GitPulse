@@ -12,7 +12,7 @@ use crate::app::App;
 use crate::platform::{IssueDetail, IssueSummary};
 use crate::ui::components::theme::color;
 
-use super::pulls::{body_pane, meta_budget, receipt_detail_gate, state_style, META_GAP};
+use super::pulls::{body_pane, head_meta_widths, receipt_detail_gate, state_style, META_GAP};
 use crate::ui::components::cells;
 use crate::ui::components::receipts::{render_receipts_list, ReceiptPanel};
 
@@ -96,10 +96,10 @@ fn body_paragraph(detail: &IssueDetail) -> Paragraph<'static> {
 
 /// Summary head of the issue detail: `#N title (state)` over a dark meta line
 /// of `author  assignee  labels  updated_at`. Each line is fitted to the pane
-/// the way the list row is — `meta_budget` bounds the meta, `ellipsize` cuts
-/// what does not fit, `cells` measures the fixed head — so a long label list
-/// never pushes the identifying `#N title` off the row: identification wins
-/// over metadata, the same trade-off `issue_item` makes.
+/// the way the list row is — `head_meta_widths` bounds the meta,
+/// `ellipsize` cuts what does not fit, `cells` measures the fixed head — so a
+/// long label list never pushes the identifying `#N title` off the row:
+/// identification wins over metadata, the same trade-off `issue_item` makes.
 fn summary_lines(issue: &IssueSummary, width: usize) -> Vec<Line<'static>> {
     let number = format!("#{} ", issue.number);
     let state_tag = format!(" ({})", issue.state);
@@ -119,12 +119,7 @@ fn summary_lines(issue: &IssueSummary, width: usize) -> Vec<Line<'static>> {
     // Same head/meta budget as `issue_item`: the meta keeps the budget it may
     // occupy, the head keeps what remains, and a meta that can't be squeezed
     // in (budget == 0) is dropped — the head then takes the full width.
-    let budget = meta_budget(&meta, width);
-    let (head_width, meta_width) = if budget > 0 {
-        (width - budget - cells::width(META_GAP), budget)
-    } else {
-        (width, 0)
-    };
+    let (head_width, meta_width) = head_meta_widths(&meta, width);
     let fixed = cells::width(&number) + cells::width(&state_tag);
 
     let head = Line::from(vec![
@@ -136,7 +131,7 @@ fn summary_lines(issue: &IssueSummary, width: usize) -> Vec<Line<'static>> {
         Span::styled(state_tag, state_style(&issue.state)),
     ]);
     let mut lines = vec![head];
-    if budget > 0 {
+    if meta_width > 0 {
         lines.push(Line::from(Span::styled(
             cells::ellipsize(&meta, meta_width),
             Style::default().fg(color::FG_MUTED),
@@ -162,12 +157,7 @@ fn issue_item(issue: &IssueSummary, width: usize) -> ListItem<'static> {
         )
     };
 
-    let budget = meta_budget(&meta, width);
-    let head_width = if budget > 0 {
-        width - budget - cells::width(META_GAP)
-    } else {
-        width
-    };
+    let (head_width, meta_width) = head_meta_widths(&meta, width);
     let fixed = cells::width(&number) + cells::width(&state_tag);
 
     let mut spans = vec![
@@ -178,9 +168,9 @@ fn issue_item(issue: &IssueSummary, width: usize) -> ListItem<'static> {
         )),
         Span::styled(state_tag, state_style(&issue.state)),
     ];
-    if budget > 0 {
+    if meta_width > 0 {
         spans.push(Span::styled(
-            format!("{META_GAP}{}", cells::ellipsize(&meta, budget)),
+            format!("{META_GAP}{}", cells::ellipsize(&meta, meta_width)),
             Style::default().fg(color::FG_MUTED),
         ));
     }

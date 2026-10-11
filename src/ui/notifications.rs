@@ -13,7 +13,7 @@ use crate::app::App;
 use crate::platform::{notifications_label, NotificationSummary};
 use crate::ui::components::theme::color;
 
-use super::pulls::{meta_budget, META_GAP};
+use super::pulls::{head_meta_widths, META_GAP};
 use crate::ui::components::cells;
 use crate::ui::components::receipts::{render_receipts_list, ReceiptPanel};
 
@@ -57,12 +57,7 @@ fn notification_item(note: &NotificationSummary, width: usize) -> ListItem<'stat
     let type_tag = format!(" [{}]", note.subject_type);
     let meta = format!("{}  {}  {}", note.reason, note.repo, note.updated_at);
 
-    let budget = meta_budget(&meta, width);
-    let head_width = if budget > 0 {
-        width - budget - cells::width(META_GAP)
-    } else {
-        width
-    };
+    let (head_width, meta_width) = head_meta_widths(&meta, width);
     let fixed = cells::width(marker) + cells::width(&type_tag);
     let title_style = if note.unread {
         Style::default().add_modifier(Modifier::BOLD)
@@ -85,9 +80,9 @@ fn notification_item(note: &NotificationSummary, width: usize) -> ListItem<'stat
         ),
         Span::styled(type_tag, Style::default().fg(color::INFO)),
     ];
-    if budget > 0 {
+    if meta_width > 0 {
         spans.push(Span::styled(
-            format!("{META_GAP}{}", cells::ellipsize(&meta, budget)),
+            format!("{META_GAP}{}", cells::ellipsize(&meta, meta_width)),
             Style::default().fg(color::FG_MUTED),
         ));
     }
