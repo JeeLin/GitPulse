@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use git2::Repository;
 
+use crate::platform::remote::PlatformKind;
+
 use super::{repo_display_name, short_id, show_bytes};
 
 /// Statistics about uncommitted changes in a repository.
@@ -93,6 +95,59 @@ pub fn query_status(repo_path: &Path) -> Result<RepoInfo> {
         is_worktree: false,
         main_repo: None,
     })
+}
+
+/// Short platform label for a repository row's `远端` column (sub-task 4).
+///
+/// DESIGN §6.1's sample row renders `远端: GitHub`, so the column shows a
+/// *platform*, not a URL. The label is derived from the fetch URL's host: known
+/// forges map to their product name, any other host falls back to the host
+/// itself (an `ssh://` or `git@host:path` remote still identifies where the
+/// code lives), and a repository with no remote renders `无` rather than
+/// failing the row (checkpoint ③).
+pub fn remote_platform(url: &str) -> String {
+    let host = bare_host(url);
+    if host.is_empty() {
+        return "无".to_string();
+    }
+    match PlatformKind::from_host(&host) {
+        PlatformKind::SelfHosted => host,
+        known => known.as_str().to_string(),
+    }
+}
+
+/// The host of a fetch URL, port-free and lowercase — the shape
+/// [`PlatformKind::from_host`] compares against.
+///
+/// Handles the scp-like `git@host:owner/repo` form as well as
+/// `scheme://[user@]host[:port]/path`; anything unrecognized yields the trimmed
+/// input so the caller still has something to display.
+fn bare_host(url: &str) -> String {
+    let trimmed = url.trim();
+    // scp-like `[user@]host:path` carries no `://`, so it takes the first arm.
+    let scp = trimmed
+        .split_once("://")
+        .is_none()
+        .then(|| trimmed.split_once(':'))
+        .flatten();
+    let host_port = match scp {
+        Some((head, _path)) => head,
+        None => trimmed
+            .split_once("://")
+            .map(|(_scheme, rest)| rest.split('/').next().unwrap_or(rest))
+            .unwrap_or(trimmed),
+    };
+    let host = host_port.rsplit('@').next().unwrap_or(host_port);
+    host.split(':').next().unwrap_or(host).to_ascii_lowercase()
+}
+
+/// The dashboard's `远端` cell: the platform label, or `无` when the repository
+/// has no remote (sub-task 4).
+pub fn remote_label(repo: &RepoInfo) -> String {
+    match repo.remote.as_deref() {
+        Some(url) => remote_platform(url),
+        None => "无".to_string(),
+    }
 }
 
 /// Query status for a linked worktree, flagging identity and namespacing the
@@ -351,6 +406,41 @@ mod tests {
             info.remote.as_deref(),
             Some("https://github.com/o/fork.git")
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression hook for sub-task 4: the dashboard's `远端` column shows a
+    /// platform, not the raw URL. Falsifiable: mapping `github.com` to the
+    /// URL itself breaks the first assertion.
+    #[test]
+    fn remote_platform_labels_known_forges() {
+        assert_eq!(remote_platform("https://github.com/o/r.git"), "GitHub");
+        assert_eq!(remote_platform("git@github.com:o/r.git"), "GitHub");
+        assert_eq!(remote_platform("https://gitlab.com/o/r.git"), "GitLab");
+        assert_eq!(remote_platform("https://gitea.com/o/r.git"), "Gitea");
+        assert_eq!(remote_platform("ssh://git@gitea.com/group/r.git"), "Gitea");
+        // A host the app's own SaaS list does not own falls back to the host
+        // spelling — the row still says where the code lives, not "无".
+        assert_eq!(
+            remote_platform("https://git.internal.corp/gp/r.git"),
+            "git.internal.corp"
+        );
+        assert_eq!(remote_platform("git@10.0.0.5:group/r.git"), "10.0.0.5");
+    }
+
+    #[test]
+    fn remote_label_names_the_repo_without_a_remote() {
+        let dir = temp_repo("remote-label");
+        Repository::init(&dir).unwrap();
+        let info = query_status(&dir).unwrap();
+        assert_eq!(remote_label(&info), "无");
+
+        let repo = Repository::open(&dir).unwrap();
+        repo.remote("origin", "https://github.com/o/origin.git")
+            .unwrap();
+        let info = query_status(&dir).unwrap();
+        assert_eq!(remote_label(&info), "GitHub");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

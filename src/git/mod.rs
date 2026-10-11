@@ -31,7 +31,7 @@ pub use history::{
 };
 pub use remote::{pull, push, push_all_tags, push_tag, remote_url};
 // part of the public Git API contract (M1 subtask 3)
-pub use status::{head_sha, query_status, RepoInfo};
+pub use status::{head_sha, query_status, remote_label, RepoInfo};
 pub use tag::{create_tag, delete_tag, list_tags, TagInfo};
 
 /// Abbreviate an object id to the 7 hex characters `git log --oneline` shows.

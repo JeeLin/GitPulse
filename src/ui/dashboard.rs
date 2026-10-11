@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use crate::app::BatchLogLine;
+use crate::git;
 use crate::git::RepoInfo;
 
 use super::{hint, pulls};
@@ -199,9 +200,12 @@ fn render_preview(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
 const DIRTY_CELLS: usize = 4;
 /// Cells the ahead/behind marker holds (`4↑2`) when the row is drawn whole.
 const SYNC_CELLS: usize = 4;
-/// Cells the last-commit timestamp holds (`YYYY-MM-DD HH:MM`); the `-`
-/// placeholder for a repository without history is shorter.
-const TIME_CELLS: usize = 16;
+/// Cells the conflict-marker column holds (`⚠2`); §6.1:262 splits conflicts out
+/// of the dirty count so an unmergeable row is visible without arithmetic.
+const WARN_CELLS: usize = 4;
+/// Cells the remote-platform column holds — the longest known platform label
+/// (`Bitbucket`) plus the two-cell gap §6.1 puts before a status column.
+const REMOTE_CELLS: usize = 11;
 /// Cells the two high-priority columns reserve when the pane has room to spare
 /// (§5.4 表格列宽): name and branch identify the row, so they flex inside a floor
 /// instead of ever being dropped.
@@ -227,7 +231,10 @@ enum Priority {
     Low,
 }
 
-/// The data a repository row column renders — §6.1:262 fixes this exact set.
+/// The data a repository row column renders — the six columns of §6.1:262's
+/// sample row (`名称/分支/↑2↓0/●3/⚠1/远端: GitHub`): dirty and warning stay
+/// split (no mental arithmetic), and the timestamp is not a row column at all —
+/// it lives in the preview panel instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Column {
     /// Repository name.
@@ -238,22 +245,26 @@ enum Column {
     Dirty,
     /// Ahead / behind marker.
     Sync,
-    /// Last-commit timestamp — the lowest-priority column, dropped first.
-    Time,
+    /// Conflict count — split out of `Dirty` per §6.1:262.
+    Warn,
+    /// Fetch-remote platform (`远端: GitHub`), or `无` for a local-only repo.
+    Remote,
 }
 
 /// §5.4 column priority table for a repository row: an ordered slice of
 /// `(column, min_width, priority)` — every column's `min_width` (the cells it
 /// keeps while drawn) and its priority (whether it may be dropped when the row
 /// runs out of cells). Ordered high → low, so the renderer keeps a prefix of
-/// this slice while the row fits and cuts the tail: `Time` goes before `Sync`,
-/// `Sync` before `Dirty`, and the two High columns never go at all.
-const REPO_COLUMNS: [(Column, usize, Priority); 5] = [
+/// this slice while the row fits and cuts the tail: `Remote` goes before
+/// `Warn`, `Warn` before `Sync`, `Sync` before `Dirty`, and the two High
+/// columns never go at all.
+const REPO_COLUMNS: [(Column, usize, Priority); 6] = [
     (Column::Name, NAME_MIN, Priority::High),
     (Column::Branch, BRANCH_MIN, Priority::High),
     (Column::Dirty, DIRTY_CELLS, Priority::Low),
     (Column::Sync, SYNC_CELLS, Priority::Low),
-    (Column::Time, TIME_CELLS, Priority::Low),
+    (Column::Warn, WARN_CELLS, Priority::Low),
+    (Column::Remote, REMOTE_CELLS, Priority::Low),
 ];
 
 /// The width a `High` column grows back to whenever the pane has cells to
@@ -263,12 +274,13 @@ fn preferred_width(column: &Column) -> Option<usize> {
     match column {
         Column::Name => Some(NAME_CELLS),
         Column::Branch => Some(BRANCH_CELLS),
-        Column::Dirty | Column::Sync | Column::Time => None,
+        Column::Dirty | Column::Sync | Column::Warn | Column::Remote => None,
     }
 }
 
 /// Draw the bordered repository list: name, branch, dirty count, ahead /
-/// behind markers, and last-commit time, with the shared highlight style.
+/// behind markers, the split-out conflict count, and the remote platform
+/// (§6.1:262), with the shared highlight style.
 ///
 /// The row is budgeted by §5.4 through [`REPO_COLUMNS`]: columns are included
 /// in priority order while they fit the row's available width and dropped from
@@ -314,7 +326,20 @@ fn repo_row(repo: &RepoInfo, budget: usize) -> Line<'static> {
             Style::default()
         },
     );
-    let time_span = Span::raw(format_time(repo.last_commit.time));
+    // §6.1:262 keeps conflicts in their own `⚠` column: a row that cannot be
+    // merged must be visible without adding up the dirty count by hand.
+    let warn_span = Span::styled(
+        format!("⚠{}", repo.dirty.conflicted),
+        if repo.dirty.conflicted > 0 {
+            Style::default().fg(color::WARNING)
+        } else {
+            Style::default()
+        },
+    );
+    let remote_span = Span::styled(
+        format!("远端: {}", git::remote_label(repo)),
+        Style::default().fg(color::FG_MUTED),
+    );
     let gap = cells::width("  ");
 
     // One payload per column of [`REPO_COLUMNS`], in table order.
@@ -327,7 +352,8 @@ fn repo_row(repo: &RepoInfo, budget: usize) -> Line<'static> {
                 Style::default().fg(dirty_color),
             ),
             Column::Sync => sync_span.clone(),
-            Column::Time => time_span.clone(),
+            Column::Warn => warn_span.clone(),
+            Column::Remote => remote_span.clone(),
         }
     };
     // Cells a column costs while it is drawn whole: a High column at its
@@ -386,7 +412,7 @@ fn repo_row(repo: &RepoInfo, budget: usize) -> Line<'static> {
                 format!("{:>4}", dirty_count),
                 Style::default().fg(dirty_color),
             )),
-            Column::Sync | Column::Time => {
+            Column::Sync | Column::Warn | Column::Remote => {
                 spans.push(Span::raw("  "));
                 spans.push(payload(column));
             }
@@ -498,6 +524,61 @@ pub(crate) fn dashboard_hints() -> HintRow {
 /// the dashboard always renders UTC, so it passes a zero offset.
 fn format_time(timestamp: i64) -> String {
     crate::datetime::format_local_time(timestamp, 0)
+}
+
+/// Regression hook for sub-task 4: the repository row is §6.1:262's six
+/// columns — conflicts split out of the dirty count (`⚠`, not folded into
+/// `●`), the remote platform drawn as `远端: …`, and no timestamp column.
+/// Falsifiable: folding conflicts back into the dirty count breaks the `⚠`
+/// assertion.
+#[cfg(test)]
+mod row_set_tests {
+    use super::*;
+
+    /// A row builder like [`make_repo`], lifted to module scope so the row-set
+    /// assertions live next to the production code they pin.
+    fn row_repo() -> RepoInfo {
+        RepoInfo {
+            name: "GitPulse".to_string(),
+            path: std::path::PathBuf::from("/tmp/GitPulse"),
+            branch: "main".to_string(),
+            dirty: Default::default(),
+            ahead: 0,
+            behind: 0,
+            last_commit: Default::default(),
+            remote: Some("https://github.com/JeeLin/GitPulse.git".to_string()),
+            is_worktree: false,
+            main_repo: None,
+        }
+    }
+
+    #[test]
+    fn repo_row_shows_split_conflicts_and_the_remote_platform() {
+        let mut repo = row_repo();
+        repo.dirty.modified = 3;
+        repo.dirty.conflicted = 1;
+
+        let text = repo_row(&repo, 120).to_string();
+
+        // The dirty column counts working-tree dirt; conflicts get their own.
+        assert!(text.contains('3'), "dirty count must render: {text}");
+        assert!(
+            text.contains("⚠1"),
+            "conflicts get their own column: {text}"
+        );
+        assert!(
+            text.contains("远端: GitHub"),
+            "remote platform column: {text}"
+        );
+    }
+
+    #[test]
+    fn repo_row_renders_no_remote_for_a_local_repository() {
+        let mut repo = row_repo();
+        repo.remote = None;
+        let text = repo_row(&repo, 120).to_string();
+        assert!(text.contains("远端: 无"), "missing remote cell: {text}");
+    }
 }
 
 #[cfg(test)]

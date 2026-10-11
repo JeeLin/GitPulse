@@ -2166,8 +2166,23 @@ mod tests {
         // The whole selected row shares that background, not just the marker
         // cell — §3.1 calls for a 底色 on the cursor row. Only the panel's own
         // border glyphs are exempt: they are chrome, not cursor-row content.
+        // The trailing cell of a double-width glyph is also exempt: ratatui's
+        // own `Buffer::diff` (`to_skip = current.symbol().width() - 1`) never
+        // writes a wide glyph's tail to the backend — a real terminal paints it
+        // from the head glyph — so no test can observe its background. The band
+        // the user sees comes from the head cell, which *is* asserted here.
+        // (The `远端:` column put the first spec content with wide glyphs onto
+        // a highlighted row, which is how this was found.)
         let stray: Vec<_> = (0..buffer.area.width)
             .filter(|col| !matches!(buffer[(*col, y)].symbol(), "│" | "┌" | "┐" | "└" | "┘"))
+            .filter(|col| {
+                let left = col.checked_sub(1).map(|l| buffer[(l, y)].symbol());
+                // Skip the trailing cell of a double-width glyph: it is the
+                // second cell of the neighbor on its left, so only test it
+                // when that neighbor is itself single-width.
+                left.map(|s| crate::ui::components::cells::width(s) <= 1)
+                    .unwrap_or(true)
+            })
             .map(|col| (col, buffer[(col, y)].bg))
             .filter(|(_, bg)| *bg != color::SURFACE_ALT)
             .collect();
