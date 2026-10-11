@@ -264,9 +264,34 @@ fn funded_counts_digits(width: usize) -> usize {
     // Two cells for the state symbol, and a path that has to stay long enough
     // to identify a file before a line count is worth anything.
     const SYMBOL_CELLS: usize = 2;
-    /// Minimum cells a path must keep (§5.4): 12 is the floor a path needs to
-    /// identify a file (`src/` + a short name) before a `+N -M` counts column
-    /// is worth the width it costs — below it the column is dropped whole.
+    /// Minimum cells a path must keep (§5.4) before a `+N -M` counts column is
+    /// worth the width it costs — below it the column is dropped whole.
+    ///
+    /// The derivation, in display cells, is reproducible from the row layout
+    /// [`file_item`] draws. A row that shows *both* the shortest still
+    /// identifiable path and one-digit counts needs:
+    ///
+    /// ```text
+    /// src/            4   shortest identifiable prefix (§6.2.1 paths are repo-relative)
+    /// ab              4   shortest still-distinguishable file stem
+    /// +1 -1           6   one-digit counts column (`counts_column_cells(1)`)
+    /// gap             2   the separator between path and counts
+    /// ─────────────────
+    ///                16   path + column
+    /// ```
+    ///
+    /// 16 is too wide to demand: on an 80-column frame the repo pane is half
+    /// the terminal, so requiring 16 cells of path *plus* the two-cell symbol
+    /// would drop the counts column on ordinary paths and shrink the path on
+    /// the few that do fit. 12 is the compromise — a path stays readable
+    /// (`src/main.rs` survives 12 cells intact) while the counts column still
+    /// appears on the wide rows it is worth showing on. It is an
+    /// implementation parameter, not a design constant: §5.4 fixes the
+    /// *rule* (low-priority column disappears before the path shrinks) but
+    /// leaves this floor to the implementation, and the two assertions
+    /// `funded_counts_digits_drops_the_column_at_the_floor` /
+    /// `..._funds_one_digit_above_it` pin the resulting behaviour so the
+    /// number cannot drift unnoticed.
     const MIN_PATH_CELLS: usize = 12;
     let spare = width.saturating_sub(SYMBOL_CELLS + MIN_PATH_CELLS);
     // `counts_column_cells` is `2 * digits + 4`, so invert it and clamp at 0.
@@ -939,6 +964,64 @@ mod tests {
         assert_eq!(counts_digit_width(&counts), 3);
         let empty: [Option<(usize, usize)>; 0] = [];
         assert_eq!(counts_digit_width(&empty), 0);
+    }
+
+    /// B7-03: `MIN_PATH_CELLS`'s lower edge, pinned as a measurement instead
+    /// of a claim. At the floor (12 cells) the two-cell symbol already eats a
+    /// quarter of the row, so nothing is left to fund `counts_column_cells(1)`
+    /// and the whole `增删行数` column disappears — §5.4's "low-priority column
+    /// disappears before the path shrinks" in its strongest form.
+    #[test]
+    fn funded_counts_digits_drops_the_column_at_the_floor() {
+        assert_eq!(
+            funded_counts_digits(12),
+            0,
+            "at the 12-cell floor the counts column must vanish whole"
+        );
+        // The floor is a floor: nothing narrower may fund a digit either, and
+        // `saturating_sub` must not wrap a tiny width back up into a column.
+        for width in 0..=12 {
+            assert_eq!(
+                funded_counts_digits(width),
+                0,
+                "width {width} is at or below the floor and must fund no column"
+            );
+        }
+    }
+
+    /// B7-03: the first width that funds one digit, derived rather than
+    /// guessed: `SYMBOL_CELLS(2) + MIN_PATH_CELLS(12) + gap/column head(4) +
+    /// 2 cells per digit` = 20. One cell narrower still funds nothing, which
+    /// is what makes 12 a threshold and not a soft preference.
+    ///
+    /// Width 18 is pinned explicitly because it is the width a reader
+    /// eyeballing the derivation reaches for, and it funds *nothing*: at 18 the
+    /// floor plus the symbol already leave `18 - 14 = 4` cells, which the
+    /// column's own 4-cell head (`+`, gap, `-`, gap) consumes before a single
+    /// digit fits. Funding a digit at 18 would need `MIN_PATH_CELLS = 10`,
+    /// which would shorten the shortest path the floor is there to protect —
+    /// so 20, not 18, is the real edge and this assertion says so.
+    #[test]
+    fn funded_counts_digits_funds_one_digit_above_the_floor() {
+        assert_eq!(
+            funded_counts_digits(18),
+            0,
+            "18 cells buys the column head only, not a digit"
+        );
+        assert_eq!(
+            funded_counts_digits(19),
+            0,
+            "19 cells is one short of a one-digit column"
+        );
+        assert_eq!(
+            funded_counts_digits(20),
+            1,
+            "20 cells funds exactly one digit of the counts column"
+        );
+        // Every further pair of cells buys one more digit, monotonically.
+        assert_eq!(funded_counts_digits(21), 1);
+        assert_eq!(funded_counts_digits(22), 2);
+        assert_eq!(funded_counts_digits(30), 6);
     }
 
     /// §5.4: the preview opens once the frame funds both floors and hides
