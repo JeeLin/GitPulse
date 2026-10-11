@@ -37,6 +37,13 @@ pub struct DashboardState<'a> {
     /// the border color and whether the list draws the `▌` / `surface_alt`
     /// cursor.
     pub focused: bool,
+    /// Whether the preview panel holds the screen's focus (§3.1): `Tab 面板`
+    /// on the dashboard steps focus between the list and this panel, so it must
+    /// wear `border_focus` — otherwise the key would move focus to a panel that
+    /// looks no different for holding it, a B7-02-class fake closure. The
+    /// preview itself is a fixed read-out of the selection (§6.1:274) and draws
+    /// no cursor of its own, so it only borrows the border role.
+    pub focused_preview: bool,
 }
 
 /// Bordered-block title shared by every dashboard state: the product label
@@ -156,13 +163,13 @@ fn split_list_and_preview(content: Rect) -> (Rect, Option<Rect>) {
 
 /// The selected repository's factual detail (§6.1 preview panel): branch,
 /// ahead/behind, dirty counts and the most recent commit. It mirrors the list
-/// cursor rather than owning focus, so it never draws a cursor (§3.1) and takes
-/// the unfocused border.
+/// cursor rather than owning a cursor (§3.1), so the only thing focus changes
+/// here is which panel wears the accent border.
 fn render_preview(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
     let block = Block::default()
         .title("预览")
         .borders(Borders::ALL)
-        .border_style(role::border(false));
+        .border_style(role::border(state.focused_preview));
     let lines = match state.list_state.selected().and_then(|i| state.repos.get(i)) {
         Some(repo) => {
             let dirty = &repo.dirty;
@@ -486,32 +493,11 @@ pub(crate) fn dashboard_hints() -> HintRow {
 }
 
 /// Format a Unix timestamp as `YYYY-MM-DD HH:MM` (UTC) without chrono.
+///
+/// Single source of truth is [`crate::datetime::format_local_time`] (B4-12):
+/// the dashboard always renders UTC, so it passes a zero offset.
 fn format_time(timestamp: i64) -> String {
-    if timestamp <= 0 {
-        return "-".to_string();
-    }
-    let secs = timestamp as u64;
-    let days = secs / 86_400;
-    let tod = secs % 86_400;
-    let h = tod / 3600;
-    let m = (tod % 3600) / 60;
-    let (y, mo, d) = civil_from_days(days as i64);
-    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}")
-}
-
-/// Howard Hinnant's `civil_from_days`: days since epoch to (year, month, day).
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if mo <= 2 { y + 1 } else { y };
-    (year, mo as u32, d as u32)
+    crate::datetime::format_local_time(timestamp, 0)
 }
 
 #[cfg(test)]
@@ -616,6 +602,7 @@ mod tests {
             batch_op: "",
             batch_running: false,
             focused: true,
+            focused_preview: false,
         });
         assert!(text.contains("alpha"), "missing name: {text}");
         assert!(text.contains("beta"), "missing name: {text}");
@@ -638,6 +625,7 @@ mod tests {
             batch_op: "",
             batch_running: false,
             focused: true,
+            focused_preview: false,
         }));
         assert!(text.contains("加载失败"), "missing error title: {text}");
         assert!(
@@ -664,6 +652,7 @@ mod tests {
                 batch_op: "",
                 batch_running: false,
                 focused: true,
+                focused_preview: false,
             },
             Some(&crate::ui::status::StatusLine {
                 message: "refreshed: 3 repos".to_string(),
@@ -696,6 +685,7 @@ mod tests {
                 batch_op: "",
                 batch_running: false,
                 focused: true,
+                focused_preview: false,
             },
             "批量 pull 完成: 1 成功 / 1 失败",
         );
@@ -734,6 +724,7 @@ mod tests {
             batch_op: "pull",
             batch_running: true,
             focused: true,
+            focused_preview: false,
         });
         // Wide CJK glyphs leave padding cells; compare whitespace-stripped.
         let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
@@ -772,6 +763,7 @@ mod tests {
             batch_op: "",
             batch_running: false,
             focused: true,
+            focused_preview: false,
         });
         let compact = compact(&text);
         assert!(
@@ -810,6 +802,7 @@ mod tests {
             batch_op: "",
             batch_running: false,
             focused: true,
+            focused_preview: false,
         });
         let compact = compact(&text);
         assert!(compact.contains("alpha"), "missing repo: {compact}");
@@ -830,6 +823,7 @@ mod tests {
             batch_op: "",
             batch_running: false,
             focused: true,
+            focused_preview: false,
         });
         let compact = compact(&text);
         assert!(compact.contains("扫描仓库失败"), "missing error: {compact}");

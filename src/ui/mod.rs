@@ -472,9 +472,10 @@ fn repo_name_of(repos: &[RepoInfo], index: Option<usize>) -> &str {
 /// Dashboard arm of [`render`].
 fn render_dashboard_view(f: &mut Frame, content: Rect, app: &mut App) {
     let batch_running = app.batch_running();
-    // Read the focus flag before the cursor borrow below: the accessor takes
+    // Read the focus flags before the cursor borrow below: the accessor takes
     // `&App`, which cannot coexist with `&mut app.dashboard_state` (§3.1).
     let focused = app.panel_is_focused(PanelFocus::Primary);
+    let focused_preview = app.panel_is_focused(PanelFocus::Preview);
     let mut state = DashboardState {
         repos: &app.repos,
         load_error: app.load_error.as_deref(),
@@ -483,6 +484,7 @@ fn render_dashboard_view(f: &mut Frame, content: Rect, app: &mut App) {
         batch_op: app.batch_op,
         batch_running,
         focused,
+        focused_preview,
     };
     dashboard::render_dashboard(f, content, &mut state);
 }

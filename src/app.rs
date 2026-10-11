@@ -760,30 +760,60 @@ impl App {
     ///
     /// Context tabs are a sibling switch, so this writes neither the stack nor
     /// its depth — `Esc` keeps exactly one meaning before and after a switch
-    /// (§1.1). Each screen owns its own strip, so the tab set is read off the
-    /// screen rather than a global list:
+    /// (§1.1). Each screen that draws a tag strip owns its own tab set:
     ///
     /// - the repo workspace (§6.2): `工作区 │ 分支 │ 历史 │ 标签`
     /// - the receipts hub (§6.3): `PR │ 检查 │ 问题 │ 通知`
     /// - the dashboard (§6.1): `仓库 │ 远端中心 │ 配置`
     ///
-    /// Anywhere else the keys stay inert: no screen advertises them and none
-    /// has a second context to move to.
+    /// On the dashboard DESIGN stops short of a *tag strip* (the context-tag
+    /// row is the deferred 5b rendering) and instead writes "<`/`>` 切换，
+    /// 等价于 Tab 切面板" — and the dashboard already draws its two panels,
+    /// the repo list and the preview. So here `<`/`>` simply walk the same
+    /// panel focus `Tab` does, which makes both advertised keys live through
+    /// the very panels §6.1:274 names. A screen with no strip (config, detail
+    /// sub-screens, commit) has nowhere to step and stays inert.
     fn cycle_repo_context(&mut self, forward: bool) {
-        if self.view.is_receipt() {
-            self.cycle_receipt_context(forward);
-            return;
+        match self.view {
+            View::Dashboard => self.cycle_panel_focus(forward),
+            view if view.is_receipt_detail() => {}
+            View::Pulls | View::Checks | View::Issues | View::Notifications => {
+                self.cycle_receipt_context(forward)
+            }
+            View::Repo | View::Branches | View::History | View::Tags => {
+                self.cycle_workspace_context(forward)
+            }
+            _ => {}
         }
-        if matches!(self.view, View::Dashboard | View::Config) {
-            self.cycle_dashboard_context(forward);
-            return;
-        }
-        if !matches!(
-            self.view,
-            View::Repo | View::Branches | View::History | View::Tags
-        ) {
-            return;
-        }
+    }
+
+    /// `<` / `>` on the receipts hub (§6.3): step one tab along
+    /// `PR │ 检查 │ 问题 │ 通知`.
+    ///
+    /// The four screens are the hub's context tabs, so cycling lands on
+    /// [`App::switch_github_tab`] rather than a bespoke view write — that is the
+    /// same door `p`/`c`/`i`/`n` come through, which is what makes the tab's
+    /// fetch arming and its in-flight drop behave identically either way. A
+    /// detail sub-screen drills in *within* one tab, so it has no sibling to
+    /// cycle to (`Esc` is the way back, §6.3.2).
+    fn cycle_receipt_context(&mut self, forward: bool) {
+        let tabs = [
+            GithubTab::Pulls,
+            GithubTab::Checks,
+            GithubTab::Issues,
+            GithubTab::Notifications,
+        ];
+        let at = tabs
+            .iter()
+            .position(|tab| *tab == self.github_state.tab)
+            .unwrap_or(0);
+        let step = if forward { 1 } else { tabs.len() - 1 };
+        self.switch_github_tab(tabs[(at + step) % tabs.len()]);
+    }
+
+    /// `<` / `>` on the workspace (§6.2): step one tab along
+    /// `工作区 │ 分支 │ 历史 │ 标签` in place.
+    fn cycle_workspace_context(&mut self, forward: bool) {
         let next = match (self.view, forward) {
             (View::Repo, true) => View::Branches,
             (View::Branches, true) => View::History,
@@ -806,70 +836,6 @@ impl App {
             _ => {}
         }
     }
-
-    /// `<` / `>` on the receipts hub (§6.3): step one tab along
-    /// `PR │ 检查 │ 问题 │ 通知`.
-    ///
-    /// The four screens are the hub's context tabs, so cycling lands on
-    /// [`App::switch_github_tab`] rather than a bespoke view write — that is the
-    /// same door `p`/`c`/`i`/`n` come through, which is what makes the tab's
-    /// fetch arming and its in-flight drop behave identically either way.
-    fn cycle_receipt_context(&mut self, forward: bool) {
-        // A detail sub-screen is a drill-in *within* one tab, so it has no
-        // sibling to cycle to; `Esc` is the way back (§6.3.2).
-        if self.view.is_receipt_detail() {
-            return;
-        }
-        let tabs = [
-            GithubTab::Pulls,
-            GithubTab::Checks,
-            GithubTab::Issues,
-            GithubTab::Notifications,
-        ];
-        let at = tabs
-            .iter()
-            .position(|tab| *tab == self.github_state.tab)
-            .unwrap_or(0);
-        let step = if forward { 1 } else { tabs.len() - 1 };
-        self.switch_github_tab(tabs[(at + step) % tabs.len()]);
-    }
-
-    /// `<` / `>` on the dashboard (§6.1): step one tab along
-    /// `仓库 │ 远端中心 │ 配置`.
-    ///
-    /// §6.1:273 puts these three roots on one strip and says `<`/`>` steps
-    /// them "等价于 Tab 切面板" — the tab row and the panel row are the same
-    /// dimension here, because the dashboard's only two panels are the repo
-    /// list and the preview of that same list. So this moves the screen between
-    /// roots, and `cycle_panel_focus` moves the focus inside one.
-    ///
-    /// 远端中心 aggregates the *open* repository's receipts, so it needs one.
-    /// Without a current repo the tab is still drawn but has nothing to
-    /// aggregate, and entering it would replace the dashboard with a gate that
-    /// only says "no repository is open" — so the cycle stops and says why on
-    /// the status row instead, leaving the list the user was reading.
-    fn cycle_dashboard_context(&mut self, forward: bool) {
-        let need_repo = match (self.view, forward) {
-            // 仓库 → 远端中心, and 配置 → 远端中心 going backwards.
-            (View::Dashboard, true) | (View::Config, false) => true,
-            _ => false,
-        };
-        if need_repo && self.current_repo_path().is_none() {
-            self.set_info("先打开一个仓库再进远端中心");
-            return;
-        }
-        match (self.view, forward) {
-            (View::Dashboard, true) | (View::Config, false) => self.enter_github(),
-            (View::Dashboard, false) => self.enter_config(),
-            // 远端中心 → 配置 leaves the receipt domain, so the hub's feedback
-            // and its in-flight fetch are dropped the same way `Esc` out of it
-            // drops them (§4.3: a verdict belongs to the panel that ran it).
-            (View::Config, true) => self.leave_config(),
-            _ => {}
-        }
-    }
-
-    /// Record the result of an operation the user triggered on the status row
     /// (§4.3): commit / push / pull / stage / delete verdicts, validation
     /// refusals, batch summaries.
     ///
@@ -1220,13 +1186,9 @@ impl App {
     /// an already-staged path is idempotent, so staging every row is safe even
     /// when some of them are already staged.
     pub fn stage_all(&mut self) {
-        let Some(repo_idx) = self.current_repo else {
+        let Some((_, repo_path)) = self.open_repo_index() else {
             return;
         };
-        if repo_idx >= self.repos.len() {
-            return;
-        }
-        let repo_path = self.repos[repo_idx].path.clone();
         let paths: Vec<_> = self.file_entries.iter().map(|e| e.path.clone()).collect();
         let mut count = 0usize;
         for file_path in paths {
@@ -1334,13 +1296,9 @@ impl App {
         if self.view != View::Repo {
             return;
         }
-        let Some(repo_idx) = self.current_repo else {
+        let Some((_, repo_path)) = self.open_repo_index() else {
             return;
         };
-        if repo_idx >= self.repos.len() {
-            return;
-        }
-        let repo_path = self.repos[repo_idx].path.clone();
         let message = if op == "push" {
             "正在 push…".to_string()
         } else {
@@ -2031,6 +1989,18 @@ impl App {
     /// `repos` is still valid.
     fn current_repo_path(&self) -> Option<std::path::PathBuf> {
         self.repo_of(self.current_repo).map(|r| r.path.clone())
+    }
+
+    /// The open repository together with its index, for callers that need both.
+    ///
+    /// Four call sites (stage_all, start_remote, submit_commit, view_file_diff)
+    /// used to repeat the same "read `current_repo`, bounds-check it, clone the
+    /// path" three times; the index-and-path pair is the one shape they all
+    /// want, so it lives here (B4-04: the file trio already collapsed onto
+    /// `selected_file_paths`, this is the last of the four).
+    fn open_repo_index(&self) -> Option<(usize, std::path::PathBuf)> {
+        let idx = self.current_repo.filter(|i| *i < self.repos.len())?;
+        Some((idx, self.repos[idx].path.clone()))
     }
 
     /// Path of the repository the open workspace context acts on.
@@ -4451,23 +4421,20 @@ mod tests {
             "escaping the workspace pops the stack"
         );
 
-        // The dashboard has its own strip — `仓库 │ 远端中心 │ 配置`
-        // (§6.1:273) — so `<`/`>` are *not* inert there any more. That tail was
-        // advertised by DESIGN while nothing answered it, which is the B7-01
-        // sweep's first finding; the cycle is what the spec asks for.
+        // The dashboard has its own strip — §6.1:273 puts `仓库 │ 远端中心 │ 配置` on
+        // it and calls `<`/`>` there "等价于 Tab 切面板", so the keys walk the
+        // same panel focus `Tab` does: list → 预览 → list. That tail was
+        // advertised while nothing answered it (the B7-01 sweep's first
+        // finding), and both keys must move now.
+        assert!(app.dispatch_key(key(KeyCode::Char('<'))));
+        assert_eq!(app.focus(), PanelFocus::Preview, "`<` steps to the preview");
+        assert!(app.dispatch_key(key(KeyCode::Char('<'))));
+        assert_eq!(app.focus(), PanelFocus::Primary, "and back to the list");
         assert!(app.dispatch_key(key(KeyCode::Char('>'))));
         assert_eq!(
-            app.view,
-            View::Config,
-            "`>` steps the dashboard strip back to 配置"
-        );
-        assert!(app.dispatch_key(key(KeyCode::Char('<'))));
-        assert_eq!(app.view, View::Dashboard, "and forward again to 仓库");
-        assert!(app.dispatch_key(key(KeyCode::Char('<'))));
-        assert_eq!(
-            app.view,
-            View::Pulls,
-            "`<` steps forward to 远端中心 for the open repo"
+            app.focus(),
+            PanelFocus::Preview,
+            "`>` steps back the other way"
         );
 
         // A screen with no strip at all still has nowhere to step, so the keys

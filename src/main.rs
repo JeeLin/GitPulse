@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod datetime;
 mod git;
 mod github;
 mod platform;
