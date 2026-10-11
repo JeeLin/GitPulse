@@ -258,6 +258,7 @@ mod tests {
     fn utf8_paths_serialize_as_plain_strings() {
         let config = Config {
             scan_dirs: vec![PathBuf::from("/home/user/repos")],
+            ..Default::default()
         };
         let text = toml::to_string_pretty(&config).expect("serialize");
         assert!(
@@ -275,6 +276,7 @@ mod tests {
     fn non_utf8_paths_serialize_as_marker_table() {
         let config = Config {
             scan_dirs: vec![non_utf8_path()],
+            ..Default::default()
         };
         let text = toml::to_string_pretty(&config).expect("serialize");
         assert!(
@@ -296,6 +298,7 @@ mod tests {
                 non_utf8_path(),
                 PathBuf::from("/opt/projects"),
             ],
+            ..Default::default()
         };
         let text = toml::to_string_pretty(&config).expect("serialize");
         let back: Config = toml::from_str(&text).expect("deserialize");

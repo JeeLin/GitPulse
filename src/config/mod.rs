@@ -7,7 +7,7 @@ mod path;
 mod types;
 
 pub use path::{config_path, home_dir};
-pub use types::Config;
+pub use types::{group_for_path, Config, GroupDef};
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -342,6 +342,7 @@ mod tests {
                 PathBuf::from("/home/user/repos"),
                 PathBuf::from("/opt/projects"),
             ],
+            ..Default::default()
         };
         save_to(&config, &path).expect("save");
         let loaded = load_from(&path).expect("load");
@@ -358,6 +359,7 @@ mod tests {
                 PathBuf::from("/home/user/repos"),
                 PathBuf::from("/opt/projects"),
             ],
+            ..Default::default()
         };
         config.save().expect("save");
         let loaded = Config::load().expect("load");
@@ -385,6 +387,154 @@ mod tests {
         );
     }
 
+    /// Sub-task 5 backward-compatibility nail: a config written before
+    /// grouping existed has no `scan_groups` key, and must load *exactly* as
+    /// it did in v0.7.0 — same `scan_dirs`, and grouping simply absent rather
+    /// than defaulted into a group nobody asked for.
+    ///
+    /// Falsifiable: making `scan_groups` required (dropping the container
+    /// `#[serde(default)]`) fails this with a parse error.
+    #[test]
+    fn a_config_without_scan_groups_loads_exactly_as_before() {
+        let dir = TempDir::new("no-groups");
+        let path = dir.path().join("config.toml");
+        let legacy = "scan_dirs = [\"/home/user/repos\", \"/opt/projects\"]\n";
+        fs::write(&path, legacy).expect("write pre-v0.8.0 config");
+
+        let loaded = load_from(&path).expect("a pre-v0.8.0 config must still load");
+        assert_eq!(
+            loaded.scan_dirs,
+            vec![
+                PathBuf::from("/home/user/repos"),
+                PathBuf::from("/opt/projects"),
+            ],
+            "scan_dirs must load byte-for-byte as before"
+        );
+        assert!(
+            loaded.scan_groups.is_empty(),
+            "a config with no grouping key must gain no groups: {:?}",
+            loaded.scan_groups
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("read config back"),
+            legacy,
+            "loading must not rewrite the config file"
+        );
+    }
+
+    /// A group whose `name` has the wrong TOML type is a malformed *file*, not
+    /// a bad entry to skip: checkpoint ⑭ keeps "reject the whole file" for
+    /// anything `from_str` cannot type, because partially adopting a config is
+    /// exactly the silent degradation the ruling rejects.
+    ///
+    /// Falsifiable: accepting this file (a lenient per-entry fallback) breaks
+    /// the `is_err` assertion — the behavior ⑭ forbids.
+    #[test]
+    fn a_malformed_group_entry_rejects_the_whole_config() {
+        let dir = TempDir::new("bad-group");
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "scan_dirs = [\"/home/user/repos\"]\n\
+             [[scan_groups]]\nname = 42\nprefixes = [\"/srv/work\"]\n",
+        )
+        .expect("write malformed config");
+
+        let err = load_from(&path).expect_err("a wrong-typed group name must not load");
+        let shown = format!("{err:#}");
+        assert!(
+            shown.contains("name"),
+            "the error must name the offending key: {shown}"
+        );
+        assert!(
+            shown.contains(&*path.display().to_string()),
+            "the error must name the config path so it can be found: {shown}"
+        );
+        // serde's TOML error carries line/column, which is what lets a user
+        // locate the entry inside a multi-group file.
+        let toml_err = format!("{err:?}");
+        assert!(
+            toml_err.contains("line") && toml_err.contains("column"),
+            "the error must carry serde's line/column: {toml_err}"
+        );
+    }
+
+    /// Sub-task 5 round-trip: groups survive a save/load cycle through the
+    /// same `{ path_hex = .. }` channel `scan_dirs` uses, so a non-UTF-8
+    /// prefix is stored as bytes rather than lossily transcoded.
+    #[cfg(unix)]
+    #[test]
+    fn groups_round_trip_including_a_non_utf8_prefix() {
+        use crate::config::types::GroupDef;
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = TempDir::new("groups-roundtrip");
+        let path = dir.path().join("config.toml");
+        let config = Config {
+            scan_dirs: vec![PathBuf::from("/srv/work")],
+            scan_groups: vec![
+                GroupDef {
+                    name: "工作".to_string(),
+                    prefixes: vec![
+                        PathBuf::from("/srv/work"),
+                        PathBuf::from(std::ffi::OsStr::from_bytes(b"/srv/\xff\xfe_group")),
+                    ],
+                },
+                GroupDef {
+                    name: "archive".to_string(),
+                    prefixes: vec![PathBuf::from("/srv/archive")],
+                },
+            ],
+        };
+
+        save_to(&config, &path).expect("save grouped config");
+        let text = fs::read_to_string(&path).expect("read back");
+        assert!(
+            text.contains("path_hex"),
+            "a non-UTF-8 prefix must take the marker form: {text}"
+        );
+        assert!(
+            !text.contains('\u{fffd}'),
+            "prefix bytes must not be rendered lossily: {text}"
+        );
+
+        let loaded = load_from(&path).expect("load grouped config");
+        assert_eq!(loaded, config, "grouping must survive the round trip");
+    }
+
+    /// Group order is meaningful — it is the presentation order — so it must
+    /// survive the round trip unchanged rather than being sorted by name.
+    #[test]
+    fn group_order_survives_a_round_trip() {
+        use crate::config::types::GroupDef;
+        let dir = TempDir::new("groups-order");
+        let path = dir.path().join("config.toml");
+        let config = Config {
+            scan_groups: vec![
+                GroupDef {
+                    name: "zulu".to_string(),
+                    prefixes: vec![PathBuf::from("/z")],
+                },
+                GroupDef {
+                    name: "alpha".to_string(),
+                    prefixes: vec![PathBuf::from("/a")],
+                },
+            ],
+            ..Default::default()
+        };
+        save_to(&config, &path).expect("save");
+        let loaded = load_from(&path).expect("load");
+        let names: Vec<&str> = loaded
+            .scan_groups
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["zulu", "alpha"],
+            "config order is the presentation order and must not be sorted"
+        );
+    }
+
     #[test]
     fn load_empty_config_file_returns_default() {
         let dir = TempDir::new("empty");
@@ -404,6 +554,7 @@ mod tests {
         let non_utf8 = PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/\xff\xfe-not-utf8"));
         let config = Config {
             scan_dirs: vec![PathBuf::from("/home/user/repos"), non_utf8],
+            ..Default::default()
         };
         save_to(&config, &path).expect("save non-UTF-8 config");
         let loaded = load_from(&path).expect("load non-UTF-8 config");
@@ -442,6 +593,7 @@ mod tests {
             scan_dirs: vec![PathBuf::from(std::ffi::OsStr::from_bytes(
                 b"/tmp/\xff\xfe_picker",
             ))],
+            ..Default::default()
         };
         config.save().expect("save non-UTF-8 config");
         let loaded = Config::load().expect("load non-UTF-8 config");
@@ -456,6 +608,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let seeded = Config {
             scan_dirs: vec![PathBuf::from("/home/user/repos")],
+            ..Default::default()
         };
         save_to(&seeded, &path).expect("seed config");
         let before = fs::read(&path).expect("read seeded config");
@@ -464,6 +617,7 @@ mod tests {
         fs::create_dir_all(&temp).expect("block temp path");
         let other = Config {
             scan_dirs: vec![PathBuf::from("/opt/projects")],
+            ..Default::default()
         };
         save_to(&other, &path).expect_err("blocked save must fail");
 
@@ -481,6 +635,7 @@ mod tests {
         fs::create_dir_all(&path).expect("block target");
         let config = Config {
             scan_dirs: vec![PathBuf::from("/opt/projects")],
+            ..Default::default()
         };
         save_to(&config, &path).expect_err("blocked save must fail");
 
@@ -509,6 +664,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let config = Config {
             scan_dirs: vec![PathBuf::from("/home/user/repos")],
+            ..Default::default()
         };
         save_to(&config, &path).expect("save");
         let mode = fs::metadata(&path)

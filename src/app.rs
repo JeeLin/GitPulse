@@ -969,6 +969,71 @@ impl App {
         }
     }
 
+    /// The configured group a repository belongs to, or `None` when the
+    /// config claims no group for it.
+    ///
+    /// Grouping is presentation only (sub-task 5): an ungrouped repository is
+    /// a normal state, not an error, so this returning `None` costs nothing
+    /// and the dashboard still lists the repository. Sub-task 6 renders the
+    /// answer as collapsible sections.
+    ///
+    /// Not yet called from a view: sub-task 5 ships the grouping *data layer*
+    /// (the milestone records this split explicitly) and sub-task 6 draws it.
+    /// `#[allow(dead_code)]` is therefore deliberate and temporary — the same
+    /// standing the `NotGitHub` variant keeps in `github::error`.
+    #[allow(dead_code)]
+    pub fn group_of(&self, repo: &RepoInfo) -> Option<&crate::config::GroupDef> {
+        crate::config::group_for_path(&self.config.scan_groups, &repo.path)
+    }
+
+    /// `repos` bucketed by group, in the order [`Config::scan_groups`] lists
+    /// them, followed by every repository no group claims.
+    ///
+    /// This is the data sub-task 6's collapsible sections render, and it is
+    /// built here rather than in the view so the *ordering decision* — config
+    /// order for groups, one trailing bucket for the rest — lives with the
+    /// configuration it comes from instead of being rediscovered per frame.
+    ///
+    /// Like [`App::group_of`], the view lands with sub-task 6.
+    #[allow(dead_code)]
+    pub fn grouped_repos(&self) -> Vec<(Option<&crate::config::GroupDef>, Vec<&RepoInfo>)> {
+        let mut buckets: Vec<(Option<&crate::config::GroupDef>, Vec<&RepoInfo>)> = self
+            .config
+            .scan_groups
+            .iter()
+            .map(|group| (Some(group), Vec::new()))
+            .collect();
+        let mut ungrouped: Vec<&RepoInfo> = Vec::new();
+
+        for repo in &self.repos {
+            match self.group_of(repo).and_then(|group| {
+                buckets
+                    .iter_mut()
+                    .find(|(candidate, _)| *candidate == Some(group))
+            }) {
+                Some((_, members)) => members.push(repo),
+                None => ungrouped.push(repo),
+            }
+        }
+        for (_, members) in &mut buckets {
+            members.sort_by(|left, right| left.name.cmp(&right.name));
+        }
+        ungrouped.sort_by(|left, right| left.name.cmp(&right.name));
+
+        let populated: Vec<_> = buckets
+            .into_iter()
+            .filter(|(_, members)| !members.is_empty())
+            .collect();
+        if ungrouped.is_empty() {
+            populated
+        } else {
+            populated
+                .into_iter()
+                .chain(std::iter::once((None, ungrouped)))
+                .collect()
+        }
+    }
+
     /// Re-run repo discovery and update the dashboard (manual refresh, convention 5).
     ///
     /// The selection cursor is clamped so a shrinking list never points past
@@ -3935,18 +4000,40 @@ fn invalid_repo_msg(op: &str) -> String {
     format!("{op}: 仓库索引失效")
 }
 
+impl App {
+    /// Build the app from a config load, including the failure path.
+    ///
+    /// Checkpoint ⑭: a config that will not parse is rejected **whole** — no
+    /// partial adoption — because a silently-dropped `scan_dirs` would read
+    /// as "those repositories are gone" rather than "your config is broken",
+    /// and that is the one failure mode with no visible symptom. The app
+    /// still starts, on default (empty) scan dirs, so the failure has to
+    /// outlive a single frame: it lands on the **panel** `error` state with
+    /// `r 重试` (§4.3), not on the transient status row that an operation
+    /// result uses.
+    ///
+    /// Named rather than inlined in [`run`] so a test can exercise the actual
+    /// startup branch — a test that calls `set_load_error` itself would pass
+    /// no matter which of the two this picks.
+    pub fn from_config_load(loaded: Result<Config>) -> Self {
+        match loaded {
+            Ok(config) => App::new(config),
+            Err(err) => {
+                let mut app = App::new(Config::default());
+                // The message keeps `err`'s own path and serde's line/column,
+                // so the user can find the entry that failed.
+                app.set_load_error(format!("加载配置失败: {err:#}"));
+                app
+            }
+        }
+    }
+}
+
 /// Run the TUI until the user quits (`q` / `Ctrl-C`).
 pub async fn run() -> Result<()> {
     install_panic_hook();
     let mut terminal = init_terminal()?;
-    let mut app = match Config::load() {
-        Ok(config) => App::new(config),
-        Err(err) => {
-            let mut app = App::new(Config::default());
-            app.set_error(format!("加载配置失败: {err:#}"));
-            app
-        }
-    };
+    let mut app = App::from_config_load(Config::load());
     app.refresh_repos();
     let run_result = event_loop(&mut terminal, &mut app);
     let restore_result: Result<()> = restore_terminal().map_err(Into::into);
@@ -4059,6 +4146,193 @@ mod tests {
             })
             .collect();
         app
+    }
+
+    /// A repository snapshot for a given path — enough identity for grouping,
+    /// which keys off the path alone.
+    fn repo_at(path: &str) -> RepoInfo {
+        RepoInfo {
+            name: std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string()),
+            path: std::path::PathBuf::from(path),
+            branch: "main".to_string(),
+            dirty: Default::default(),
+            ahead: 0,
+            behind: 0,
+            last_commit: Default::default(),
+            remote: None,
+            is_worktree: false,
+            main_repo: None,
+        }
+    }
+
+    /// Sub-task 5 · checkpoint ⑭ regression nail: the *actual startup branch*
+    /// must put a config load failure on the panel `error` state, not on the
+    /// transient status line.
+    ///
+    /// It drives [`App::from_config_load`] — the same call `run()` makes — so
+    /// swapping its `set_error` back in turns this red, which a test that
+    /// called `set_load_error` itself never would.
+    ///
+    /// The failure is persistent (the app runs on default scan dirs and `r`
+    /// retries the same broken file), so a one-frame status message would
+    /// leave a silently empty repository list: §4.3 wants the panel and
+    /// `r 重试`.
+    #[test]
+    fn a_config_load_failure_lands_on_the_panel_error_state() {
+        let broken = Err(anyhow::anyhow!(
+            "解析配置失败 /home/u/.gitpulse/config.toml: TOML parse error at line 4 column 7"
+        ));
+
+        let app = App::from_config_load(broken);
+
+        assert!(
+            app.load_error.is_some(),
+            "a config load failure must occupy the panel error state"
+        );
+        assert!(
+            app.status.is_none(),
+            "the transient status row must not carry a load failure: {:?}",
+            app.status
+        );
+        let message = app.load_error.as_deref().unwrap_or_default();
+        assert!(
+            message.contains("config.toml"),
+            "the panel error must name the config path: {message}"
+        );
+        assert!(
+            message.contains("line 4") && message.contains("column 7"),
+            "the panel error must carry serde's line/column so the entry is \
+             findable: {message}"
+        );
+
+        // A successful load is untouched: no error face is occupied.
+        let ok = App::from_config_load(Ok(Config::default()));
+        assert!(ok.load_error.is_none() && ok.status.is_none());
+
+        // The two faces stay distinct — an operation result is still the
+        // status row's, so ⑭ moved one case rather than collapsing both.
+        let mut operated = App::new(Config::default());
+        operated.set_error("推送失败");
+        assert!(operated.status.is_some() && operated.load_error.is_none());
+    }
+
+    /// Sub-task 5 end-to-end nail: a configured group actually claims the
+    /// repositories under it, and leaves the rest ungrouped rather than
+    /// failing — grouping adds presentation, it does not gate the list.
+    ///
+    /// Falsifiable: returning the first group unconditionally, or resolving by
+    /// plain text prefix (`starts_with` on the raw string), breaks the
+    /// ungrouped and `/srv/work-archive` assertions respectively.
+    #[test]
+    fn a_configured_group_claims_the_repositories_under_it() {
+        use crate::config::GroupDef;
+
+        let mut app = App::new(Config {
+            scan_groups: vec![
+                GroupDef {
+                    name: "工作".to_string(),
+                    prefixes: vec![std::path::PathBuf::from("/srv/work")],
+                },
+                GroupDef {
+                    name: "client".to_string(),
+                    prefixes: vec![std::path::PathBuf::from("/srv/work/client")],
+                },
+            ],
+            ..Default::default()
+        });
+        app.repos = vec![
+            repo_at("/srv/work/api"),
+            repo_at("/srv/work/client/web"),
+            repo_at("/srv/work-archive/old"),
+            repo_at("/home/user/scratch"),
+        ];
+
+        let group = |path: &str| {
+            let repo = app
+                .repos
+                .iter()
+                .find(|r| r.path == std::path::Path::new(path))
+                .expect("repo present");
+            app.group_of(repo).map(|g| g.name.clone())
+        };
+
+        assert_eq!(group("/srv/work/api").as_deref(), Some("工作"));
+        assert_eq!(
+            group("/srv/work/client/web").as_deref(),
+            Some("client"),
+            "the longer prefix must win, so a nested layout is groupable"
+        );
+        assert_eq!(
+            group("/srv/work-archive/old"),
+            None,
+            "`/srv/work-archive` is a sibling of `/srv/work`, not a child"
+        );
+        assert_eq!(
+            group("/home/user/scratch"),
+            None,
+            "an unclaimed repository stays ungrouped instead of failing"
+        );
+    }
+
+    /// Sub-task 5 seam nail: [`App::grouped_repos`] buckets exactly as
+    /// sub-task 6 will draw it — groups in **config order**, then one trailing
+    /// bucket for everything unclaimed, with an empty group omitted rather
+    /// than rendered as a header nobody can expand.
+    ///
+    /// Falsifiable: sorting groups by name instead of using config order
+    /// breaks `config_order`; keeping empty buckets breaks `empty_groups`.
+    #[test]
+    fn grouped_repos_uses_config_order_then_an_ungrouped_tail() {
+        use crate::config::GroupDef;
+
+        let mut app = App::new(Config {
+            scan_groups: vec![
+                // Declared "zulu" first on purpose: presentation order is the
+                // config's, not the alphabet's.
+                GroupDef {
+                    name: "zulu".to_string(),
+                    prefixes: vec![std::path::PathBuf::from("/srv/zulu")],
+                },
+                GroupDef {
+                    name: "alpha".to_string(),
+                    prefixes: vec![std::path::PathBuf::from("/srv/alpha")],
+                },
+                GroupDef {
+                    name: "never-configured".to_string(),
+                    prefixes: vec![std::path::PathBuf::from("/srv/nothing-here")],
+                },
+            ],
+            ..Default::default()
+        });
+        app.repos = vec![
+            repo_at("/srv/alpha/one"),
+            repo_at("/srv/zulu/two"),
+            repo_at("/home/user/loose"),
+        ];
+
+        let buckets = app.grouped_repos();
+        let labels: Vec<Option<&str>> = buckets
+            .iter()
+            .map(|(group, _)| group.map(|g| g.name.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![Some("zulu"), Some("alpha"), None],
+            "groups follow config order, empty groups are dropped, and \
+             unclaimed repositories trail in one bucket"
+        );
+        let names: Vec<&str> = buckets
+            .iter()
+            .flat_map(|(_, members)| members.iter().map(|r| r.name.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["two", "one", "loose"],
+            "every repository appears exactly once, members sorted by name"
+        );
     }
 
     #[test]
