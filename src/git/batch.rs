@@ -113,6 +113,8 @@ mod tests {
             behind: 0,
             last_commit: Default::default(),
             remote: None,
+            is_worktree: false,
+            main_repo: None,
         }
     }
 

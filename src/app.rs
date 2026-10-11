@@ -945,9 +945,22 @@ impl App {
     /// instead of an empty list masquerading as success (§4.3, checkpoint 2).
     pub fn load_repos(&mut self) {
         match git::discover_repos(&self.config.scan_dirs) {
-            Ok(repos) => {
+            Ok((repos, diagnostics)) => {
                 self.repos = repos;
                 self.clear_feedback();
+                // Per-item discovery failures (a worktree whose status query
+                // errored, a broken/invalid worktree, an over-cap repo) land on
+                // the status line as transient feedback rather than promoting to
+                // a panel `error` state — that is reserved for a whole-scan
+                // failure (Err), per §4.3 / checkpoint ③.
+                if let Some(first) = diagnostics.first() {
+                    let message = if diagnostics.len() == 1 {
+                        first.clone()
+                    } else {
+                        format!("{} (以及 {} 条发现警告)", first, diagnostics.len() - 1)
+                    };
+                    self.set_error(message);
+                }
             }
             Err(e) => {
                 self.set_load_error(format!("扫描仓库失败: {e}"));
@@ -4041,6 +4054,8 @@ mod tests {
                 behind: 0,
                 last_commit: Default::default(),
                 remote: None,
+                is_worktree: false,
+                main_repo: None,
             })
             .collect();
         app
@@ -7034,6 +7049,8 @@ mod tests {
             behind: 0,
             last_commit: Default::default(),
             remote: None,
+            is_worktree: false,
+            main_repo: None,
         });
         app.current_repo = Some(0);
         let (tx, rx) = mpsc::unbounded_channel();

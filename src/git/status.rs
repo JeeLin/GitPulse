@@ -57,6 +57,16 @@ pub struct RepoInfo {
     /// (sub-task 3, checkpoint ③). Populated in [`query_status`] by reusing the
     /// already-open `Repository` — no extra `Repository::open`.
     pub remote: Option<String>,
+    /// Whether this row is a linked worktree of another repository (sub-task 3).
+    ///
+    /// `false` for a main or standalone repository; `true` for a linked
+    /// worktree, in which case `main_repo` names the owning repository.
+    pub is_worktree: bool,
+    /// Absolute path of the owning main repository when `is_worktree` is true.
+    ///
+    /// `None` for a main repository (standalone, or the root that owns its
+    /// own worktrees) (checkpoint ③).
+    pub main_repo: Option<PathBuf>,
 }
 
 /// Query the current status of a git repository.
@@ -80,7 +90,29 @@ pub fn query_status(repo_path: &Path) -> Result<RepoInfo> {
         behind,
         last_commit,
         remote,
+        is_worktree: false,
+        main_repo: None,
     })
+}
+
+/// Query status for a linked worktree, flagging identity and namespacing the
+/// display name as `{main}⑂{worktree}` per checkpoint ⑯ (sub-task 3).
+///
+/// `main_repo` is the owning main repository's working directory; `wt_path` is
+/// the worktree's checked-out path (as returned by `Worktree::path`). The
+/// caller has already resolved the worktree via the main repo's own worktree
+/// registry, so a submodule (which appears in the index, not the registry) is
+/// never confused with a worktree (checkpoint ③).
+pub(crate) fn query_worktree_status(main_repo: &Path, wt_path: &Path) -> Result<RepoInfo> {
+    let mut info = query_status(wt_path)?;
+    info.name = format!(
+        "{}⑂{}",
+        repo_display_name(main_repo),
+        repo_display_name(wt_path)
+    );
+    info.is_worktree = true;
+    info.main_repo = Some(main_repo.to_path_buf());
+    Ok(info)
 }
 
 /// Fetch URL of the repository's primary remote (`origin` → `upstream` → first

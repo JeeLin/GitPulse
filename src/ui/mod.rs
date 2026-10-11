@@ -756,6 +756,8 @@ mod tests {
                     behind: 0,
                     last_commit: Default::default(),
                     remote: None,
+                    is_worktree: false,
+                    main_repo: None,
                 }];
                 app.dashboard_state.select(Some(0));
                 app
@@ -773,6 +775,8 @@ mod tests {
                     behind: 0,
                     last_commit: Default::default(),
                     remote: None,
+                    is_worktree: false,
+                    main_repo: None,
                 }];
                 app.file_entries = vec![FileEntry {
                     path: std::path::PathBuf::from("src/main.rs"),
@@ -2134,6 +2138,8 @@ mod tests {
             behind: 0,
             last_commit: Default::default(),
             remote: None,
+            is_worktree: false,
+            main_repo: None,
         }];
         app.dashboard_state.select(Some(0));
 
@@ -2287,6 +2293,8 @@ mod tests {
             behind: 0,
             last_commit: Default::default(),
             remote: None,
+            is_worktree: false,
+            main_repo: None,
         }];
         app.current_repo = Some(0);
 
