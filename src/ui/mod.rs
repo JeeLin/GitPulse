@@ -1342,7 +1342,10 @@ mod tests {
         match view {
             View::Dashboard => {
                 app.view = View::Dashboard;
-                app.current_repo = None;
+                // 远端中心 aggregates the *open* repo's receipts, so a
+                // dashboard with no `current_repo` parks on the status row
+                // instead of entering it. Leaving it set is what makes `<`
+                // here test the real binding rather than that guard (§6.1).
                 app.repos.push(keyed_repo("second"));
                 app.dashboard_state.select(Some(0));
             }
