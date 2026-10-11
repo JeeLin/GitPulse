@@ -382,10 +382,20 @@ pub(crate) fn render_receipt_buffer(
 /// which needs a Tokio context, so the build runs inside a throwaway
 /// runtime. That task is never driven: these tests only render a frame, they
 /// never issue a request.
+///
+/// A caller that already runs *inside* a runtime (a `#[tokio::test]`, such as
+/// the B7-01 key sweep) borrows the ambient context instead. Building a second
+/// runtime there would panic on drop — `Runtime::drop` may not block, and it is
+/// reached from an async context — so the throwaway path is only for the
+/// synchronous tests that have no runtime of their own.
 #[cfg(test)]
 pub(crate) fn offline_client() -> Box<dyn crate::platform::PlatformClient> {
     if std::env::var("GITHUB_TOKEN").is_err() {
         std::env::set_var("GITHUB_TOKEN", "test-token");
+    }
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let _guard = handle.enter();
+        return Box::new(crate::github::GithubClient::new("octo", "demo").expect("offline client"));
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
