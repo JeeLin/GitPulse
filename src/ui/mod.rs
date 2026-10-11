@@ -720,33 +720,118 @@ mod tests {
     /// Global segment of the hint row, whitespace-stripped (§2.3).
     const GLOBAL_SEGMENT: &str = "⏎打开Esc返回r刷新q退出";
 
-    /// The screens the milestone names: the two local-git views and the four
-    /// receipt tabs. Every one of them draws its panel body only, so the
-    /// bottom row is the one and only hint row.
+    /// Every one of the 15 [`View`] variants, with a ready-to-render [`App`]
+    /// each — the single source both screen sweeps read, so "every screen" is
+    /// defined once and cannot mean two different things in two tests (B5-02).
+    ///
+    /// Coverage is total by construction: [`View::panels_of`] and
+    /// [`SCREENS`](crate::app::SCREENS) both enumerate the enum, and
+    /// `every_view_variant_is_covered_by_both_screen_sweeps` re-checks the set
+    /// against `SCREENS` so a newly added variant fails the sweep instead of
+    /// silently going untested. Per-variant reasons for being here are on
+    /// [`hint_row_screens`] and [`footer_row_screens`].
+    fn all_view_screens() -> Vec<App> {
+        crate::app::SCREENS
+            .iter()
+            .copied()
+            .map(screen_for)
+            .collect()
+    }
+
+    /// One screen's fixture, carrying just enough loaded state for that panel
+    /// to render rows instead of its §3.2 empty gate — the sweeps assert
+    /// *footer* behaviour, which needs the body drawn.
+    fn screen_for(view: View) -> App {
+        match view {
+            View::Dashboard => {
+                let mut app = base_app();
+                app.repos = vec![RepoInfo {
+                    name: "GitPulse".to_string(),
+                    path: std::path::PathBuf::from("/tmp/GitPulse"),
+                    branch: "main".to_string(),
+                    dirty: Default::default(),
+                    ahead: 0,
+                    behind: 0,
+                    last_commit: Default::default(),
+                    remote: None,
+                }];
+                app.dashboard_state.select(Some(0));
+                app
+            }
+            View::Repo => {
+                let mut app = base_app();
+                app.view = view;
+                app.current_repo = Some(0);
+                app.repos = vec![RepoInfo {
+                    name: "GitPulse".to_string(),
+                    path: std::path::PathBuf::from("/tmp/GitPulse"),
+                    branch: "main".to_string(),
+                    dirty: Default::default(),
+                    ahead: 0,
+                    behind: 0,
+                    last_commit: Default::default(),
+                    remote: None,
+                }];
+                app.file_entries = vec![FileEntry {
+                    path: std::path::PathBuf::from("src/main.rs"),
+                    state: FileState::Modified,
+                }];
+                app.file_state.select(Some(0));
+                app
+            }
+            // The receipts spine (Pulls / PullDetail / Checks / Issues /
+            // IssueDetail / Notifications) shares one fixture: the readiness
+            // gate it needs is `remote` + `client`, and the list length does
+            // not matter to a footer assertion.
+            View::Pulls
+            | View::PullDetail
+            | View::Checks
+            | View::Issues
+            | View::IssueDetail
+            | View::Notifications => {
+                let mut app = connected_app();
+                app.view = view;
+                app
+            }
+            // The remaining screens render their panel bodies straight from an
+            // `App` whose lists are empty, and the footer does not read them.
+            _ => {
+                let mut app = base_app();
+                app.view = view;
+                app
+            }
+        }
+    }
+
+    /// Every screen that draws a hint row — which, after [`render`] took the
+    /// hint row away from the panels, is *every* screen: the footer is
+    /// unconditional, so the invariant "the hint row appears exactly once,
+    /// on the bottom row, on every screen" has to be swept over all 15
+    /// [`View`] variants, not the six the milestone originally named (B5-02).
+    ///
+    /// Per-variant reasons for being here — every screen is included, so what
+    /// each variant brings is what its own §2.3 view segment says:
+    ///
+    /// - `Dashboard` — §6.1: repo list + preview, view segment `⏎ n`.
+    /// - `Repo` — §6.2.1 工作区: file list + preview, view segment `⏎ s/u c p/P b/h/t`.
+    /// - `Diff` — §6.4: the full diff, view segment `j/k`.
+    /// - `Commit` — §6.5 input overlay: the *input* owns the row (§2.4 focus
+    ///   trap), but the footer still paints one, so it is swept too.
+    /// - `CommitDetail` — §6.5 正文: view segment `j/k` + a `Tab` tail.
+    /// - `Branches` — §6.2.2 分支: view segment `j/k ⏎ n d r`.
+    /// - `Config` — §6.7: view segment `j/k a i d`.
+    /// - `History` — §6.2.3 历史: commit list + detail, view segment `j/k ⏎`.
+    /// - `Tags` — §6.2.4 标签: view segment `j/k c d p a`.
+    /// - `Pulls` — §6.3 PR tab: view segment `g p c i n r ⏎`.
+    /// - `PullDetail` — §6.9: a detail sub-screen of the same hub, so it draws
+    ///   the hub's row minus `⏎ 详情`; it is a panel body like any other.
+    /// - `Checks` — §6.3 checks tab, same shared row.
+    /// - `Issues` — §6.3 issues tab, same shared row plus `⏎ 详情`.
+    /// - `IssueDetail` — §6.10: the issues hub's detail sub-screen, same as
+    ///   `PullDetail`.
+    /// - `Notifications` — §6.3 notifications tab, same shared row.
     fn hint_row_screens() -> Vec<App> {
-        let mut dashboard = base_app();
-        dashboard.file_entries = vec![FileEntry {
-            path: std::path::PathBuf::from("src/main.rs"),
-            state: FileState::Modified,
-        }];
-
-        let mut repo = base_app();
-        repo.view = View::Repo;
-        repo.file_entries = dashboard.file_entries.clone();
-
-        let mut pulls = connected_app();
-        pulls.view = View::Pulls;
-
-        let mut checks = connected_app();
-        checks.view = View::Checks;
-
-        let mut issues = connected_app();
-        issues.view = View::Issues;
-
-        let mut notifications = connected_app();
-        notifications.view = View::Notifications;
-
-        vec![dashboard, repo, pulls, checks, issues, notifications]
+        all_view_screens()
     }
 
     /// Render one frame through the view dispatcher and return the
@@ -945,25 +1030,667 @@ mod tests {
     /// spaces so the whitespace-stripped comparison is exact.
     const STATUS_SENTINEL: &str = "异步回执落点";
 
-    /// Every screen the footer serves: the six of the hint-row sweep plus the
-    /// panel views that carry their own list state. The commit view is left
-    /// out on purpose — its input popup is a centered overlay (§2.4), not a
-    /// panel body.
+    /// Every screen the footer serves: the §4.1 async-result and geometry
+    /// invariants have to hold on a screen that launches an async operation
+    /// just as on one that only reports it, so this sweep is total as well —
+    /// all 15 [`View`] variants through the shared [`all_view_screens`]
+    /// source (B5-02).
+    ///
+    /// Per-variant reasons for being here, grouped by what each screen *does*
+    /// with the footer rather than by whether it has a hint row:
+    ///
+    /// - `Dashboard` — batch pull/fetch publish here (`batch_log` under the
+    ///   footer); the launch point for the §4.1 invariant.
+    /// - `Repo` — push/pull feedback row (`remote_status`/`remote_op`); the
+    ///   other half of the §4.1 invariant.
+    /// - `Diff` — `r` re-reads the file's diff, whose failure is a status-row
+    ///   result (§4.3), so it must still render exactly once (§4.1 assertion 2).
+    /// - `Commit` — the input runs *through* the repo view's body (`repo_state`
+    ///   with `allow_discard = false`); the footer under it is that body's
+    ///   footer, not the overlay's, so the once-only rule still applies.
+    /// - `CommitDetail` — `r` re-reads the history pane's payload and the
+    ///   §4.3 refusal text lands on the status row.
+    /// - `Branches` — `r` reloads the branch list; a load failure paints the
+    ///   panel `error`, an operation result the status row — the swap needs
+    ///   both rows in place.
+    /// - `Config` — `r` rescans (`refresh_repos`); same footer contract.
+    /// - `History` — `r` reloads commits; a load failure paints the panel
+    ///   `error`, never the status row.
+    /// - `Tags` — `p`/`a` push feedback lands here (`remote_status` row).
+    /// - `Pulls` — hub list fetch results (`refresh_github`) settle on the
+    ///   status row (`remote_status`/`receipt_op`).
+    /// - `PullDetail` — detail fetch results (`REMOTE_STATUS Running 加载 PR…`)
+    ///   settle here; this is one of the two variants the old 12-screen
+    ///   sweep missed by reaching `View::CommitDetail` and stopping.
+    /// - `Checks` — hub tab under `receipt_op_label`, same as `Pulls`.
+    /// - `Issues` — hub tab under `receipt_op_label`, same as `Pulls`.
+    /// - `IssueDetail` — detail fetch results (`加载 Issue…`) settle here;
+    ///   the second variant the old sweep missed.
+    /// - `Notifications` — hub tab under `receipt_op_label`, same as `Pulls`.
+    ///
+    /// Nothing is excluded: each variant either launches, reports, or hosts
+    /// an async result, and §4.1's exactly-once rule does not admit an
+    /// exception for a screen that "only displays" one.
     fn footer_row_screens() -> Vec<App> {
-        let mut screens = hint_row_screens();
-        for view in [
-            View::Diff,
-            View::Branches,
-            View::Config,
-            View::History,
-            View::Tags,
-            View::CommitDetail,
-        ] {
-            let mut app = base_app();
-            app.view = view;
-            screens.push(app);
+        all_view_screens()
+    }
+
+    /// B5-02: the closing of the second level — the two sweeps must name the
+    /// same 15 screens `SCREENS` names, and every variant must have a finite,
+    /// square hint-row tail row. `SCREENS` is the `View` enum's own
+    /// enumeration, so this fails the moment the two sweep tables and the
+    /// enum stop agreeing instead of papering a gap with a comment.
+    #[test]
+    fn every_view_variant_is_covered_by_both_screen_sweeps() {
+        fn sorted(mut views: Vec<View>) -> Vec<View> {
+            // `View` carries no `Ord`: the enum order is the discriminant
+            // order, which is all a completeness check needs.
+            views.sort_by_key(|view| *view as u8);
+            views
         }
-        screens
+        let expected = sorted(crate::app::SCREENS.to_vec());
+        assert_eq!(
+            expected.len(),
+            15,
+            "SCREENS must enumerate the whole View enum"
+        );
+        for (label, screens) in [
+            ("hint_row", hint_row_screens()),
+            ("footer_row", footer_row_screens()),
+        ] {
+            let covered = sorted(screens.iter().map(|app| app.view).collect());
+            // `SCREENS` and the sweep must name the same set — no gap, no
+            // stale duplicate — so a newly added variant fails here instead
+            // of silently going untested.
+            assert_eq!(
+                covered, expected,
+                "the {label} sweep must cover every View variant exactly once"
+            );
+        }
+    }
+
+    // === B7-01: key → action assertions on observable state ===
+
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    /// One plain key press — the shape every terminal delivers, and the one
+    /// `App::dispatch_key`'s `is_plain` guards match. Without it a test would
+    /// be asserting against a chord the app never receives.
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// The observable state B7-01 is allowed to assert on: exactly the fields
+    /// that already exist on `App` and its state structs, and nothing added
+    /// for testing. Derived so a change to any of them shows up in a diff
+    /// rather than silently weakening an assertion.
+    ///
+    /// `github` is a tuple rather than the whole `GithubState` because that
+    /// struct holds a boxed trait object (no `PartialEq`); the receipt
+    /// observables that matter to a key press are its tab, its cursor, the
+    /// rows it holds, and whether its payload arrived.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Observable {
+        view: View,
+        status: Option<StatusLine>,
+        load_error: Option<String>,
+        remote_op: &'static str,
+        receipt_op: &'static str,
+        diff_content: String,
+        commit_message: String,
+        show_discard_confirm: bool,
+        show_branch_input: bool,
+        show_branch_delete_confirm: bool,
+        show_config_input: bool,
+        show_config_delete_confirm: bool,
+        show_config_picker: bool,
+        help_open: bool,
+        palette_open: bool,
+        /// The tag panel's modal (§6.2.4), reduced to which variant is open:
+        /// `c`/`d`/`p`/`a` all land here, and none of them is reachable from a
+        /// branch/config flag. The variant tag is enough — the sweep asserts
+        /// that *something* opened, not what was typed into it.
+        tags_modal: Option<&'static str>,
+        /// The receipts hub's active tab (§6.3): `<`/`>` do not switch it
+        /// (only `p`/`c`/`i`/`n` do), so any observable `g.tab` move on the hub
+        /// proves one of those tab keys dispatched.
+        github_tab: crate::app::GithubTab,
+        /// Which panel holds focus — the §1.1 third navigation dimension, and
+        /// the only thing a `Tab` / `BackTab` press can move.
+        focus: PanelFocus,
+        dashboard_selected: Option<usize>,
+        file_selected: Option<usize>,
+        branch_selected: Option<usize>,
+        config_selected: Option<usize>,
+        tags_selected: Option<usize>,
+        commit_file_selected: Option<usize>,
+        history_selected: usize,
+        preview_scroll: u16,
+        diff_scroll: u16,
+        commit_detail_scroll: u16,
+        /// `(tab, selected, pulls, checks, issues, notifications, detail,
+        /// issue_detail, connected)`.
+        github: (
+            crate::app::GithubTab,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            bool,
+            bool,
+            bool,
+        ),
+    }
+
+    impl Observable {
+        fn of(app: &App) -> Self {
+            let g = &app.github_state;
+            Self {
+                view: app.view,
+                status: app.status.clone(),
+                load_error: app.load_error.clone(),
+                remote_op: app.remote_op,
+                receipt_op: app.receipt_op,
+                diff_content: app.diff_content.clone(),
+                commit_message: app.commit_message.clone(),
+                show_discard_confirm: app.show_discard_confirm,
+                show_branch_input: app.show_branch_input,
+                show_branch_delete_confirm: app.show_branch_delete_confirm,
+                show_config_input: app.show_config_input,
+                show_config_delete_confirm: app.show_config_delete_confirm,
+                show_config_picker: app.show_config_picker,
+                help_open: app.help_open,
+                palette_open: app.palette_open,
+                tags_modal: app.tags_state.modal.as_ref().map(|m| match m {
+                    crate::app::TagsModal::Input { .. } => "Input",
+                    crate::app::TagsModal::Confirm { .. } => "Confirm",
+                }),
+                github_tab: g.tab,
+                focus: app.focus(),
+                dashboard_selected: app.dashboard_state.selected(),
+                file_selected: app.file_state.selected(),
+                branch_selected: app.branch_state.selected(),
+                config_selected: app.config_state.selected(),
+                tags_selected: app.tags_state.list_state.selected(),
+                commit_file_selected: app.commit_file_state.selected(),
+                history_selected: app.history.selected,
+                preview_scroll: app.preview_scroll,
+                diff_scroll: app.diff_scroll,
+                commit_detail_scroll: app.commit_detail_scroll,
+                github: (
+                    g.tab,
+                    g.selected,
+                    g.pulls.len(),
+                    g.checks.len(),
+                    g.issues.len(),
+                    g.notifications.len(),
+                    g.detail.is_some(),
+                    g.issue_detail.is_some(),
+                    g.connected(),
+                ),
+            }
+        }
+    }
+
+    /// The fields a key press must move for the press to count as "it
+    /// dispatched to an action". `view` and `status` lead because they are the
+    /// two the milestone names; the rest are the per-panel verbs' landing
+    /// spots.
+    fn moved(before: &Observable, after: &Observable) -> bool {
+        before != after
+    }
+
+    /// Dispatch `event` on a fresh `screen` fixture and report whether anything
+    /// observable moved — the one helper every B7-01 assertion goes through,
+    /// so "dispatched to an action" means the same thing in all of them.
+    fn dispatched(view: View, event: KeyEvent) -> (Observable, Observable, bool) {
+        dispatched_from(view, event, keyed_screen(view))
+    }
+
+    /// Dispatch `event` on an explicitly built `app` instead of the default
+    /// fixture. Cursor keys that cannot move from one end of a list (`k` from
+    /// the top row, `j` from the bottom) are unfalsifiable on a single seed,
+    /// so the sweep presses them on *both* a fresh and a max-seeded fixture
+    /// and accepts a move on either.
+    fn dispatched_from(
+        view: View,
+        event: KeyEvent,
+        mut app: App,
+    ) -> (Observable, Observable, bool) {
+        let before = Observable::of(&app);
+        let alive = app.dispatch_key(event);
+        let after = Observable::of(&app);
+        assert!(alive, "view {view:?}: the key must not quit the app");
+        let moved = moved(&before, &after);
+        (before, after, moved)
+    }
+
+    /// Scratch directory for one fixture, wiped on every run so a stale
+    /// repository can never make a key look like it did nothing.
+    fn keyed_temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "gitpulse-ui-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A repository with two branches, one tag, two commits and one modified
+    /// tracked file — enough for every workspace verb to have a real target.
+    /// A synthetic `App` would leave `stage_current`, `switch_to_selected_branch`
+    /// and `start_tag_push` silently inert, which is exactly the "key does
+    /// nothing" failure this item exists to catch, so the fixture must be real.
+    fn keyed_repo(tag: &str) -> RepoInfo {
+        let dir = keyed_temp_dir(tag);
+        let repo = git2::Repository::init(&dir).unwrap();
+        {
+            let mut config = repo.config().unwrap();
+            config.set_str("user.name", "GitPulse Test").unwrap();
+            config.set_str("user.email", "test@gitpulse.local").unwrap();
+        }
+        let sig = git2::Signature::now("GitPulse Test", "test@gitpulse.local").unwrap();
+        let commit = |repo: &git2::Repository, message: &str, body: &str| {
+            std::fs::write(dir.join("a.txt"), body).unwrap();
+            let mut index = repo.index().unwrap();
+            index.add_path(std::path::Path::new("a.txt")).unwrap();
+            index.write().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[])
+                .unwrap()
+        };
+        commit(&repo, "first", "v1\n");
+        // A second commit so `j`/`k` have somewhere to move on History.
+        let first = repo.head().unwrap().peel_to_commit().unwrap();
+        std::fs::write(dir.join("b.txt"), "v2\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("b.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "second", &tree, &[&first])
+            .unwrap();
+
+        // A second branch (so `Enter` on Branches has a target that is not
+        // HEAD) and *two* tags: `p` has something to push, and `j`/`k` have a
+        // row to move between — a single-tag list would pin the cursor and make
+        // the Tags cursor keys unfalsifiable rather than proven live.
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature", &head, true).unwrap();
+        repo.tag_lightweight("v1", head.as_object(), false).unwrap();
+        repo.tag_lightweight("v2", head.as_object(), false).unwrap();
+        // An unstaged edit, so `s` (stage) and `Enter` (diff) have real work.
+        std::fs::write(dir.join("a.txt"), "v1\nedited\n").unwrap();
+
+        crate::git::query_status(&dir).unwrap()
+    }
+
+    /// The screen `view`, loaded with real data so that every key the screen
+    /// advertises has something to act on. This is the B7-01 counterpart to
+    /// [`screen_for`]: that one only needs a panel body to draw, this one
+    /// needs the panel's *verbs* to be reachable.
+    fn keyed_screen(view: View) -> App {
+        let repo = keyed_repo("shared");
+        let mut app = App::new(Config::default());
+        app.current_repo = Some(0);
+        app.repos = vec![repo];
+
+        match view {
+            View::Dashboard => {
+                app.view = View::Dashboard;
+                app.current_repo = None;
+                app.repos.push(keyed_repo("second"));
+                app.dashboard_state.select(Some(0));
+            }
+            View::Repo => {
+                app.view = View::Repo;
+                app.load_file_entries();
+            }
+            View::Diff => {
+                app.view = View::Diff;
+                app.diff_content = "@@ -1 +1,2 @@\n v1\n+edited\n".to_string();
+                // Long enough that both scroll directions can move (§6.4
+                // `j`/`k` scroll the diff body).
+                app.diff_content = (0..400).map(|i| format!("+line {i}\n")).collect::<String>();
+                app.diff_scroll = 1;
+            }
+            View::Commit => {
+                app.view = View::Commit;
+                app.commit_message = "feat: ".to_string();
+            }
+            View::CommitDetail => {
+                app.view = View::CommitDetail;
+                app.load_history();
+            }
+            View::Branches => {
+                app.view = View::Branches;
+                app.load_branches();
+            }
+            View::Config => {
+                app.view = View::Config;
+                // A real scan dir so `j`/`k` and `d` have a row to act on.
+                app.config.scan_dirs = vec![keyed_temp_dir("cfg-a"), keyed_temp_dir("cfg-b")];
+                app.config_state.select(Some(0));
+            }
+            View::History => {
+                app.view = View::History;
+                app.load_history();
+            }
+            View::Tags => {
+                app.view = View::Tags;
+                app.load_tags();
+            }
+            // The receipts spine: a resolved remote plus a cached client, so
+            // the tab keys, the cursor keys and `⏎` all have a panel to move.
+            View::Pulls
+            | View::PullDetail
+            | View::Checks
+            | View::Issues
+            | View::IssueDetail
+            | View::Notifications => {
+                app.view = view;
+                app.github_state.remote = Some(github_remote());
+                app.github_state.client = Some(pulls::offline_client());
+                app.github_state.pulls = vec![
+                    crate::platform::PrSummary {
+                        number: 1,
+                        title: "first".to_string(),
+                        state: "open".to_string(),
+                        draft: false,
+                        author: "alice".to_string(),
+                        head_ref: "feat/a".to_string(),
+                        base_ref: "main".to_string(),
+                        updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    },
+                    crate::platform::PrSummary {
+                        number: 2,
+                        title: "second".to_string(),
+                        state: "open".to_string(),
+                        draft: false,
+                        author: "bob".to_string(),
+                        head_ref: "feat/b".to_string(),
+                        base_ref: "main".to_string(),
+                        updated_at: "2026-01-02T00:00:00Z".to_string(),
+                    },
+                ];
+                app.github_state.issues = vec![crate::platform::IssueSummary {
+                    number: 7,
+                    title: "an issue".to_string(),
+                    state: "open".to_string(),
+                    author: "carol".to_string(),
+                    assignee: None,
+                    updated_at: "2026-01-03T00:00:00Z".to_string(),
+                    labels: Vec::new(),
+                }];
+                app.github_state.checks = vec![crate::platform::CheckSummary {
+                    name: "build".to_string(),
+                    status: "completed".to_string(),
+                    conclusion: "success".to_string(),
+                    html_url: String::new(),
+                }];
+                app.github_state.notifications = vec![crate::platform::NotificationSummary {
+                    id: "n1".to_string(),
+                    repo: "octo/demo".to_string(),
+                    subject_title: "a note".to_string(),
+                    subject_type: "Issue".to_string(),
+                    reason: "mention".to_string(),
+                    updated_at: "2026-01-04T00:00:00Z".to_string(),
+                    unread: true,
+                }];
+                app.github_state.selected = 1;
+            }
+        }
+        app
+    }
+
+    /// [`keyed_screen`] with every cursor pushed to the far end of its list, so
+    /// the upward cursor keys (`k`, `Up`) have somewhere to go. The sweep
+    /// presses a cursor key on this screen *and* on the plain one: from one
+    /// seed only one direction can ever move, and which one depends on where
+    /// the loader happens to leave the cursor — a seed that silently stops
+    /// proving `k` would leave the `j`/`k` binding untested with the sweep
+    /// still green.
+    fn keyed_seed_last(view: View) -> App {
+        let mut app = keyed_screen(view);
+        match view {
+            View::Dashboard => app
+                .dashboard_state
+                .select(Some(app.repos.len().saturating_sub(1))),
+            View::Repo => app
+                .file_state
+                .select(Some(app.file_entries.len().saturating_sub(1))),
+            View::Diff => app.diff_scroll = app.diff_scroll.saturating_add(1),
+            View::History => app
+                .history
+                .select(app.history.commits.len().saturating_sub(1)),
+            View::CommitDetail => {
+                // `j`/`k` answer the region that holds the focus (§6.5): the
+                // body scrolls while 正文 has it, the file cursor walks while
+                // the file list does. Both are moved so either press moves.
+                app.commit_detail_scroll = 4;
+                let last = crate::ui::commit_detail::commit_file_len(app.history.detail.as_ref())
+                    .saturating_sub(1);
+                app.commit_file_state.select(Some(last));
+            }
+            View::Branches => app
+                .branch_state
+                .select(Some(app.branches.len().saturating_sub(1))),
+            View::Config => app
+                .config_state
+                .select(Some(app.config.scan_dirs.len().saturating_sub(1))),
+            View::Tags => app
+                .tags_state
+                .select(app.tags_state.tags.len().saturating_sub(1)),
+            View::Pulls | View::Checks | View::Issues | View::Notifications => {
+                app.github_state.selected = 1
+            }
+            _ => {}
+        }
+        app
+    }
+
+    /// The key caps `view` advertises on its own hint row, read back from the
+    /// rendered row rather than from a hand-written list — so the test asks
+    /// the same question the user does ("what does this screen claim I can
+    /// press?") and a newly advertised key enters the sweep automatically.
+    ///
+    /// The global segment (`⏎打开 Esc返回 r刷新 q退出`) is skipped: those four
+    /// verbs are screen-independent and are pinned by
+    /// `the_global_verbs_dispatch_on_every_screen`. What is left is the view
+    /// segment plus the tail, i.e. the keys that are *this screen's* claim and
+    /// therefore the ones a screen can get wrong.
+    fn advertised_view_keys(view: View) -> Vec<String> {
+        let app = keyed_screen(view);
+        let global: String = crate::ui::components::footer::global_hints()
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        let row = view_hints(&app);
+        let mut segments = vec![row.view];
+        if let Some(tail) = row.tail {
+            segments.push(tail);
+        }
+        let mut caps = Vec::new();
+        for segment in segments {
+            // A cap is the accent-bold key span; the descriptor after it is
+            // the muted caption. The two are told apart by style, so a key
+            // named like a descriptor cannot be mistaken for one.
+            for (index, span) in segment.spans.iter().enumerate() {
+                if span.style != theme::role::key() {
+                    continue;
+                }
+                // `s/u`, `p/P`, `b/h/t` and `< >` are one cap naming several
+                // keys; each is a real key and each must dispatch.
+                let cap = span.content.as_ref();
+                if !global.contains(cap) {
+                    caps.push(cap.to_string());
+                }
+                // Skip the separator span that follows a cap.
+                let _ = index;
+            }
+        }
+        caps
+    }
+
+    /// Every key cap a screen prints, expanded: `s/u` → [`s`, `u`],
+    /// `p/P` → [`p`, `P`], `< >` → [`<`, `>`], `⏎` → [`Enter`], `Esc` →
+    /// [`Esc`], `Tab` → [`Tab`], `Enter` → [`Enter`], and a lone letter maps
+    /// to itself. A cap shape this does not know is a test bug, so it panics
+    /// rather than silently skipping a key.
+    fn expand_cap(cap: &str) -> Vec<KeyCode> {
+        // A cap that names several keys separates them with `/` (`s/u`,
+        // `j/k`, `p/P`). The separator is punctuation the row draws, not a
+        // key — dispatching it would test a key the user can never press.
+        let chars: Vec<KeyCode> = cap
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '/')
+            .map(KeyCode::Char)
+            .collect();
+        match cap.trim() {
+            "⏎" | "Enter" => vec![KeyCode::Enter],
+            "Esc" => vec![KeyCode::Esc],
+            "Tab" => vec![KeyCode::Tab],
+            other => {
+                assert!(
+                    chars.iter().all(|c| matches!(c, KeyCode::Char(_))) && !chars.is_empty(),
+                    "unknown hint-row key cap {other:?}: extend expand_cap"
+                );
+                chars
+            }
+        }
+    }
+
+    /// B7-01, the universal regression nail: **every key a screen advertises on
+    /// its own hint row actually dispatches to an action on that screen.**
+    ///
+    /// This is the assertion the old source-string gate could not make. That
+    /// gate asked whether `app.rs` contained the token `KeyCode::Char('P')`
+    /// *somewhere*; it never rendered a screen, never pressed a key, and so
+    /// sailed straight through the dead `P` binding the repo hint row
+    /// advertised. Here the question is asked of the running app: the key caps
+    /// are read back from the rendered row, each is dispatched through
+    /// [`App::dispatch_key`], and the press must move observable state.
+    ///
+    /// The exception the milestone allows is used where a key *genuinely*
+    /// cannot move anything on a loaded screen — the screen is the proof that
+    /// the key was routed (an unhandled key would be swallowed before the
+    /// modal/view handler ran, and the modal's own rows would not even be
+    /// rendered). For those, the assertion is the negative one: the view must
+    /// NOT change. Each is listed with its reason rather than being skipped
+    /// silently, so a key that *stops* being inert is caught too — the list is
+    /// checked for exhaustiveness by `advertised_view_keys` below.
+    ///
+    /// `#[tokio::test(flavor = "multi_thread")]`: the push / pull / tag-push /
+    /// receipt-fetch verbs spawn their work through `tokio::spawn`, which
+    /// panics outside a runtime, and that work shells out to `git`. A
+    /// current-thread runtime cannot host both — the spawned blocking call
+    /// deadlocks the single worker — so the sweep runs on a multi-thread one.
+    /// This is what lets those keys be pressed at all: a plain `#[test]` could
+    /// only ever have covered the non-spawning half of the bindings.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_advertised_key_on_every_screen_dispatches_an_action() {
+        /// Keys that legitimately cannot move observable state on a *loaded*
+        /// screen, with the reason. Anything not listed must dispatch.
+        fn known_inert(view: View, code: KeyCode) -> Option<&'static str> {
+            match (view, code) {
+                // `⏎ 打开` is the global segment's verb; on the receipts
+                // detail screens it has no target (the detail was already
+                // opened by the list that pushed it) and the *view* segment
+                // does not advertise it.
+                (View::PullDetail | View::IssueDetail, KeyCode::Enter) => {
+                    Some("a detail screen is already open; Enter is not its verb")
+                }
+                // `g 进入` on the receipts hub re-enters the hub it is already
+                // on, so the tab and rows are unchanged; `g` is the global
+                // "jump to first row" verb there and *does* move the cursor.
+                _ => None,
+            }
+        }
+
+        let mut inert_keys: Vec<String> = Vec::new();
+        for view in crate::app::SCREENS {
+            let caps = advertised_view_keys(view);
+            assert!(
+                !caps.is_empty(),
+                "view {view:?} advertises no view-segment keys: the sweep \
+                 would pass vacuously"
+            );
+            for cap in &caps {
+                for code in expand_cap(cap) {
+                    let (before, after, moved) = match code {
+                        // Cursor keys cannot move from the edge of a 1-row
+                        // list: `k` is stuck at the top, `j` at the bottom. The
+                        // fixture lands the cursor wherever the loader leaves
+                        // it, so press on both that and a max-seeded screen and
+                        // accept a move on either — a key that moves on neither
+                        // truly dispatches nowhere.
+                        KeyCode::Char('j') | KeyCode::Char('k') => {
+                            let fresh = dispatched(view, press(code));
+                            if fresh.2 {
+                                fresh
+                            } else {
+                                dispatched_from(view, press(code), keyed_seed_last(view))
+                            }
+                        }
+                        _ => dispatched(view, press(code)),
+                    };
+                    if let Some(reason) = known_inert(view, code) {
+                        // The documented exception, asserted in the negative:
+                        // the press must be routed without navigating away.
+                        assert_eq!(
+                            before.view, after.view,
+                            "view {view:?} key {code:?} is documented inert \
+                             ({reason}) yet moved the view"
+                        );
+                        continue;
+                    }
+                    if !moved {
+                        inert_keys.push(format!("{view:?} {cap} ({code:?})"));
+                    }
+                }
+            }
+        }
+        assert!(
+            inert_keys.is_empty(),
+            "these keys are advertised on a screen's hint row but moved \
+             nothing observable when dispatched:\n  {}",
+            inert_keys.join("\n  ")
+        );
+    }
+
+    /// The sweep's own guard against vacuity and against silent drift: every
+    /// screen must advertise at least the keys §2.3 puts in its view segment,
+    /// and the cap vocabulary must stay inside what [`expand_cap`] knows — a
+    /// new cap shape fails here instead of being skipped.
+    #[test]
+    fn advertised_view_keys_are_read_from_the_row_not_from_a_fixture_list() {
+        // A screen whose view segment is non-empty on every screen, per §2.3.
+        for view in crate::app::SCREENS {
+            let caps = advertised_view_keys(view);
+            assert!(
+                caps.iter().all(|cap| !cap.is_empty()),
+                "view {view:?} produced an empty key cap"
+            );
+            for cap in &caps {
+                // Every cap expands to at least one concrete key.
+                assert!(
+                    !expand_cap(cap).is_empty(),
+                    "view {view:?} cap {cap:?} expanded to no key"
+                );
+            }
+        }
+        // Spot-check that the extractor really reads the row: the repo screen
+        // advertises the fold that the dead `P` key used to hide in.
+        let repo_caps = advertised_view_keys(View::Repo);
+        assert!(
+            repo_caps.iter().any(|cap| cap.contains('P')),
+            "the repo row must still advertise p/P: {repo_caps:?}"
+        );
     }
 
     /// §4.1 assertion 2: one async result, one rendering. A message reaches
