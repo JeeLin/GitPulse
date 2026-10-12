@@ -192,3 +192,42 @@ next 分支为孤儿分支重写，旧版 v0.1-v0.7 实现归档于 master，因
 - **缺陷池 bug**：0 个（`docs/BUGS.md` 缺陷池已清空）
 - **交付结果**（v0.9.0，2026-10-12）：子任务 1-5 全部 ✅；仓库行新增低优先 `作者` 列、提交弹窗标题回显 `提交信息 · {名字} <{邮箱}>`、仓库视图 `A` 键打开单行输入并写入 `.git/config` local 后即时生效（端到端验证：切换后 commit 真实由新身份签名）。提交路径 `src/git/commit.rs` 与 `src/platform/`、`src/github/`、`src/config/` 均未改动，`Config` schema 不变，向后兼容未配置 `user.*` 的仓库。605 tests / 行覆盖 95.93% / clippy 零警告。审查轮 1 产出 4 条发现（🟡×3 + 🟢×1，均已修复并登记 Bugs 表）→ 统一打回步骤3 → 第2轮 4✓ 5✓ 6✓ 7✓ 全通过；步骤4/5/6/7 报告在 `.mdflow/milestones/v0.9.0-reports/round2/`。
 - **后续**：表内已无无标记条目，下次里程碑由 `mdflow-planner` 从 `PRODUCT.md` 候选池规划。
+
+### M8 文档链接与技术债清理 🔄 当前
+
+- **核心功能**：清零全库 `cargo doc` rustdoc 断链（25 条存量，本里程碑**零新功能**），并把 `AGENTS.md`「代码审查维度」表中已裁决落地的可执行验证动作补齐，使同类问题此后每轮审查自动拦截。**纯 patch，不改任何运行时行为**——`src/` 的可执行代码 diff 应为 0 行（仅 doc comment 行变动）。
+- **背景**：`PRODUCT.md` 25 项功能全部 `[x]`、`docs/BUGS.md` 缺陷池为空，规划器无输入；由维护者裁决「做质量/债务清理里程碑」而立项。债的两条来源：(1) v0.9.0 收尾台账第 13 条登记的**存量 25 条 rustdoc 断链**（基线 25 / 当前 25，本里程碑零新增，存量未清）；(2) 台账中 6 条落地目标为 `scripts/check.sh` 的候选——该路径在本项目**不存在**，改投 `AGENTS.md` 审查维度。
+- **端到端验收**：`cargo doc --no-deps 2>&1 | grep -c "unresolved link"` 输出 **0**（当前 25）；`cargo test` 仍 605 全绿、覆盖率 ≥90%、clippy 零警告、fmt 干净；25 条内链每条逐条验证目标真实存在且可见性可达（非仅靠 `cargo doc` 绿灯）。
+- **25 条断链的实测根因分类**（`cargo doc --no-deps` 实测，非估算）：
+
+  | 根因 | 条数 | 证据 | 处置方向 |
+  |------|------|------|---------|
+  | **A. `#[cfg(test)]` 目标在非测试构建下不存在** | 2 | `set_config_path_override`（`src/config/path.rs:21` 带 `#[cfg(test)]`，被 `src/config/path.rs:39` 引用）、`compose_hint_row`（`src/ui/components/footer.rs:266` 私有 fn，被 `src/ui/repo.rs:149` 引用） | 改为纯文本（`` `fn 名` ``）或改指公开替代；不为此放宽可见性 |
+  | **B. 路径已随重构漂移** | 4 | `crate::ui::remote::*`→实际在 `ui::components::remote`（`src/app.rs:2575`、`src/ui/tags.rs:62`）；`crate::ui::render_status_line`→实际在 `ui::components::footer`（`src/ui/components/state_panel.rs:8`）；`crate::App`/`crate::ui::components::footer::compose_hint_row`（`src/ui/components/status.rs:21`、`src/ui/repo.rs:149`） | 重写为当前真实路径 |
+  | **C. 同名兄弟模块需限定** | 9 | `PlatformError`/`GithubError` 枚举变体 `Http`/`Network`/`Other` 在自身枚举定义内写 `[`Http`]`（`src/platform/error.rs:10`、`src/github/error.rs:9`）；`render_status_line`/`render_status_or_remote`/`render_footer` 在 `components/mod.rs` 内写裸名但实际定义于 `footer` 子模块 | 用 `Self::` 或全路径限定 |
+  | **D. 目标需 `use` 引入才在作用域内** | 8 | `PlatformKind::as_str`/`SelfHosted`（`src/app.rs:313-314`，`use` 在函数体内 `src/app.rs:301`）、`PlatformRemote`（`src/app.rs:1671`）、`build_client`（`src/app.rs:1912`）、`App::dashboard_rows`/`toggle_selected_group`（`src/ui/dashboard.rs:29,603`）、`theme::width`（`src/ui/dashboard.rs:67`，实际为 `theme::width` 模块，`width` fn 在 `cells`）、`App::group_of`（`src/config/types.rs:98`） | 补全路径限定 |
+  | **E. 目标名已不存在（陈旧注释）** | 2 | `theme::width` 的「`width` 函数」实为 `cells::width`（`src/ui/components/cells.rs:13`）；`RemoteStatus`（`src/ui/tags.rs:60`，定义在 `src/ui/components/status.rs:32`，tags 未 `use`） | 指向真实符号或改纯文本 |
+
+  > 分类按**主因**归类，B/E 存在交叉；总数以 `cargo doc` 实测 25 为准，步骤 1 须逐条复核后再定稿。
+- **子任务预估**：
+
+  | # | 子任务 | 预估 |
+  |---|--------|------|
+  | 1 | 逐条复核 25 条断链的真实目标与可见性，按 A–E 根因定稿修复方案（禁止仅凭 `cargo doc` 绿灯判定修复完成） | S |
+  | 2 | 修复 A/B/E 三类共 8 条：`#[cfg(test)]` 目标降级为纯文本、漂移路径重写、陈旧符号指向真实符号；**不改任何可见性** | M |
+  | 3 | 修复 C/D 两类共 17 条：同模块内枚举变体与兄弟模块符号用 `Self::`／全路径限定，补全 `use` 作用域外目标的路径 | M |
+  | 4 | 回归门禁：新增测试断言 `cargo doc --no-deps` 的 `unresolved link` 计数为 0（或以构建期断言/`#![deny(rustdoc::broken_intra_doc_links)]` 钉住），使断链清零成为可持续契约而非一次性清理 | M |
+  | 5 | `AGENTS.md`「代码审查维度」补位：把台账中裁决落地为该表的 6 条可执行验证动作（弹窗标题宽度 ≤80 cell、枚举列注释计数、`pub(crate) fn` 生产调用方、宿主条件分支改无条件断言、「承诺不改的文件」diff 空集验证、新增内链总数不高于基线） | M |
+  | 6 | 文档：记录「新增 rustdoc 内链须逐条验证目标存在且总数不高于基线」到 `AGENTS.md`；`CHANGELOG.md` 记 patch 条目；`PRODUCT.md`/`DESIGN.md` 无交互变更故不动 | S |
+
+- **依赖**：M7 / v0.9.0（基线 ref `4076f15`；断链基线数 25 由该 ref 确立）
+- **边界说明**（均不属本里程碑，越界即打回）：
+  - **不改运行时行为**：可执行代码 diff 必须为 0 行，仅 doc comment 可动；`cargo test` 须保持 605 全绿
+  - **不放宽可见性**：不得为「让 `cargo doc` 变绿」把 `#[cfg(test)]` 私有项或私有 fn 提升为 `pub`/`pub(crate)`
+  - **不删断链以求绿**：把 `[`X`]` 改成纯文本须是「目标确不可链接」时才可，且须在子任务 1 复核中说明理由
+  - **不做**新功能、**不做** v0.9.0 台账中 4 条 `❌` 候选（已被实测证伪，登记即关闭）
+- **状态**：🔄 当前
+- **版本类型**：patch
+- **版本号**：0.9.1
+- **缺陷池 bug**：0 个（本里程碑由维护者直接裁决立项，不经缺陷池；25 条断链为 v0.9.0 台账第 13 条登记的存量债，非 `docs/BUGS.md` 条目）
+- **后续**：本里程碑为 patch 清理，不产出新功能；此后规划器仍需 `PRODUCT.md` 新增 `[待规划]` 功能或 `docs/BUGS.md` 新增缺陷方有输入。产品走向的进一步讨论见项目 issue 讨论任务。
