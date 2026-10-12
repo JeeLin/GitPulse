@@ -1478,7 +1478,10 @@ impl App {
     /// open — there is nothing to switch, and the key is only advertised on a
     /// screen where it can act (§2.3: a hint the row prints must dispatch).
     pub fn open_author_input(&mut self) {
-        if self.repo_workspace_path().is_none() {
+        // Guard on the index `submit_author_input` actually writes, not on
+        // `repo_workspace_path()`: that one resolves `branch_repo.or(current_repo)`
+        // and would validate a repository the submit path never touches.
+        if self.current_repo.filter(|i| *i < self.repos.len()).is_none() {
             return;
         }
         self.author_input = crate::git::author_label(self.current_author());
@@ -4591,6 +4594,50 @@ mod tests {
         assert_eq!(fresh.author, app.repos[idx].author);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `A` must validate the repository it will *write*, not a different one.
+    ///
+    /// `repo_workspace_path()` resolves `branch_repo.or(current_repo)`, so a
+    /// screen that only sets `branch_repo` would let the input open against a
+    /// repository `submit_author_input` never touches — the switch would then
+    /// write the wrong repo or fail with a stale-index error.
+    ///
+    /// Falsifiable: restoring the `repo_workspace_path()` guard opens the modal
+    /// here and turns this red.
+    #[test]
+    fn open_author_input_declines_when_current_repo_is_unusable() {
+        let mut app = App::new(Config::default());
+        app.repos = vec![crate::git::RepoInfo {
+            name: "GitPulse".to_string(),
+            path: std::path::PathBuf::from("/tmp/GitPulse"),
+            branch: "main".to_string(),
+            dirty: Default::default(),
+            ahead: 0,
+            behind: 0,
+            last_commit: Default::default(),
+            remote: None,
+            is_worktree: false,
+            main_repo: None,
+            author: None,
+        }];
+
+        // A valid `branch_repo` with no `current_repo`: the old guard passed.
+        app.branch_repo = Some(0);
+        app.current_repo = None;
+        app.open_author_input();
+        assert!(
+            !app.show_author_input,
+            "no selected repository means nothing to switch"
+        );
+
+        // A stale `current_repo` out of range must decline too.
+        app.current_repo = Some(7);
+        app.open_author_input();
+        assert!(
+            !app.show_author_input,
+            "a stale repository index must not open the switch"
+        );
     }
 
     /// Sub-task 5 · checkpoint ⑭ regression nail: the *actual startup branch*
