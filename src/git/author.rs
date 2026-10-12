@@ -17,18 +17,21 @@ use anyhow::{Context, Result};
 
 use git2::Repository;
 
-/// Read the effective commit identity of a repository.
+/// Read the effective commit identity of an **already-open** repository (v0.9.0).
 ///
 /// Returns `Some` only when **both** `user.name` and `user.email` resolve —
 /// git2's config lookup falls back `local → global → system` (the same
 /// resolution `super::commit` relies on), so a repository that only inherits
 /// the global default still reports it here.
 ///
+/// The repo is taken as an open `&Repository` so the caller that already holds
+/// one ([`super::status::query_status`]) reuses it — this adds two
+/// `get_string` calls, not a second `Repository::open`.
+///
 /// `None` means "nothing to echo", which the dashboard and the commit popup
 /// render as `无` / `(无本地配置)` rather than as a failure: a repository
 /// whose identity cannot be read is still a row that must render.
-pub(crate) fn read_author(repo_path: &Path) -> Option<super::status::AuthorInfo> {
-    let repo = Repository::open(repo_path).ok()?;
+pub(crate) fn read_author(repo: &Repository) -> Option<super::status::AuthorInfo> {
     let config = repo.config().ok()?;
     let name = config.get_string("user.name").ok()?;
     let email = config.get_string("user.email").ok()?;
@@ -83,9 +86,9 @@ mod tests {
     #[test]
     fn read_author_returns_the_local_identity() {
         let dir = temp_repo("read");
-        init_repo(&dir);
+        let repo = init_repo(&dir);
 
-        let author = read_author(&dir).expect("a configured repository has an author");
+        let author = read_author(&repo).expect("a configured repository has an author");
         assert_eq!(author.name, "Local Name");
         assert_eq!(author.email, "local@gitpulse.local");
 
@@ -95,16 +98,16 @@ mod tests {
     #[test]
     fn read_author_falls_back_to_the_inherited_identity() {
         let dir = temp_repo("unset");
-        let _repo = Repository::init(&dir).unwrap();
+        let repo = Repository::init(&dir).unwrap();
 
         // No *local* `user.*` here, but git2 resolves `local → global → system`
         // on every `get_string` — the same lookup `super::commit` performs.
         // Echoing the inherited identity is therefore the truth: it is what a
         // commit in this repository would be signed with. (A repository with no
         // identity at all is covered by
-        // `read_author_returns_none_for_a_path_that_is_not_a_repository` and by
-        // the blank-value guard below.)
-        if let Some(author) = read_author(&dir) {
+        // `read_author_is_none_when_the_identity_is_blank` and by
+        // `set_local_author_fails_cleanly_on_a_path_that_is_not_a_repository`.)
+        if let Some(author) = read_author(&repo) {
             assert!(
                 !author.name.is_empty() && !author.email.is_empty(),
                 "a resolved author must never carry a blank name or email"
@@ -118,18 +121,21 @@ mod tests {
     fn read_author_is_none_when_the_identity_is_blank() {
         let dir = temp_repo("blank");
         let repo = Repository::init(&dir).unwrap();
-        let mut config = repo.config().unwrap();
-        // A blank name is not a usable signature: git itself refuses it, so it
-        // must not be echoed as one either.
-        config.set_str("user.name", "").unwrap();
-        config.set_str("user.email", "").unwrap();
+        {
+            let mut config = repo.config().unwrap();
+            // A blank name is not a usable signature: git itself refuses it, so
+            // it must not be echoed as one either.
+            config.set_str("user.name", "").unwrap();
+            config.set_str("user.email", "").unwrap();
+        }
 
         // The empty-string guard in `read_author` is what makes this
         // deterministic: if it were removed, this test goes red whenever the
         // machine happens to carry a global identity.
-        if config.get_string("user.name").unwrap().is_empty() {
-            assert!(read_author(&dir).is_none(), "a blank identity is not an author");
-        }
+        assert!(
+            read_author(&repo).is_none(),
+            "a blank identity is not an author"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -137,11 +143,11 @@ mod tests {
     #[test]
     fn set_local_author_round_trips_through_read_author() {
         let dir = temp_repo("write");
-        let _repo = init_repo(&dir);
+        let repo = init_repo(&dir);
 
         set_local_author(&dir, "New Name", "new@gitpulse.local").expect("local write");
 
-        let author = read_author(&dir).expect("a written identity is immediately readable");
+        let author = read_author(&repo).expect("a written identity is immediately readable");
         assert_eq!(author.name, "New Name");
         assert_eq!(author.email, "new@gitpulse.local");
 
@@ -207,14 +213,19 @@ mod tests {
         assert_eq!(crate::git::author_label(None), "(无本地配置)");
     }
 
+    /// A scan dir that is not (yet) a repository must not panic the switch:
+    /// `set_local_author` reports an `Err` the caller turns into a status-line
+    /// message, and `read_author` never sees such a path at all — it is only
+    /// ever handed a repository `query_status` already opened successfully.
     #[test]
-    fn read_author_returns_none_for_a_path_that_is_not_a_repository() {
+    fn set_local_author_fails_cleanly_on_a_path_that_is_not_a_repository() {
         let dir = temp_repo("missing");
         fs::create_dir_all(&dir).unwrap();
 
-        // A scan dir that is not (yet) a repository must not fail the scan:
-        // `read_author` degrades to `None` so the row still renders.
-        assert!(read_author(&dir.join("nope")).is_none());
+        assert!(
+            set_local_author(&dir.join("nope"), "X", "x@gitpulse.local").is_err(),
+            "writing into a non-repository is an error, never a panic"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

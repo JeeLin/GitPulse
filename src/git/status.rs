@@ -98,7 +98,7 @@ pub fn query_status(repo_path: &Path) -> Result<RepoInfo> {
     let (ahead, behind) = compute_ahead_behind(&repo)?;
     let last_commit = resolve_last_commit(&repo)?;
     let remote = resolve_remote(&repo);
-    let author = super::author::read_author(repo_path);
+    let author = super::author::read_author(&repo);
 
     let name = repo_display_name(repo_path);
 
