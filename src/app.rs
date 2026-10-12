@@ -3609,8 +3609,8 @@ impl App {
     fn handle_dashboard_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                // Headers are rows the cursor steps over, so the bound is the
-                // row count, not `repos.len()` (sub-task 6). Count first:
+                // Headers occupy list rows, so the cursor bound is the *row*
+                // count, not `repos.len()` (sub-task 6). Count first:
                 // `dashboard_rows` borrows all of `self`.
                 let rows = self.dashboard_rows().len();
                 move_selection(&mut self.dashboard_state, rows, true);
