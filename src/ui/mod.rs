@@ -539,7 +539,7 @@ fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
 /// top.
 fn render_commit_view(f: &mut Frame, content: Rect, app: &mut App) {
     repo::render_repo(f, content, repo_state(app, false));
-    commit::render_commit_popup(f, &app.commit_message);
+    commit::render_commit_popup(f, &app.commit_message, app.current_author());
 }
 
 /// Branch panel arm of [`render`].
@@ -763,6 +763,7 @@ mod tests {
                     remote: None,
                     is_worktree: false,
                     main_repo: None,
+                    author: None,
                 }];
                 app.dashboard_state.select(Some(0));
                 app
@@ -782,6 +783,7 @@ mod tests {
                     remote: None,
                     is_worktree: false,
                     main_repo: None,
+                    author: None,
                 }];
                 app.file_entries = vec![FileEntry {
                     path: std::path::PathBuf::from("src/main.rs"),
@@ -2145,6 +2147,7 @@ mod tests {
             remote: None,
             is_worktree: false,
             main_repo: None,
+            author: None,
         }];
         app.dashboard_state.select(Some(0));
 
@@ -2315,6 +2318,7 @@ mod tests {
             remote: None,
             is_worktree: false,
             main_repo: None,
+            author: None,
         }];
         app.current_repo = Some(0);
 

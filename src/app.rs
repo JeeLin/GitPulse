@@ -2215,6 +2215,20 @@ impl App {
         Some((idx, self.repos[idx].path.clone()))
     }
 
+    /// The commit identity the current repository will actually sign with
+    /// (v0.9.0), or `None` when no repository is selected or nothing resolved.
+    ///
+    /// This is the **echo** of [`RepoInfo::author`], resolved for whichever
+    /// repository the cursor is on — the dashboard row, the commit popup title
+    /// and the switch key all read the same source, so they cannot disagree.
+    /// Bounds-checked like [`App::open_repo_index`]: a stale `current_repo`
+    /// answers `None` rather than indexing out of range.
+    pub fn current_author(&self) -> Option<&crate::git::AuthorInfo> {
+        self.current_repo
+            .filter(|i| *i < self.repos.len())
+            .and_then(|i| self.repos[i].author.as_ref())
+    }
+
     /// Path of the repository the open workspace context acts on.
     ///
     /// A repo-scoped context reaches the open repo through `current_repo`; the
@@ -4308,6 +4322,7 @@ mod tests {
                 remote: None,
                 is_worktree: false,
                 main_repo: None,
+                author: None,
             })
             .collect();
         app
@@ -4359,7 +4374,37 @@ mod tests {
             remote: None,
             is_worktree: false,
             main_repo: None,
+            author: None,
         }
+    }
+
+    /// v0.9.0: `current_author` is the single echo the dashboard row, the
+    /// commit popup title and the switch key read. `None` when no repository is
+    /// selected or the selected one carries no identity — never a stale index.
+    #[test]
+    fn current_author_follows_the_selected_repository() {
+        let mut app = app_with_repos(2);
+        let with_author = crate::git::AuthorInfo {
+            name: "Alice".to_string(),
+            email: "alice@example.com".to_string(),
+        };
+        app.repos[1].author = Some(with_author);
+
+        // No repository open yet: nothing to echo.
+        assert_eq!(app.current_author(), None);
+
+        app.current_repo = Some(0);
+        assert_eq!(app.current_author(), None, "repo 0 carries no identity");
+
+        app.current_repo = Some(1);
+        let author = app.current_author().expect("repo 1 carries an identity");
+        assert_eq!(author.name, "Alice");
+        assert_eq!(author.email, "alice@example.com");
+
+        // A stale index (past `repos`) must answer `None`, not panic — the
+        // dashboard can shrink the list under a cursor it has not re-clamped.
+        app.current_repo = Some(9);
+        assert_eq!(app.current_author(), None);
     }
 
     /// Sub-task 5 · checkpoint ⑭ regression nail: the *actual startup branch*
@@ -7778,6 +7823,7 @@ mod tests {
             remote: None,
             is_worktree: false,
             main_repo: None,
+            author: None,
         });
         app.current_repo = Some(0);
         let (tx, rx) = mpsc::unbounded_channel();

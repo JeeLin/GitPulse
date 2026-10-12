@@ -612,6 +612,7 @@ mod row_set_tests {
             remote: Some("https://github.com/JeeLin/GitPulse.git".to_string()),
             is_worktree: false,
             main_repo: None,
+            author: None,
         }
     }
 
@@ -663,6 +664,7 @@ mod tests {
             remote: None,
             is_worktree: false,
             main_repo: None,
+            author: None,
         }
     }
 
