@@ -166,6 +166,34 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The whole point of the milestone, end to end: after the switch, a
+    /// **commit** in this repository is really signed by the new identity —
+    /// not merely echoed on a row. Drives `super::commit`, which reads the
+    /// same local config, so a regression in either the write or the read
+    /// turns this red.
+    #[test]
+    fn a_commit_after_the_switch_is_signed_by_the_new_identity() {
+        let dir = temp_repo("commit");
+        let repo = init_repo(&dir);
+        fs::write(dir.join("a.txt"), "v1\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("a.txt")).unwrap();
+        index.write().unwrap();
+
+        set_local_author(&dir, "切换后", "switched@gitpulse.local").unwrap();
+        crate::git::commit(&dir, "second").expect("commit under the switched identity");
+
+        let head = repo
+            .head()
+            .and_then(|r| r.peel_to_commit())
+            .expect("a commit exists");
+        let sig = head.author();
+        assert_eq!(sig.name(), Some("切换后"));
+        assert_eq!(sig.email(), Some("switched@gitpulse.local"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn author_label_renders_the_name_and_email_or_a_placeholder() {
         let author = AuthorInfo {
