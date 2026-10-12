@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::BatchLogLine;
+use crate::app::{BatchLogLine, DashboardRow};
 use crate::git;
 use crate::git::RepoInfo;
 
@@ -23,6 +23,15 @@ use crate::ui::components::theme::{color, role, spacing, width as theme_width};
 pub struct DashboardState<'a> {
     /// Live repository snapshots from `App.repos`.
     pub repos: &'a [RepoInfo],
+    /// The list positions to draw: section headers interleaved with the
+    /// repositories they head (sub-task 6, §6.1 组头行).
+    ///
+    /// Borrowed from [`App::dashboard_rows`], so the view never re-derives the
+    /// grouping and can never disagree with the mapping the key handlers use.
+    /// Each row carries its own `repos` index, which is what makes a header
+    /// row survivable: the renderer needs `repo_row(repo, budget)` for a `Repo`
+    /// and nothing at all for a `Header`.
+    pub rows: &'a [DashboardRow],
     /// Scan failure from `App.load_error`; the list is replaced by the `error`
     /// state while it is set (§4.3).
     pub load_error: Option<&'a str>,
@@ -171,7 +180,14 @@ fn render_preview(f: &mut Frame, area: Rect, state: &DashboardState<'_>) {
         .title("预览")
         .borders(Borders::ALL)
         .border_style(role::border(state.focused_preview));
-    let lines = match state.list_state.selected().and_then(|i| state.repos.get(i)) {
+    let rows = state.rows;
+    let lines = match state
+        .list_state
+        .selected()
+        .and_then(|i| rows.get(i))
+        .and_then(|row| row.repo())
+        .and_then(|i| state.repos.get(i))
+    {
         Some(repo) => {
             let dirty = &repo.dirty;
             let total = dirty.untracked + dirty.modified + dirty.added + dirty.deleted;
@@ -290,9 +306,23 @@ fn preferred_width(column: &Column) -> Option<usize> {
 fn render_repo_list(f: &mut Frame, area: Rect, state: &mut DashboardState<'_>) {
     let budget = pulls::row_width(area);
     let items: Vec<ListItem> = state
-        .repos
+        .rows
         .iter()
-        .map(|repo| ListItem::new(repo_row(repo, budget)))
+        .map(|row| match row {
+            DashboardRow::Header {
+                name,
+                count,
+                collapsed,
+                ..
+            } => ListItem::new(group_header_row(name, *count, *collapsed, budget)),
+            DashboardRow::Repo { repo } => match state.repos.get(*repo) {
+                Some(repo) => ListItem::new(repo_row(repo, budget)),
+                // A row index the loader has since dropped cannot name a
+                // repository; skipping it keeps the list from panicking on a
+                // refresh that shrank the list under a stale cursor.
+                None => ListItem::new(Line::from("")),
+            },
+        })
         .collect();
 
     super::render_list_panel(
@@ -303,6 +333,31 @@ fn render_repo_list(f: &mut Frame, area: Rect, state: &mut DashboardState<'_>) {
         state.focused,
         state.list_state,
     );
+}
+
+/// One group section header (§6.1 组头行, checkpoint ⑨).
+///
+/// `▸ name (N)` folded / `▾ name (N)` expanded, N counting the group's
+/// **visible** repositories — the count a folded header shows is the number
+/// hiding under it, not the group's lifetime total, so a fold reads as
+/// "3 more" rather than as a smaller section.
+///
+/// Headers are non-selectable, so they carry no cursor of their own and take
+/// §5.4's whole width: the name is the identity and ellipsizes, while the
+/// glyph and count are fixed furniture that must survive, or the header stops
+/// saying whether it is open.
+fn group_header_row(name: &str, count: usize, collapsed: bool, budget: usize) -> Line<'static> {
+    let glyph = if collapsed { "▸" } else { "▾" };
+    let count_str = format!(" ({count})");
+    // The glyph is 1 cell; the count is variable but always drawn, so the name
+    // is funded with what is left after both (§5.4 低优先先消失).
+    let fixed = cells::width(glyph) + cells::width(&count_str);
+    let name = cells::ellipsize(name, budget.saturating_sub(fixed));
+    Line::from(vec![
+        Span::styled(glyph, Style::default().fg(color::ACCENT)),
+        Span::styled(name, Style::default().fg(color::FG_MUTED)),
+        Span::styled(count_str, Style::default().fg(color::FG_MUTED)),
+    ])
 }
 
 /// One repository row fitted to `budget` cells (§5.4). The High columns (name,
@@ -509,13 +564,21 @@ fn render_empty_state(f: &mut Frame, area: Rect, focused: bool) {
 /// [`join_hints`] so the gap between two key caps is the two spaces §2.3
 /// prescribes — the dashboard draws no hint row of its own any more.
 ///
-/// §6.1:285 fixes this view segment to `⏎ 进入仓库  n 添加目录`: `r` and `q`
+/// §6.1 fixes this view segment to `⏎ 进入仓库  n 添加目录`: `r` and `q`
 /// already ride in the global segment, `j/k` are the obvious cursor verbs that
 /// the spec leaves unhinted, and the former `l/f/b/c` entries were dashboard
 /// roots that §6.1 folds into the context-tab strip (5b) — keeping them here
 /// would advertise a second, stale dispatch surface (§6.1 KEYS).
-pub(crate) fn dashboard_hints() -> HintRow {
-    HintRow::new(join_hints([hint("⏎", "进入仓库"), hint("n", "添加目录")]))
+///
+/// `groups` adds `z 折叠分组` (§6.1.1) **only when scan groups are actually
+/// configured**. §2.3 makes advertising a key a promise that dispatch moves
+/// something observable; with no `scan_groups`, `z` is a no-op by design
+/// ([`App::toggle_selected_group`] returns early), so advertising it anyway
+/// would be exactly the dead-key defect B7-01 was written to catch.
+pub(crate) fn dashboard_hints(groups: bool) -> HintRow {
+    let base = [hint("⏎", "进入仓库"), hint("n", "添加目录")];
+    let with_fold = join_hints([base[0].clone(), base[1].clone(), hint("z", "折叠分组")]);
+    HintRow::new(if groups { with_fold } else { join_hints(base) })
 }
 
 /// Format a Unix timestamp as `YYYY-MM-DD HH:MM` (UTC) without chrono.
@@ -603,6 +666,16 @@ mod tests {
         }
     }
 
+    /// Rows for a test with no grouping configured: one `Repo` row per
+    /// repository, in order — the same shape `App::dashboard_rows` produces
+    /// when `scan_groups` is empty. Tests that exercise grouping pass
+    /// explicit rows instead of using this.
+    fn flat_rows(repos: &[RepoInfo]) -> Vec<DashboardRow> {
+        (0..repos.len())
+            .map(|repo| DashboardRow::Repo { repo })
+            .collect()
+    }
+
     /// The panel draws content only (§2.3), so the frame goes through
     /// [`crate::ui::components::footer::draw_frame`] — the shape
     /// `ui::render` uses — and the hint row is the bottom row.
@@ -631,7 +704,7 @@ mod tests {
         state: &mut DashboardState<'_>,
         status: Option<&crate::ui::status::StatusLine>,
     ) -> Terminal<TestBackend> {
-        let hints = dashboard_hints();
+        let hints = dashboard_hints(false);
         let backend = TestBackend::new(80, FRAME_ROWS);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
@@ -675,10 +748,12 @@ mod tests {
     #[test]
     fn render_with_repos_shows_names_and_branch() {
         let repos = vec![make_repo("alpha", "main"), make_repo("beta", "dev")];
+        let rows = flat_rows(&repos);
         let mut list_state = ListState::default();
         list_state.select(Some(0));
         let text = render_to_text(&mut DashboardState {
             repos: &repos,
+            rows: &rows,
             load_error: None,
             list_state: &mut list_state,
             batch_log: &[],
@@ -699,9 +774,11 @@ mod tests {
     #[test]
     fn render_load_error_shows_the_error_state_not_the_list() {
         let repos = vec![make_repo("alpha", "main")];
+        let rows = flat_rows(&repos);
         let mut list_state = ListState::default();
         let text = compact(&render_to_text(&mut DashboardState {
             repos: &repos,
+            rows: &rows,
             load_error: Some("扫描仓库失败: 权限不足"),
             list_state: &mut list_state,
             batch_log: &[],
@@ -724,11 +801,13 @@ mod tests {
     #[test]
     fn render_status_reaches_the_footer_status_row_only() {
         let repos = vec![make_repo("alpha", "main")];
+        let rows = flat_rows(&repos);
         let mut list_state = ListState::default();
         list_state.select(Some(0));
         let terminal = render_to_terminal(
             &mut DashboardState {
                 repos: &repos,
+                rows: &rows,
                 load_error: None,
                 list_state: &mut list_state,
                 batch_log: &[],
@@ -758,10 +837,12 @@ mod tests {
     #[test]
     fn render_operation_error_keeps_the_list_and_reaches_the_status_row_only() {
         let repos = vec![make_repo("alpha", "main")];
+        let rows = flat_rows(&repos);
         let mut list_state = ListState::default();
         let terminal = render_with_status(
             &mut DashboardState {
                 repos: &repos,
+                rows: &rows,
                 load_error: None,
                 list_state: &mut list_state,
                 batch_log: &[],
@@ -784,6 +865,7 @@ mod tests {
     #[test]
     fn render_batch_log_shows_progress_lines() {
         let repos = vec![make_repo("alpha", "main")];
+        let rows = flat_rows(&repos);
         let mut list_state = ListState::default();
         let batch_log = vec![
             BatchLogLine {
@@ -801,6 +883,7 @@ mod tests {
         ];
         let text = render_to_text(&mut DashboardState {
             repos: &repos,
+            rows: &rows,
             load_error: None,
             list_state: &mut list_state,
             batch_log: &batch_log,
@@ -840,6 +923,7 @@ mod tests {
         let mut list_state = ListState::default();
         let text = render_to_text(&mut DashboardState {
             repos: &[],
+            rows: &[],
             load_error: None,
             list_state: &mut list_state,
             batch_log: &[],
@@ -875,10 +959,12 @@ mod tests {
     #[test]
     fn render_with_repos_hides_config_hint() {
         let repos = vec![make_repo("alpha", "main")];
+        let rows = flat_rows(&repos);
         let mut list_state = ListState::default();
         list_state.select(Some(0));
         let text = render_to_text(&mut DashboardState {
             repos: &repos,
+            rows: &rows,
             load_error: None,
             list_state: &mut list_state,
             batch_log: &[],
@@ -900,6 +986,7 @@ mod tests {
         let mut list_state = ListState::default();
         let text = render_to_text(&mut DashboardState {
             repos: &[],
+            rows: &[],
             load_error: Some("扫描仓库失败: 权限不足"),
             list_state: &mut list_state,
             batch_log: &[],
@@ -921,6 +1008,123 @@ mod tests {
     /// that §6.1 KEYS folds into the context-tab strip (5b) or the global
     /// segment. This pins the new segment so the stale dispatch surface cannot
     /// drift back in: DESIGN.md §6.1 wins over the old test.
+    /// §6.1.1: a header renders as `▾ 组名 (N)` open and `▸ 组名 (N)` folded, so
+    /// the glyph is what says whether the section is open.
+    ///
+    /// Falsifiable: swapping the two glyphs, or drawing the count from the
+    /// collapsed total instead of the visible one, turns this red.
+    #[test]
+    fn a_group_header_draws_its_glyph_name_and_count() {
+        let expanded = group_header_row("alpha", 3, false, 60).to_string();
+        assert!(
+            expanded.contains("▾") && expanded.contains("alpha") && expanded.contains("(3)"),
+            "an expanded header is `▾ name (N)`: {expanded}"
+        );
+
+        let folded = group_header_row("alpha", 3, true, 60).to_string();
+        assert!(
+            folded.contains("▸") && folded.contains("alpha") && folded.contains("(3)"),
+            "a folded header is `▸ name (N)`: {folded}"
+        );
+        assert!(
+            !expanded.contains("▸") && !folded.contains("▾"),
+            "the two states must not share a glyph"
+        );
+    }
+
+    /// §5.4 + §6.1.1: the glyph and the count are fixed furniture that survive any
+    /// budget; the name is what gives way, elided with `…` rather than wrapped or
+    /// dropped. A header that lost its glyph would stop saying whether it is open.
+    #[test]
+    fn a_group_header_keeps_its_furniture_and_elides_only_the_name() {
+        let long = "a-very-long-group-name-that-cannot-possibly-fit";
+        let narrow = group_header_row(long, 12, false, 14).to_string();
+        assert!(
+            narrow.contains("▾") && narrow.contains("(12)"),
+            "the glyph and count survive the narrow budget: {narrow}"
+        );
+        assert!(
+            narrow.contains('…'),
+            "the name is elided instead of wrapping or vanishing: {narrow}"
+        );
+        assert!(
+            !narrow.contains(long),
+            "an over-long name must not be drawn whole at a narrow budget: {narrow}"
+        );
+
+        // A budget too small for even the furniture must not panic or wrap — the
+        // name simply gets nothing.
+        let starved = group_header_row(long, 12, false, 1).to_string();
+        assert!(
+            starved.contains("▾") && starved.contains("(12)"),
+            "the fixed furniture is still drawn at the floor: {starved}"
+        );
+    }
+
+    /// §2.3 + §6.1.1: `z 折叠分组` is advertised **only** when scan groups are
+    /// configured. With no groups `z` has nothing to fold, so advertising it would
+    /// be a dead key — the B7-02/B7-01 defect shape.
+    #[test]
+    fn the_fold_hint_appears_only_when_groups_are_configured() {
+        let plain = dashboard_hints(false).view.to_string();
+        assert!(
+            plain.contains("添加目录") && plain.contains("进入仓库"),
+            "the dashboard verbs are always advertised: {plain}"
+        );
+        assert!(
+            !plain.contains("折叠分组"),
+            "`z` must not be advertised without configured groups: {plain}"
+        );
+
+        let grouped = dashboard_hints(true).view.to_string();
+        assert!(
+            grouped.contains("折叠分组"),
+            "configured groups advertise the fold verb: {grouped}"
+        );
+        assert!(
+            grouped.contains("进入仓库") && grouped.contains("添加目录"),
+            "adding the fold verb must not displace the others: {grouped}"
+        );
+    }
+
+    /// §6.1.1: the panel draws headers and repositories together, and only the
+    /// repository rows carry an index the key handlers can act on.
+    #[test]
+    fn the_list_draws_group_headers_above_their_repositories() {
+        let repos = vec![make_repo("one", "main"), make_repo("two", "main")];
+        let rows = vec![
+            DashboardRow::Header {
+                group: 0,
+                name: "alpha".to_string(),
+                count: 2,
+                collapsed: false,
+            },
+            DashboardRow::Repo { repo: 0 },
+            DashboardRow::Repo { repo: 1 },
+        ];
+        let mut list_state = ListState::default();
+        list_state.select(Some(1));
+        let compact = compact(&render_to_text(&mut DashboardState {
+            repos: &repos,
+            rows: &rows,
+            load_error: None,
+            list_state: &mut list_state,
+            batch_log: &[],
+            batch_op: "",
+            batch_running: false,
+            focused: true,
+            focused_preview: false,
+        }));
+        assert!(
+            compact.contains("alpha") && compact.contains("(2)"),
+            "the header is drawn: {compact}"
+        );
+        assert!(
+            compact.contains("one") && compact.contains("two"),
+            "its repositories are drawn beneath it: {compact}"
+        );
+    }
+
     #[test]
     fn hint_row_view_segment_follows_design_6_1() {
         let backend = TestBackend::new(120, 12);
@@ -930,7 +1134,7 @@ mod tests {
                 crate::ui::components::footer::draw_frame(
                     f,
                     StatusRow::plain(None),
-                    &dashboard_hints(),
+                    &dashboard_hints(false),
                     |_, _| {},
                 );
             })

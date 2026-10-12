@@ -398,7 +398,7 @@ pub(crate) fn view_hints(app: &App) -> HintRow {
     // of the *screen* (it draws >1 panel or >1 context tab), so `view_hints`
     // attaches it once here — keeping every `{view}_hints` focused on verbs.
     let row = match app.view {
-        View::Dashboard => dashboard::dashboard_hints(),
+        View::Dashboard => dashboard::dashboard_hints(!app.config.scan_groups.is_empty()),
         View::Repo => repo::repo_hints(app.show_discard_confirm),
         View::Diff => diff::diff_hints(),
         View::Commit => commit::commit_hints(),
@@ -476,8 +476,13 @@ fn render_dashboard_view(f: &mut Frame, content: Rect, app: &mut App) {
     // `&App`, which cannot coexist with `&mut app.dashboard_state` (§3.1).
     let focused = app.panel_is_focused(PanelFocus::Primary);
     let focused_preview = app.panel_is_focused(PanelFocus::Preview);
+    // Derived once, before the cursor borrow: the rows are what both the list
+    // and the preview index by, and `dashboard_state` is borrowed mutably
+    // below (sub-task 6).
+    let rows = app.dashboard_rows();
     let mut state = DashboardState {
         repos: &app.repos,
+        rows: &rows,
         load_error: app.load_error.as_deref(),
         list_state: &mut app.dashboard_state,
         batch_log: &app.batch_log,

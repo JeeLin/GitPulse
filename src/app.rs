@@ -557,6 +557,14 @@ pub struct App {
     /// view's entry points, so a message can never surface on a panel it does
     /// not describe.
     pub load_error: Option<String>,
+    /// Which scan groups the dashboard currently shows collapsed (sub-task 6).
+    ///
+    /// Fold is **panel-internal state**, not a §1.1 dimension: it enters no
+    /// stack, changes no context tag and moves no focus. In-memory only —
+    /// there is no config key for it, so a restart starts unfolded (the
+    /// loader's `HashSet` would otherwise need a config schema bump for a
+    /// purely presentational toggle).
+    pub collapsed_groups: std::collections::HashSet<usize>,
     /// Discovered git repositories (M1 subtask 3).
     pub repos: Vec<RepoInfo>,
     /// Dashboard selection cursor, consumed by the dashboard renderer (M1 subtask 4).
@@ -670,6 +678,7 @@ impl App {
             status: None,
             load_error: None,
             repos: Vec::new(),
+            collapsed_groups: std::collections::HashSet::new(),
             dashboard_state: ListState::default(),
             current_repo: None,
             file_entries: Vec::new(),
@@ -976,93 +985,213 @@ impl App {
     /// a normal state, not an error, so this returning `None` costs nothing
     /// and the dashboard still lists the repository. Sub-task 6 renders the
     /// answer as collapsible sections.
-    ///
-    /// Not yet called from a view: sub-task 5 ships the grouping *data layer*
-    /// (the milestone records this split explicitly) and sub-task 6 draws it.
-    /// `#[allow(dead_code)]` is therefore deliberate and temporary — the same
-    /// standing the `NotGitHub` variant keeps in `github::error`.
-    #[allow(dead_code)]
     pub fn group_of(&self, repo: &RepoInfo) -> Option<&crate::config::GroupDef> {
         crate::config::group_for_path(&self.config.scan_groups, &repo.path)
     }
 
-    /// `repos` bucketed by group, in the order [`Config::scan_groups`] lists
-    /// them, followed by every repository no group claims.
-    ///
-    /// This is the data sub-task 6's collapsible sections render, and it is
-    /// built here rather than in the view so the *ordering decision* — config
-    /// order for groups, one trailing bucket for the rest — lives with the
-    /// configuration it comes from instead of being rediscovered per frame.
-    ///
-    /// Like [`App::group_of`], the view lands with sub-task 6.
-    #[allow(dead_code)]
-    pub fn grouped_repos(&self) -> Vec<(Option<&crate::config::GroupDef>, Vec<&RepoInfo>)> {
-        let mut buckets: Vec<(Option<&crate::config::GroupDef>, Vec<&RepoInfo>)> = self
-            .config
-            .scan_groups
-            .iter()
-            .map(|group| (Some(group), Vec::new()))
-            .collect();
-        let mut ungrouped: Vec<&RepoInfo> = Vec::new();
+    /// Resolve `repos[i]` to its scan group as a **group index** (`None`
+    /// for ungrouped). Tests should pin this rather than hand-building
+    /// [`App::repo_group`]: positional indices follow `sort_by` reorders
+    /// silently and would secretly test the loader instead of the logic.
+    pub fn group_index_of(&self, repo: &RepoInfo) -> Option<usize> {
+        self.group_of(repo).and_then(|found| {
+            self.config
+                .scan_groups
+                .iter()
+                .position(|candidate| candidate == found)
+        })
+    }
+}
 
-        for repo in &self.repos {
-            match self.group_of(repo).and_then(|group| {
-                buckets
-                    .iter_mut()
-                    .find(|(candidate, _)| *candidate == Some(group))
-            }) {
-                Some((_, members)) => members.push(repo),
-                None => ungrouped.push(repo),
+/// One dashboard list position (sub-task 6): a group section header, or a
+/// repository row pointing back at its own `repos` index.
+///
+/// Non-selectable by design: `Enter` on a `Header` is a no-op (otherwise
+/// it would fight §1.1's "`Enter` 打开"), and `j`/`k` step over headers
+/// without stopping — `ListState` holds the row index, this enum is what
+/// turns it back into a repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DashboardRow {
+    /// Section header for `scan_groups[group]` with `count` visible
+    /// repositories beneath it when expanded.
+    Header {
+        /// Index into [`Config::scan_groups`][crate::config::Config::scan_groups].
+        group: usize,
+        /// Group name, snapshotted for the row label.
+        name: String,
+        /// Visible repositories in this group.
+        count: usize,
+        /// Whether the section is currently folded.
+        collapsed: bool,
+    },
+    /// A repository row — `repo` is its index into [`App::repos`].
+    Repo {
+        /// Index into [`App::repos`].
+        repo: usize,
+    },
+}
+
+impl DashboardRow {
+    /// The repository index, or `None` for a header — so a header can
+    /// never act as a repository no matter which consumer forgets to
+    /// branch (子任务 6: 组头行不得成为 `enter_repo` 的可选目标).
+    pub fn repo(&self) -> Option<usize> {
+        match self {
+            DashboardRow::Repo { repo } => Some(*repo),
+            DashboardRow::Header { .. } => None,
+        }
+    }
+}
+
+impl App {
+    /// The dashboard's list rows: section headers interleaved with the
+    /// repositories they head, each repository carrying its own index into
+    /// [`App::repos`] (sub-task 6).
+    ///
+    /// With no `scan_groups` configured this is exactly one `Repo` row per
+    /// repository, in `repos` order — no headers, no reordering — which is
+    /// what keeps the unconfigured dashboard byte-identical to v0.7.0
+    /// (checkpoint: 无分组配置时渲染与 v0.7.0 逐字相同).
+    pub fn dashboard_rows(&self) -> Vec<DashboardRow> {
+        if self.config.scan_groups.is_empty() {
+            return (0..self.repos.len())
+                .map(|idx| DashboardRow::Repo { repo: idx })
+                .collect();
+        }
+
+        // Bucket by group index, preserving config order; the ungrouped tail
+        // comes last (checkpoint ⑨'s ordering decision, kept from sub-task 5).
+        let mut buckets: Vec<Vec<usize>> =
+            self.config.scan_groups.iter().map(|_| Vec::new()).collect();
+        let mut ungrouped: Vec<usize> = Vec::new();
+        for (idx, repo) in self.repos.iter().enumerate() {
+            match self.group_index_of(repo) {
+                Some(group) => buckets[group].push(idx),
+                None => ungrouped.push(idx),
             }
         }
-        for (_, members) in &mut buckets {
-            members.sort_by(|left, right| left.name.cmp(&right.name));
+        // Within a group, order by name (sub-task 5's ordering decision).
+        // Discovery walks `scan_dirs` and returns repositories per-directory,
+        // so without this a group's members appear in filesystem order — the
+        // two bucketing paths would disagree about the same list.
+        for members in &mut buckets {
+            members.sort_by(|left, right| self.repos[*left].name.cmp(&self.repos[*right].name));
         }
-        ungrouped.sort_by(|left, right| left.name.cmp(&right.name));
 
-        let populated: Vec<_> = buckets
-            .into_iter()
-            .filter(|(_, members)| !members.is_empty())
-            .collect();
-        if ungrouped.is_empty() {
-            populated
-        } else {
-            populated
+        let mut rows = Vec::new();
+        for (group, members) in buckets.iter().enumerate() {
+            // A group whose members all disappeared (config edited, dirs
+            // removed) falls back to the `empty` state rather than rendering a
+            // header over nothing (子任务 6 错误处理).
+            if members.is_empty() {
+                continue;
+            }
+            let collapsed = self.collapsed_groups.contains(&group);
+            rows.push(DashboardRow::Header {
+                group,
+                name: self.config.scan_groups[group].name.clone(),
+                count: members.len(),
+                collapsed,
+            });
+            if collapsed {
+                continue;
+            }
+            rows.extend(
+                members
+                    .iter()
+                    .map(|repo| DashboardRow::Repo { repo: *repo }),
+            );
+        }
+        // Ungrouped repositories stay header-less: they belong to no section,
+        // so a header claiming a name they never had would be a lie.
+        rows.extend(
+            ungrouped
                 .into_iter()
-                .chain(std::iter::once((None, ungrouped)))
-                .collect()
+                .map(|repo| DashboardRow::Repo { repo }),
+        );
+        rows
+    }
+
+    /// The repository index the dashboard cursor currently sits on, or `None`
+    /// when the cursor is on a header, on nothing, or past the end.
+    ///
+    /// This is the **only** place a `dashboard_state` index becomes a repo
+    /// index (sub-task 6). Once headers occupy list rows the cursor is a
+    /// *row* index, so every consumer that meant a repository must come
+    /// through here — otherwise `Enter` on a header opens whichever repo
+    /// happened to share that position.
+    pub fn selected_dashboard_repo(&self) -> Option<usize> {
+        let cursor = self.dashboard_state.selected()?;
+        let rows = self.dashboard_rows();
+        rows.get(cursor)?.repo()
+    }
+
+    /// Toggle the group the cursor is in, or the group the selected row
+    /// belongs to (dashboard `z`, §6.1).
+    ///
+    /// No-op when no grouping is configured, or when the cursor is on an
+    /// ungrouped repository — there is no section to fold. Folding is panel
+    /// state, not a §1.1 dimension, so it changes no view, no focus and no
+    /// stack; only the cursor is repaired, since collapsing the group under it
+    /// can leave the row count shorter than the position.
+    pub fn toggle_selected_group(&mut self) {
+        if self.config.scan_groups.is_empty() {
+            return;
+        }
+        let cursor = self.dashboard_state.selected();
+        let rows = self.dashboard_rows();
+        let group = match cursor.and_then(|row| rows.get(row)) {
+            Some(DashboardRow::Header { group, .. }) => Some(*group),
+            Some(DashboardRow::Repo { repo }) => self.group_index_of(&self.repos[*repo]),
+            None => None,
+        };
+        let Some(group) = group else { return };
+
+        if !self.collapsed_groups.remove(&group) {
+            self.collapsed_groups.insert(group);
+        }
+        // Collapsing hides rows; a cursor past the end would leave the panel
+        // with a highlight on nothing. Clamp to the last real row.
+        let len = self.dashboard_rows().len();
+        if len == 0 {
+            self.dashboard_state.select(None);
+        } else if let Some(i) = self.dashboard_state.selected() {
+            if i >= len {
+                self.dashboard_state.select(Some(len - 1));
+            }
         }
     }
 
     /// Re-run repo discovery and update the dashboard (manual refresh, convention 5).
     ///
-    /// The selection cursor is clamped so a shrinking list never points past
-    /// the end of `repos`.
+    /// The selection cursor is clamped against the **row** count, not
+    /// `repos.len()`: with grouping on, headers occupy rows, so the last row
+    /// can sit past `repos.len()` (sub-task 6).
     pub fn refresh_repos(&mut self) {
         self.load_repos();
-        if self.repos.is_empty() {
+        let len = self.dashboard_rows().len();
+        if len == 0 {
             self.dashboard_state.select(None);
         } else if let Some(i) = self.dashboard_state.selected() {
-            if i >= self.repos.len() {
-                self.dashboard_state
-                    .select(Some(self.repos.len().saturating_sub(1)));
+            if i >= len {
+                self.dashboard_state.select(Some(len - 1));
             }
         }
     }
 
     /// Enter the single-repo view for the selected dashboard row.
     ///
-    /// No-op when nothing (valid) is selected. Tracking the current repo for
-    /// the repo view lands with M1 subtask 5.
+    /// No-op when nothing (valid) is selected, and when the cursor is on a
+    /// group header — headers are not selectable, so they open nothing
+    /// (sub-task 6). The row→repo mapping is [`App::selected_dashboard_repo`],
+    /// never a raw `dashboard_state` index.
     pub fn enter_repo(&mut self) {
-        if let Some(i) = self.dashboard_state.selected() {
-            if i < self.repos.len() {
-                self.view = View::Repo;
-                self.current_repo = Some(i);
-                self.clear_feedback();
-                self.load_file_entries();
-                self.file_state.select(Some(0));
-            }
+        if let Some(i) = self.selected_dashboard_repo() {
+            self.view = View::Repo;
+            self.current_repo = Some(i);
+            self.clear_feedback();
+            self.load_file_entries();
+            self.file_state.select(Some(0));
         }
     }
 
@@ -2027,7 +2156,9 @@ impl App {
     /// remember.
     pub fn enter_branches(&mut self) {
         let idx = match self.view {
-            View::Dashboard => self.dashboard_state.selected(),
+            // Dashboard cursors are row indices once grouping is on, so they
+            // go through the same mapping `enter_repo` uses (sub-task 6).
+            View::Dashboard => self.selected_dashboard_repo(),
             View::Repo => self.current_repo,
             _ => return,
         };
@@ -3168,7 +3299,12 @@ impl App {
     fn jump_focus_list(&mut self, code: KeyCode) {
         let head = matches!(code, KeyCode::Char('g') | KeyCode::Home);
         match self.view {
-            View::Dashboard => jump_selection(&mut self.dashboard_state, self.repos.len(), head),
+            View::Dashboard => {
+                // Count first: `dashboard_rows` borrows all of `self`, which
+                // cannot coexist with the `&mut self.dashboard_state` below.
+                let rows = self.dashboard_rows().len();
+                jump_selection(&mut self.dashboard_state, rows, head);
+            }
             View::Repo => {
                 let before = self.file_state.selected();
                 jump_selection(&mut self.file_state, self.file_entries.len(), head);
@@ -3282,7 +3418,20 @@ impl App {
             .copied()
             .map(PaletteTarget::View)
             .collect::<Vec<_>>();
-        if let Some(idx) = self.current_repo.filter(|i| *i < self.repos.len()) {
+        // With grouping on, a dashboard cursor is a *row* index that a header shares
+        // with the repository below it, so it resolves through the mapping
+        // instead of indexing `repos` raw (sub-task 6).
+        //
+        // `selected_dashboard_repo` is `None` while the cursor sits on a header
+        // — a header names no repository, so the palette must not fall back to
+        // a stale `current_repo` that this view's cursor never pointed at. With
+        // grouping off the row index *is* the repo index, so the two agree.
+        let focused_repo = if self.view == View::Dashboard {
+            self.selected_dashboard_repo()
+        } else {
+            self.current_repo.filter(|i| *i < self.repos.len())
+        };
+        if let Some(idx) = focused_repo {
             let repo = &self.repos[idx];
             targets.push(PaletteTarget::Repo(repo.name.clone()));
             targets.push(PaletteTarget::Branch(repo.branch.clone()));
@@ -3410,7 +3559,11 @@ impl App {
         match view {
             View::Dashboard => {
                 self.dashboard_state
-                    .select(if self.repos.is_empty() { None } else { Some(0) });
+                    .select(if self.dashboard_rows().is_empty() {
+                        None
+                    } else {
+                        Some(0)
+                    });
             }
             View::Repo => {
                 self.file_state.select(if self.file_entries.is_empty() {
@@ -3453,11 +3606,20 @@ impl App {
     fn handle_dashboard_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                move_selection(&mut self.dashboard_state, self.repos.len(), true);
+                // Headers are rows the cursor steps over, so the bound is the
+                // row count, not `repos.len()` (sub-task 6). Count first:
+                // `dashboard_rows` borrows all of `self`.
+                let rows = self.dashboard_rows().len();
+                move_selection(&mut self.dashboard_state, rows, true);
                 true
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                move_selection(&mut self.dashboard_state, self.repos.len(), false);
+                let rows = self.dashboard_rows().len();
+                move_selection(&mut self.dashboard_state, rows, false);
+                true
+            }
+            KeyCode::Char('z') => {
+                self.toggle_selected_group();
                 true
             }
             KeyCode::Char('l') => {
@@ -4148,6 +4310,35 @@ mod tests {
         app
     }
 
+    /// Two configured groups plus an unclaimed repository, so the dashboard
+    /// has a header-bearing layout to drive: `one`/`two` under "alpha",
+    /// `three`/`four` under "zulu", and `loose` in the trailing bucket.
+    fn app_with_grouped_repos() -> App {
+        use crate::config::GroupDef;
+        let mut app = App::new(Config {
+            scan_groups: vec![
+                GroupDef {
+                    name: "alpha".to_string(),
+                    prefixes: vec![std::path::PathBuf::from("/srv/alpha")],
+                },
+                GroupDef {
+                    name: "zulu".to_string(),
+                    prefixes: vec![std::path::PathBuf::from("/srv/zulu")],
+                },
+            ],
+            ..Default::default()
+        });
+        app.repos = vec![
+            repo_at("/srv/alpha/one"),
+            repo_at("/srv/alpha/two"),
+            repo_at("/srv/zulu/three"),
+            repo_at("/srv/zulu/four"),
+            repo_at("/home/user/loose"),
+        ];
+        app.dashboard_state.select(Some(0));
+        app
+    }
+
     /// A repository snapshot for a given path — enough identity for grouping,
     /// which keys off the path alone.
     fn repo_at(path: &str) -> RepoInfo {
@@ -4277,15 +4468,21 @@ mod tests {
         );
     }
 
-    /// Sub-task 5 seam nail: [`App::grouped_repos`] buckets exactly as
-    /// sub-task 6 will draw it — groups in **config order**, then one trailing
-    /// bucket for everything unclaimed, with an empty group omitted rather
-    /// than rendered as a header nobody can expand.
+    /// Sub-task 6 ordering nail: [`App::dashboard_rows`] lays the dashboard out
+    /// as groups in **config order**, each headed by a header, then every
+    /// unclaimed repository as a header-less trailing row. A configured group
+    /// that owns nothing is omitted rather than rendered as a header nobody
+    /// can expand.
+    ///
+    /// This was sub-task 5's `grouped_repos` assertion; it now pins the
+    /// flattened row list the dashboard actually draws, which is where the
+    /// ordering decision became observable.
     ///
     /// Falsifiable: sorting groups by name instead of using config order
-    /// breaks `config_order`; keeping empty buckets breaks `empty_groups`.
+    /// breaks `config_order`; keeping empty groups breaks `empty_groups`;
+    /// dropping the header arm breaks `header_shape`.
     #[test]
-    fn grouped_repos_uses_config_order_then_an_ungrouped_tail() {
+    fn dashboard_rows_use_config_order_then_an_ungrouped_tail() {
         use crate::config::GroupDef;
 
         let mut app = App::new(Config {
@@ -4313,25 +4510,272 @@ mod tests {
             repo_at("/home/user/loose"),
         ];
 
-        let buckets = app.grouped_repos();
-        let labels: Vec<Option<&str>> = buckets
+        let rows = app.dashboard_rows();
+        let shape: Vec<Option<&str>> = rows
             .iter()
-            .map(|(group, _)| group.map(|g| g.name.as_str()))
+            .map(|row| match row {
+                DashboardRow::Header { name, .. } => Some(name.as_str()),
+                DashboardRow::Repo { .. } => None,
+            })
             .collect();
         assert_eq!(
-            labels,
-            vec![Some("zulu"), Some("alpha"), None],
-            "groups follow config order, empty groups are dropped, and \
-             unclaimed repositories trail in one bucket"
+            shape,
+            vec![Some("zulu"), None, Some("alpha"), None, None],
+            "groups follow config order, each headed by a header, empty groups \
+             are dropped, and unclaimed repositories trail header-less"
         );
-        let names: Vec<&str> = buckets
-            .iter()
-            .flat_map(|(_, members)| members.iter().map(|r| r.name.as_str()))
-            .collect();
+
+        // Every repository appears exactly once, and the header arms carry no
+        // repository index — that is what keeps `Enter` off a header (§6.1.1).
+        // Members are name-sorted *within* a group (sub-task 5's decision),
+        // which only shows once a group holds more than one repository.
+        let mut names: Vec<&str> = Vec::new();
+        for row in &rows {
+            if let DashboardRow::Repo { repo } = row {
+                names.push(app.repos[*repo].name.as_str());
+            }
+        }
         assert_eq!(
             names,
             vec!["two", "one", "loose"],
-            "every repository appears exactly once, members sorted by name"
+            "every repository appears exactly once, in group then trailing order"
+        );
+
+        let multi = app_with_grouped_repos();
+        assert_eq!(
+            multi
+                .dashboard_rows()
+                .iter()
+                .filter_map(DashboardRow::repo)
+                .map(|repo| multi.repos[repo].name.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "one".to_string(),
+                "two".to_string(),
+                "four".to_string(),
+                "three".to_string(),
+                "loose".to_string()
+            ],
+            "members are name-sorted within a group: zulu is four before \
+             three, though discovery found three first"
+        );
+        assert!(
+            rows.iter().filter_map(DashboardRow::repo).count() == 3,
+            "exactly the three repositories are openable rows"
+        );
+    }
+
+    /// §6.1.1: a group header is not an openable target — `Enter` on one does
+    /// nothing at all, and the selection stays where it was.
+    #[test]
+    fn enter_on_a_group_header_opens_nothing() {
+        let mut app = app_with_grouped_repos();
+
+        // Row 0 is the first group's header.
+        assert!(matches!(
+            app.dashboard_rows().first(),
+            Some(DashboardRow::Header { .. })
+        ));
+        app.dashboard_state.select(Some(0));
+        assert_eq!(
+            app.selected_dashboard_repo(),
+            None,
+            "a header names no repository"
+        );
+
+        app.enter_repo();
+        assert_eq!(
+            app.view,
+            View::Dashboard,
+            "`Enter` on a header must not open the repo view (§1.1)"
+        );
+        assert!(
+            app.current_repo.is_none(),
+            "`Enter` on a header must not set a current repo"
+        );
+    }
+
+    /// §6.1.1: folding hides a group's repositories but must not break the
+    /// row→repo mapping. The regression this pins is the one the header rows
+    /// introduce: after a header is inserted, a row index is NOT a repo index,
+    /// so anything still indexing `repos` by row opens the wrong repository.
+    ///
+    /// Falsifiable: resolving `Enter` with the raw `dashboard_state` index
+    /// (instead of [`App::selected_dashboard_repo`]) opens `three` here.
+    #[test]
+    fn enter_below_a_header_opens_the_repository_that_row_names() {
+        let mut app = app_with_grouped_repos();
+        // Layout: [header alpha][one][two][header zulu][three][four][loose]
+        assert_eq!(app.dashboard_rows().len(), 7);
+        app.dashboard_state.select(Some(1));
+        app.enter_repo();
+        assert_eq!(
+            app.repos[app.current_repo.expect("a repository was opened")].name,
+            "one",
+            "row 1 names `repos[0]`, so `Enter` must open `one`"
+        );
+    }
+
+    /// §6.1.1: `z` folds the group the cursor is in, and the folded members
+    /// disappear from the row list while every visible row keeps mapping to
+    /// the right repository.
+    ///
+    /// Falsifiable: leaving the members in `dashboard_rows` breaks
+    /// `hidden_while_folded`; toggling the wrong group breaks `folded_group`.
+    #[test]
+    fn z_folds_the_group_under_the_cursor_and_hides_its_rows() {
+        let mut app = app_with_grouped_repos();
+        // Cursor on `one`, which belongs to "alpha".
+        app.dashboard_state.select(Some(1));
+
+        app.dispatch_key(key(KeyCode::Char('z')));
+        assert_eq!(
+            app.collapsed_groups.iter().copied().collect::<Vec<_>>(),
+            vec![0],
+            "`z` folds the group owning the selected row"
+        );
+        let rows = app.dashboard_rows();
+        assert!(
+            !rows.iter().any(|row| matches!(
+                row,
+                DashboardRow::Repo { repo } if app.repos[*repo].name == "one"
+            )),
+            "a folded member is not drawn"
+        );
+        assert_eq!(
+            rows.iter()
+                .filter_map(DashboardRow::repo)
+                .map(|repo| app.repos[repo].name.clone())
+                .collect::<Vec<_>>(),
+            vec!["four", "three", "loose"],
+            "only the folded group's members vanish; the rest keep group \
+             order, name-sorted within the group"
+        );
+
+        // Re-expanding is cursor-relative too (§6.1.1): `z` acts on whatever
+        // the cursor points at — a header folds that group, a repository folds
+        // the group owning it. The cursor was clamped when the rows vanished,
+        // so it now sits on the next group's header; selecting the folded
+        // group's own header and pressing `z` again restores its members.
+        app.dashboard_state.select(Some(0));
+        app.dispatch_key(key(KeyCode::Char('z')));
+        assert!(
+            app.collapsed_groups.is_empty(),
+            "`z` on the folded group's header unfolds it again"
+        );
+        assert_eq!(
+            app.dashboard_rows()
+                .iter()
+                .filter_map(DashboardRow::repo)
+                .count(),
+            5,
+            "unfolding restores every repository row"
+        );
+    }
+
+    /// §6.1.1: collapsing a group whose rows vanished leaves the cursor past
+    /// the end of the list otherwise — folding must repair it so the panel
+    /// never highlights nothing.
+    #[test]
+    fn folding_repairs_a_cursor_left_past_the_end() {
+        let mut app = app_with_grouped_repos();
+        // Cursor on the LAST row, the unclaimed trailing repository.
+        let last = app.dashboard_rows().len() - 1;
+        app.dashboard_state.select(Some(last));
+
+        app.toggle_selected_group();
+        // `loose` belongs to no group, so there is nothing to fold — but the
+        // cursor must still address a real row.
+        let rows = app.dashboard_rows();
+        if let Some(cursor) = app.dashboard_state.selected() {
+            assert!(
+                cursor < rows.len(),
+                "the cursor must never address a row that no longer exists"
+            );
+        }
+    }
+
+    /// §6.1.1: a header carries its group's visible count, and the glyph
+    /// reflects the fold state so the header says whether the section is open.
+    #[test]
+    fn a_group_header_counts_its_members_and_reflects_the_fold() {
+        let mut app = app_with_grouped_repos();
+        let expanded = app.dashboard_rows()[0].clone();
+        assert_eq!(
+            expanded,
+            DashboardRow::Header {
+                group: 0,
+                name: "alpha".to_string(),
+                count: 2,
+                collapsed: false,
+            },
+            "the header counts its members and starts expanded"
+        );
+
+        app.dashboard_state.select(Some(1));
+        app.toggle_selected_group();
+        let folded = &app.dashboard_rows()[0];
+        assert_eq!(
+            folded,
+            &DashboardRow::Header {
+                group: 0,
+                name: "alpha".to_string(),
+                count: 2,
+                collapsed: true,
+            },
+            "a folded header keeps counting what it hides"
+        );
+    }
+
+    /// §6.1.1 regression baseline: with no `scan_groups` the dashboard is one
+    /// repository row per repository, in `repos` order — no headers, no
+    /// reordering — so row index and repo index coincide.
+    #[test]
+    fn an_ungrouped_dashboard_is_one_row_per_repo_in_order() {
+        let mut app = app_with_repos(3);
+        let rows = app.dashboard_rows();
+        assert_eq!(
+            rows,
+            vec![
+                DashboardRow::Repo { repo: 0 },
+                DashboardRow::Repo { repo: 1 },
+                DashboardRow::Repo { repo: 2 },
+            ],
+            "no groups means no headers and no reordering"
+        );
+        // `z` on an ungrouped dashboard has no section to fold (§6.1.1).
+        app.dashboard_state.select(Some(0));
+        app.toggle_selected_group();
+        assert!(
+            app.collapsed_groups.is_empty(),
+            "`z` is a no-op without configured groups"
+        );
+    }
+
+    /// §6.1.1: a configured group whose repositories all disappeared renders
+    /// no header at all — the panel falls back rather than showing a header
+    /// over nothing.
+    #[test]
+    fn a_group_with_no_repositories_renders_no_header() {
+        let mut app = App::new(Config {
+            scan_groups: vec![crate::config::GroupDef {
+                name: "gone".to_string(),
+                prefixes: vec![std::path::PathBuf::from("/srv/deleted")],
+            }],
+            ..Default::default()
+        });
+        app.repos = vec![repo_at("/home/user/loose")];
+        let rows = app.dashboard_rows();
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row, DashboardRow::Header { .. })),
+            "an empty group must not render a header"
+        );
+        assert_eq!(
+            rows,
+            vec![DashboardRow::Repo { repo: 0 }],
+            "only the unclaimed repository remains"
         );
     }
 
@@ -5455,12 +5899,18 @@ mod tests {
     /// B2: the `leaving_receipts` guard is load-bearing in the other direction
     /// too — a jump between two non-receipt views is not a receipt exit, so a
     /// settled push on the repo status row must survive it.
+    ///
+    /// The dashboard cursor is set because that, not `current_repo`, is what
+    /// "the focused repository" means on the dashboard once rows carry their
+    /// own `repos` index (sub-task 6) — `current_repo` belongs to the repo
+    /// view and says nothing about where the dashboard cursor sits.
     #[test]
     fn palette_jump_between_non_receipt_views_keeps_the_push_feedback() {
         for row in [PaletteRow::Repo, PaletteRow::Branch] {
             let mut app = app_with_repos(1);
             app.current_repo = Some(0);
             app.view = View::Dashboard;
+            app.dashboard_state.select(Some(0));
             app.remote_op = "push";
             app.remote_status = Some(RemoteStatus::Success);
             app.toggle_palette_overlay();
