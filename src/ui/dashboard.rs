@@ -252,9 +252,9 @@ enum Priority {
 }
 
 /// The data a repository row column renders — the seven columns of §6.1:262's
-/// sample row (`名称/分支/↑2↓0/●3/⚠1/远端: GitHub`) plus the author (v0.9.0):
-/// dirty and warning stay split (no mental arithmetic), and the timestamp is
-/// not a row column at all — it lives in the preview panel instead.
+/// sample row (`名称/分支/●3/⚠1/↑2↓0/远端: GitHub/作者`): dirty and warning stay
+/// split (no mental arithmetic), and the timestamp is not a row column at all —
+/// it lives in the preview panel instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Column {
     /// Repository name.
