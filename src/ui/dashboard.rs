@@ -1003,11 +1003,6 @@ mod tests {
         );
     }
 
-    /// §2.3 + §6.1:285: the dashboard view segment is the spec-fixed verbs only —
-    /// `⏎ 进入仓库  n 添加目录` — and never the reverse-frozen `c/l/f/b/j/k` set
-    /// that §6.1 KEYS folds into the context-tab strip (5b) or the global
-    /// segment. This pins the new segment so the stale dispatch surface cannot
-    /// drift back in: DESIGN.md §6.1 wins over the old test.
     /// §6.1.1: a header renders as `▾ 组名 (N)` open and `▸ 组名 (N)` folded, so
     /// the glyph is what says whether the section is open.
     ///
@@ -1125,6 +1120,13 @@ mod tests {
         );
     }
 
+    /// §2.3 + §6.1: the dashboard view segment is the spec-fixed verbs —
+    /// `⏎ 进入仓库  n 添加目录` — and never the reverse-frozen `c/l/f/b/j/k` set
+    /// that §6.1 KEYS folds into the context-tab strip (5b) or the global
+    /// segment. This pins the segment so the stale dispatch surface cannot
+    /// drift back in. Called with `groups = false` here; §6.1.1's conditional
+    /// `z 折叠分组` has its own assertion in
+    /// `the_fold_hint_appears_only_when_groups_are_configured`.
     #[test]
     fn hint_row_view_segment_follows_design_6_1() {
         let backend = TestBackend::new(120, 12);

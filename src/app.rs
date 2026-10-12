@@ -989,10 +989,12 @@ impl App {
         crate::config::group_for_path(&self.config.scan_groups, &repo.path)
     }
 
-    /// Resolve `repos[i]` to its scan group as a **group index** (`None`
-    /// for ungrouped). Tests should pin this rather than hand-building
-    /// [`App::repo_group`]: positional indices follow `sort_by` reorders
-    /// silently and would secretly test the loader instead of the logic.
+    /// Resolve a repository to its scan group as a **group index** into
+    /// [`Config::scan_groups`], or `None` when no group claims it.
+    ///
+    /// Position within `scan_groups` — not the `&GroupDef` — because that is
+    /// what [`App::collapsed_groups`] stores: fold state must survive a
+    /// config reload that rebuilds the group list.
     pub fn group_index_of(&self, repo: &RepoInfo) -> Option<usize> {
         self.group_of(repo).and_then(|found| {
             self.config
@@ -1006,10 +1008,11 @@ impl App {
 /// One dashboard list position (sub-task 6): a group section header, or a
 /// repository row pointing back at its own `repos` index.
 ///
-/// Non-selectable by design: `Enter` on a `Header` is a no-op (otherwise
-/// it would fight §1.1's "`Enter` 打开"), and `j`/`k` step over headers
-/// without stopping — `ListState` holds the row index, this enum is what
-/// turns it back into a repository.
+/// A header is **not openable**: `Enter` on one is a no-op (§6.1.1), which
+/// is what keeps `Enter` meaning exactly one thing (§0's iron law). The
+/// cursor is a *row* cursor and may rest on a header — §6.1.1 separates the
+/// two layers. `ListState` holds the row index; this enum is what turns it
+/// back into a repository via [`DashboardRow::repo`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DashboardRow {
     /// Section header for `scan_groups[group]` with `count` visible
