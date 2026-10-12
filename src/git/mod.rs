@@ -47,7 +47,11 @@ pub use history::{
 };
 pub use remote::{pull, push, push_all_tags, push_tag, remote_url};
 // part of the public Git API contract (M1 subtask 3)
-pub use status::{head_sha, query_status, remote_label, AuthorInfo, RepoInfo};
+pub use status::{head_sha, query_status, remote_label, RepoInfo};
+// `AuthorInfo` (v0.9.0) is not part of that contract: it is a row field the
+// `ui` layer reads through `RepoInfo::author` and the shared `author_label`.
+// Crate-scoped per sub-task 1's interface design — never re-exported publicly.
+pub(crate) use status::AuthorInfo;
 pub use tag::{create_tag, delete_tag, list_tags, TagInfo};
 
 /// Abbreviate an object id to the 7 hex characters `git log --oneline` shows.

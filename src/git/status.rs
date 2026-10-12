@@ -81,8 +81,12 @@ pub struct RepoInfo {
 
 /// The commit identity a repository echoes: the name git signs commits with
 /// and the email it pairs with it (v0.9.0).
+///
+/// Crate-scoped per sub-task 1's interface design: read through
+/// [`RepoInfo::author`] and the shared `author_label`, never a standalone
+/// public API.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthorInfo {
+pub(crate) struct AuthorInfo {
     /// `user.name` as git resolves it for this repository.
     pub name: String,
     /// `user.email` as git resolves it for this repository.
