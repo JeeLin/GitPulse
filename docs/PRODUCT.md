@@ -67,7 +67,7 @@
 
 - [x] Gitea / GitLab 适配层
 - [x] token 按 remote URL 自动匹配
-- [已规划] 按需补 worktree / 分组（已纳入 v0.8.0）
+- [x] 按需补 worktree / 分组（已在 v0.8.0 / M6 交付：worktree 识别与呈现、`scan_dirs` 分组展示）
 
 **M5 交互规范收敛（对齐 DESIGN.md）**
 
