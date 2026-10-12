@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-12
+
+### Added
+- **仓库级提交身份回显**：仓库行新增 `作者` 列（§6.1 第 7 列、低优先，`min_width` 12 格，窄屏按 §5.4 整列消失），显示该仓库**生效的 `user.name`**——取值来自 git2 的 local→global→system 解析，与提交路径 `src/git/commit.rs` 同一套 fallback，故列里看到的就是提交会用的身份；解析不出时显示 `无`（同 `远端: 无`，非错误态）。
+- **提交弹窗标题回显作者**：标题形如 `提交信息 · {名字} <{邮箱}>`，解析不出时为 `提交信息 · (无本地配置)`（§6.2.1）。输入行仍是提交信息本身，作者只进标题。
+- **`A` 键切换仓库身份**：仓库视图按 `A` 打开单行输入（`名字 <邮箱>`，Enter 提交 / Esc 取消），写入该仓库 `.git/config` 的 **local** `user.name`/`user.email` 后即时生效——仓库行与提交弹窗下帧即更新，之后的 commit 真实由新身份签名；成功回状态行 `✓ 已切换为 {名字}`，解析/写入失败只落状态行瞬时提示、不污染面板 `error` 态。
+
+### Fixed
+- 作者读取不再二次打开仓库：`read_author` 改为接收 `query_status` 已打开的 `&Repository`，扫描 N 个仓库由 2N 次 `Repository::open` 降为 N 次（兑现「零额外打开」的设计承诺）。
+
 ## [0.8.0] - 2026-10-12
 
 ### Added
