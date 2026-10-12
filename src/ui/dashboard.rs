@@ -602,7 +602,7 @@ fn render_empty_state(f: &mut Frame, area: Rect, focused: bool) {
 /// configured**. §2.3 makes advertising a key a promise that dispatch moves
 /// something observable; with no `scan_groups`, `z` is a no-op by design
 /// ([`crate::app::App::toggle_selected_group`] returns early), so advertising it
-    /// anyway
+/// anyway
 /// would be exactly the dead-key defect B7-01 was written to catch.
 pub(crate) fn dashboard_hints(groups: bool) -> HintRow {
     let base = [hint("⏎", "进入仓库"), hint("n", "添加目录")];
