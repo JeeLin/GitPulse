@@ -95,7 +95,7 @@ fn path_starts_with(path: &Path, prefix: &Path) -> bool {
 /// claims it (sub-task 5, checkpoint ⑥).
 ///
 /// `pub` so sub-task 6's view can resolve a group without reaching through
-/// `App`; currently reached only from [`crate::App::group_of`], which the
+/// `App`; currently reached only from [`crate::app::App::group_of`], which the
 /// dashboard starts calling when grouping is drawn.
 ///
 /// Resolution is **longest prefix wins**, because that is the only rule under

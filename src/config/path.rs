@@ -36,7 +36,7 @@ fn default_config_path() -> PathBuf {
 
 /// The only place that resolves the GitPulse config file path (`~/.gitpulse/config.toml`).
 ///
-/// Tests redirect it through [`set_config_path_override`]; production always
+/// Tests redirect it through `set_config_path_override`; production always
 /// resolves [`default_config_path`].
 pub fn config_path() -> PathBuf {
     #[cfg(test)]

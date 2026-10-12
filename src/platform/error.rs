@@ -7,8 +7,9 @@ use crate::platform::remote::PlatformKind;
 
 /// Errors produced by platform clients.
 ///
-/// Network/HTTP failures are normalized into the [`Http`], [`Network`], and
-/// [`Other`] variants so the UI can render a stable message through
+/// Network/HTTP failures are normalized into the [`Self::Http`],
+/// [`Self::Network`], and [`Self::Other`] variants so the UI can render a
+/// stable message through
 /// [`render_platform_error`] regardless of the underlying adapter (octocrab,
 /// reqwest, …).
 #[derive(Debug, Error, PartialEq, Eq)]

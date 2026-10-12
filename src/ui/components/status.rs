@@ -18,7 +18,7 @@ impl StatusLine {
     /// `is_error == false`, so the status row renders it green (§3.2
     /// `success-flash` / §4.2).
     ///
-    /// The glyph is the contract, not a flag — [`crate::App`] cannot grow a
+    /// The glyph is the contract, not a flag — [`crate::app::App`] cannot grow a
     /// dedicated success field without breaking every view and test that
     /// builds a `StatusLine` literal, so the tone is detected from the message
     /// the way the renderer already reads error status from `is_error`.

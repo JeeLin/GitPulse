@@ -27,8 +27,9 @@ impl PlatformKind {
     /// Classify a bare host into a platform kind.
     ///
     /// `github.com`, `gitlab.com`, `gitea.com` map to their owned variants;
-    /// any other host (e.g. `git.example.com`) is [`SelfHosted`]. The host must
-    /// be port-free (see [`parse_remote`]) and is compared case-insensitively
+    /// any other host (e.g. `git.example.com`) is
+    /// [`PlatformKind::SelfHosted`]. The host must be port-free (see
+    /// [`parse_remote`]) and is compared case-insensitively
     /// (DNS is), so a `GitHub.com` remote is not misread as self-hosted — which
     /// would tell the user their platform is unsupported.
     pub fn from_host(host: &str) -> Self {

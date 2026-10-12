@@ -15,7 +15,7 @@
 //!
 //! This layer sits *below* the views, so it never reaches back up into them:
 //! the §3.1 cursor ([`with_cursor`]), the status row (§4.2:
-//! [`render_status_line`] / [`render_status_or_remote`], drawn by
+//! [`footer::render_status_line`] / [`footer::render_status_or_remote`], drawn by
 //! [`remote::render_remote_status`]) and the per-view status row
 //! ([`view_status`]) all live here, and the views import them rather than
 //! the other way round (B4-03).
@@ -44,7 +44,7 @@ use crate::ui::components::footer::StatusRow;
 /// the rest (dashboard / branches / history / config / diffs) take the plain
 /// status line. No panel reads these fields any more (§4.1).
 ///
-/// This lives beside [`render_footer`] because it only *builds* the row that
+/// This lives beside [`footer::render_footer`] because it only *builds* the row that
 /// [`footer::render_footer`] paints; putting it here keeps the dispatch over
 /// [`View`] inside the component layer instead of above it (B4-03).
 pub(crate) fn view_status(app: &App) -> StatusRow<'_> {

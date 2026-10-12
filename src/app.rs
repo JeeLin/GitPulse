@@ -291,7 +291,7 @@ enum GithubMsg {
 }
 
 /// Op slug for a receipt fetch, stored in `receipt_op` and rendered by
-/// `ui::remote::render_remote_status` as `{op} 成功` inside the receipt views
+/// `ui::components::remote::render_remote_status` as `{op} 成功` inside the receipt views
 /// only — the push/pull views read [`App::remote_op`] instead (U3).
 ///
 /// A platform slug, not display copy, so it stays lowercase — GitHub keeps its
@@ -310,8 +310,9 @@ fn platform_op_slug(kind: crate::platform::PlatformKind) -> &'static str {
 /// Platform name for user-facing receipt copy, or `None` when the platform has
 /// no name the user could recognise.
 ///
-/// Reuses [`PlatformKind::as_str`] so the three SaaS families keep one spelling
-/// between errors and UI. [`PlatformKind::SelfHosted`] is excluded: `as_str`
+/// Reuses [`crate::platform::PlatformKind::as_str`] so the three SaaS families keep
+/// one spelling between errors and UI. [`crate::platform::PlatformKind::SelfHosted`]
+/// is excluded: `as_str`
 /// yields the variant name `SelfHosted`, which is an internal spelling and must
 /// never leak into the status row. `None` makes each caller drop the whole
 /// name slot (`加载回执…`) rather than render a sentence with a hole in it
@@ -1668,8 +1669,9 @@ impl App {
 
     /// Enter the receipts hub from the repo view (`g`).
     ///
-    /// Resolves the current repo's remote URL to a [`PlatformRemote`], builds a
-    /// platform client once (cached as a credential-validity gate) and lands on
+    /// Resolves the current repo's remote URL to a
+    /// [`crate::platform::PlatformRemote`], builds a platform client once (cached as a
+    /// credential-validity gate) and lands on
     /// the pulls list. On a missing remote or a missing token the
     /// view still becomes [`View::Pulls`] so the panel can surface the error
     /// and the user can retry with `r` — those failures are load failures, so
@@ -1909,7 +1911,8 @@ impl App {
     ///
     /// The cached `client` plus the resolved `remote` are the readiness gate
     /// ([`GithubState::connected`]); each fetch task rebuilds a client from
-    /// `remote` via [`build_client`] because concrete clients are not `Clone`.
+    /// `remote` via [`crate::platform::client::build_client`] because concrete clients
+    /// are not `Clone`.
     /// The token itself is cached per host (`src/platform/auth.rs` for Gitea /
     /// GitLab, `src/github/auth.rs` for GitHub), so the rebuild is cheap.
     ///
@@ -2572,8 +2575,9 @@ impl App {
     /// dropping the key silently — that refusal lives inside
     /// [`App::spawn_remote_task`] with every other remote op (H8); outside
     /// the tag panel it stays a no-op. The notice shares the status row with
-    /// the running feedback (see [`crate::ui::remote::render_remote_status`]),
-    /// so it is never hidden by the very display that triggered it. A
+    /// the running feedback (see
+    /// [`crate::ui::components::remote::render_remote_status`]), so it is never
+    /// hidden by the very display that triggered it. A
     /// highlighted tag whose name is not valid UTF-8 is refused with an
     /// explicit reason before any task is spawned (H1/V2).
     pub fn start_tag_push(&mut self, all: bool) {

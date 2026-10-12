@@ -6,8 +6,9 @@ use crate::platform::{PlatformError, PlatformKind};
 
 /// Errors produced by [`crate::github::GithubClient`].
 ///
-/// Network/HTTP failures from octocrab are normalized into the [`Http`], [`Network`], and
-/// [`Other`] variants so [`crate::platform::render_platform_error`] can render a
+/// Network/HTTP failures from octocrab are normalized into the [`Self::Http`],
+/// [`Self::Network`], and [`Self::Other`] variants so
+/// [`crate::platform::render_platform_error`] can render a
 /// stable, human-readable message regardless of octocrab's internal error shape.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum GithubError {

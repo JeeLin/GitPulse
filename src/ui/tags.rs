@@ -57,9 +57,10 @@ pub struct TagsRender<'a> {
 ///
 /// The panel draws its content only (§4.1): the status row and the hint row
 /// are both painted once by the footer — the hint row from [`tags_hints`] —
-/// so no async *result* is read here. Push feedback ([`RemoteStatus`]) takes
-/// over that row, and a notice recorded while it runs shares it, see
-/// [`super::remote::render_remote_status`].
+/// so no async *result* is read here. Push feedback
+/// ([`crate::ui::components::status::RemoteStatus`]) takes over that row, and a
+/// notice recorded while it runs shares it, see
+/// [`super::components::remote::render_remote_status`].
 ///
 /// A failed load is not a footer result: it paints the panel's `error` state
 /// over the list (§4.3), while a failed delete or push keeps the list and

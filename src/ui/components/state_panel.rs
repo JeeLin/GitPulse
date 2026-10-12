@@ -5,7 +5,7 @@
 //! fill with rows, because only the view knows its item type. §3.2's fifth
 //! state, `success-flash`, has no body of its own: it is 「等同 `ready`」 with
 //! the operation result on the *status row* (§4.1/§4.2), which
-//! [`crate::ui::render_status_line`] paints — never a line inside the panel.
+//! [`crate::ui::components::footer::render_status_line`] paints — never a line inside the panel.
 //! The panel keeps its border and title in every state — a loading or failed
 //! panel still says which panel it is.
 

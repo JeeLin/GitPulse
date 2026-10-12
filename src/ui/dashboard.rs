@@ -26,7 +26,7 @@ pub struct DashboardState<'a> {
     /// The list positions to draw: section headers interleaved with the
     /// repositories they head (sub-task 6, §6.1 组头行).
     ///
-    /// Borrowed from [`App::dashboard_rows`], so the view never re-derives the
+    /// Borrowed from [`crate::app::App::dashboard_rows`], so the view never re-derives the
     /// grouping and can never disagree with the mapping the key handlers use.
     /// Each row carries its own `repos` index, which is what makes a header
     /// row survivable: the renderer needs `repo_row(repo, budget)` for a `Repo`
@@ -64,7 +64,8 @@ fn dashboard_title(count: usize) -> String {
 }
 
 /// Minimum width of the preview panel in cells (§5.4) — read from the shared
-/// floor in [`theme::width`] so the dashboard no longer keeps its own copy of
+/// floor in [`crate::ui::components::theme::width`] so the dashboard no longer keeps
+/// its own copy of
 /// the canonical §5.4 thresholds (6a).
 ///
 /// Ceiling on the preview panel: it never grows fat enough to starve the list.
@@ -600,7 +601,8 @@ fn render_empty_state(f: &mut Frame, area: Rect, focused: bool) {
 /// `groups` adds `z 折叠分组` (§6.1.1) **only when scan groups are actually
 /// configured**. §2.3 makes advertising a key a promise that dispatch moves
 /// something observable; with no `scan_groups`, `z` is a no-op by design
-/// ([`App::toggle_selected_group`] returns early), so advertising it anyway
+/// ([`crate::app::App::toggle_selected_group`] returns early), so advertising it
+    /// anyway
 /// would be exactly the dead-key defect B7-01 was written to catch.
 pub(crate) fn dashboard_hints(groups: bool) -> HintRow {
     let base = [hint("⏎", "进入仓库"), hint("n", "添加目录")];

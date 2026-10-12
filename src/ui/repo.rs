@@ -146,7 +146,7 @@ fn key_hints(discard_confirm_open: bool) -> Line<'static> {
 
 /// Footer hint row for the single-repo view (§2.3): the list actions, or the
 /// y/n/Esc row while the discard dialog owns focus. The row itself is composed
-/// by [`crate::ui::components::footer::compose_hint_row`] through
+/// by `crate::ui::components::footer::compose_hint_row` through
 /// [`join_hints`], so the key/desc pairs keep the two-cell gap §2.3 fixes.
 pub(crate) fn repo_hints(show_discard_confirm: bool) -> HintRow {
     HintRow::new(key_hints(show_discard_confirm))
