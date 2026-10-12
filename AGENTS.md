@@ -63,6 +63,7 @@ GitPulse/
 - 编译检查：`cargo check`
 - Lint：`cargo clippy --all-targets -- -D warnings`
 - 测试：`cargo test`（**本 crate 只有一个 bin target，没有 lib target** —— `cargo test --lib <filter>` 会报 `no library targets found in package 'gitpulse'`。按模块过滤请用 `cargo test <filter>` 或 `cargo test --bin gitpulse <filter>`）
+- 文档链接门禁：`cargo doc --no-deps`（**提交前必跑**：`src/main.rs` 的 `#![deny(rustdoc::broken_intra_doc_links)]` 只在你真的运行 `cargo doc` 时才生效，本项目无 CI，漏跑即无门禁）
 - 覆盖率：`cargo llvm-cov`
 
 ## 质量门禁
@@ -71,6 +72,7 @@ GitPulse/
 | 编译检查 | `cargo check` |
 | Lint 检查 | `cargo clippy -- -D warnings` |
 | 测试 | `cargo test` |
+| 文档链接检查 | `cargo doc --no-deps` —— **每次提交前必跑**（触发时机：mdflow 步骤6 测试验证、步骤5 代码审查、步骤8 提交前，以及任何改动过 rustdoc 注释之后）。`src/main.rs` 的 `#![deny(rustdoc::broken_intra_doc_links)]` 仅在运行 `cargo doc` 时把断链升级为 `error`；本项目**无 CI**（无 `.github/workflows/`）、无 `scripts/`，故这条门禁没有自动触发点，**必须由人工执行本命令才生效**，漏跑即等于没有门禁 |
 | 覆盖率 | `cargo llvm-cov`（目标 90%） |
 
 ## 审查维度

@@ -1,5 +1,7 @@
 //! GitPulse entry point: CLI parsing, tokio runtime, TUI startup.
 
+#![deny(rustdoc::broken_intra_doc_links)]
+
 mod app;
 mod config;
 mod datetime;
