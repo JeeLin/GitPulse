@@ -149,23 +149,20 @@ fn tag_item(tag: &TagInfo, width: usize) -> ListItem<'static> {
         ("轻量", Style::default().fg(color::FG_MUTED))
     };
     let kind_str = format!("  {kind}");
-    let kind_w = cells::width(&kind_str);
     let target_tail = format!("  {}", tag.target);
     // §5.4: name is the row's identity (High, always shown); the target
     // short-hash is Low and drops whole when the row cannot fund it. The
-    // lightweight/annotated marker is a fixed suffix that always stays.
-    let shows_target = cells::width(&tag.name) + cells::width(&target_tail) + kind_w <= width;
-    let name = if shows_target {
-        tag.name.clone()
-    } else {
-        cells::ellipsize(&tag.name, width.saturating_sub(kind_w))
-    };
-    let mut spans = vec![Span::raw(name)];
-    if shows_target {
-        spans.push(Span::styled(
-            target_tail,
-            Style::default().fg(color::WARNING),
-        ));
+    // lightweight/annotated marker is a fixed suffix that always stays, so it
+    // is the helper's non-droppable cost.
+    let fitted = cells::fit_name_and_tail(
+        &tag.name,
+        Some(&target_tail),
+        cells::width(&kind_str),
+        width,
+    );
+    let mut spans = vec![Span::raw(fitted.name)];
+    if let Some(tail) = fitted.tail {
+        spans.push(Span::styled(tail, Style::default().fg(color::WARNING)));
     }
     spans.push(Span::styled(kind_str, kind_style));
     ListItem::new(Line::from(spans))

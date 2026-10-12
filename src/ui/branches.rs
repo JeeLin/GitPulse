@@ -132,34 +132,7 @@ fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) 
     let items: Vec<ListItem> = state
         .branches
         .iter()
-        .map(|branch| {
-            let marker = if branch.is_head { "* " } else { "  " };
-            let name_style = if branch.is_head {
-                Style::default()
-                    .fg(color::SUCCESS)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            let marker_w = cells::width(marker);
-            let tail = branch.upstream.as_ref().map(|u| format!("  → {u}"));
-            // §5.4: name is the row's identity (High, always shown); the
-            // `  → upstream` tail is Low and drops whole when the row cannot
-            // fund it. Name is ellipsized to the remaining budget.
-            let shows_tail = tail
-                .as_ref()
-                .is_some_and(|t| marker_w + cells::width(&branch.name) + cells::width(t) <= width);
-            let name = if shows_tail {
-                branch.name.clone()
-            } else {
-                cells::ellipsize(&branch.name, width.saturating_sub(marker_w))
-            };
-            let mut spans = vec![Span::raw(marker), Span::styled(name, name_style)];
-            if let Some(tail) = tail.filter(|_| shows_tail) {
-                spans.push(Span::styled(tail, Style::default().fg(color::FG_MUTED)));
-            }
-            ListItem::new(Line::from(spans))
-        })
+        .map(|b| branch_item(b, width))
         .collect();
 
     super::render_named_list(
@@ -174,6 +147,33 @@ fn render_branch_list(f: &mut Frame, area: Rect, state: &mut BranchesState<'_>) 
         items,
         state.list_state,
     );
+}
+
+/// One branch row: the `* ` marker, the branch name, then the `→ upstream`
+/// tail.
+///
+/// The name is the row's identity (High, always shown) and the tail is Low —
+/// [`cells::fit_name_and_tail`] decides which survives the row's width, with
+/// the marker as the non-droppable `fixed` cost. The head branch is marked in
+/// `SUCCESS` + `BOLD` so it is identifiable when the row is ellipsized down to
+/// nothing else.
+fn branch_item(branch: &BranchInfo, width: usize) -> ListItem<'static> {
+    let marker = if branch.is_head { "* " } else { "  " };
+    let name_style = if branch.is_head {
+        Style::default()
+            .fg(color::SUCCESS)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let tail = branch.upstream.as_ref().map(|u| format!("  → {u}"));
+    let fitted =
+        cells::fit_name_and_tail(&branch.name, tail.as_deref(), cells::width(marker), width);
+    let mut spans = vec![Span::raw(marker), Span::styled(fitted.name, name_style)];
+    if let Some(tail) = fitted.tail {
+        spans.push(Span::styled(tail, Style::default().fg(color::FG_MUTED)));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 /// Single-line create input (convention 9): Enter creates, Esc cancels.

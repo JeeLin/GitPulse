@@ -52,6 +52,55 @@ fn take_tail(text: &str, from: usize, budget: usize) -> (String, usize) {
     (chars[start..].iter().collect(), used)
 }
 
+/// Outcome of [`fit_name_and_tail`]: the `name` the row may draw, and the
+/// droppable tail it may draw — or `None` when the row cannot fund it.
+///
+/// §5.4's rule is the same wherever a row has an identity plus optional
+/// metadata: the high-priority `name` is always shown, the low-priority tail
+/// disappears **whole** when the row cannot pay for it, and the name absorbs
+/// what is left by being ellipsized. The tail is never partially truncated —
+/// a half-drawn `→ upstream` or `→ ab34cd` reads as a different value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameAndTail {
+    /// The name, ellipsized to whatever the row can fund.
+    pub name: String,
+    /// The tail, or `None` when the row could not fund it.
+    pub tail: Option<String>,
+}
+
+/// Split `name` and its optional `tail` across `width` display cells under
+/// §5.4's "low priority disappears before the identity shrinks" rule
+/// (B4-10).
+///
+/// `fixed` is the width of the row's **non-droppable** furniture — the branch
+/// `* ` marker, the tag kind suffix — which is paid for before the tail is
+/// even considered; it is not part of `name`'s budget.
+///
+/// The tail is kept only when `fixed + name + tail` fits `width` exactly;
+/// otherwise it drops whole and the name is ellipsized into
+/// `width - fixed`. An absent tail is simply an absent tail, never a
+/// zero-width one.
+///
+/// Callers build their own spans around the result — the row's identity style
+/// and the tail's colour are panel-specific, and folding them in here would
+/// make this helper a second place to change for one panel's sake.
+pub fn fit_name_and_tail(
+    name: &str,
+    tail: Option<&str>,
+    fixed: usize,
+    width: usize,
+) -> NameAndTail {
+    let tail = tail.filter(|tail| fixed + self::width(name) + self::width(tail) <= width);
+    let name = match tail {
+        Some(_) => name.to_string(),
+        None => ellipsize(name, width.saturating_sub(fixed)),
+    };
+    NameAndTail {
+        name,
+        tail: tail.map(str::to_string),
+    }
+}
+
 /// Pad `text` with trailing spaces to exactly `width` display cells; text
 /// that already fills (or overflows) the budget is returned unchanged so a
 /// fixed-width column can never grow past its slot.
@@ -201,6 +250,69 @@ mod tests {
     use super::*;
     use crate::ui::components::theme::color;
     use ratatui::style::Style;
+
+    /// B4-10: the budget's upper edge — a width that exactly funds
+    /// `fixed + name + tail` keeps the tail. One cell less drops it whole.
+    #[test]
+    fn fit_name_and_tail_keeps_the_tail_exactly_at_the_boundary() {
+        let name = "main";
+        let tail = "  → origin/main";
+        let fixed = 2; // the branch marker's two cells
+        let exact = fixed + width(name) + width(tail);
+
+        let kept = fit_name_and_tail(name, Some(tail), fixed, exact);
+        assert_eq!(
+            kept,
+            NameAndTail {
+                name: name.to_string(),
+                tail: Some(tail.to_string()),
+            },
+            "a width that exactly funds the tail must keep it"
+        );
+
+        let dropped = fit_name_and_tail(name, Some(tail), fixed, exact - 1);
+        assert_eq!(
+            dropped.tail, None,
+            "one cell short, the tail must drop whole rather than truncate"
+        );
+        assert_eq!(
+            dropped.name, name,
+            "the name still fits without the tail, so it is not ellipsized"
+        );
+    }
+
+    /// B4-10: when the tail drops, the name is ellipsized against
+    /// `width - fixed` — the fixed furniture is paid for before the name's
+    /// budget, so a wide marker must shorten the name, not be paid out of it.
+    #[test]
+    fn fit_name_and_tail_ellipsizes_the_name_around_the_fixed_cost() {
+        let name = "a-very-long-branch-name";
+
+        let narrow_marker = fit_name_and_tail(name, None, 2, 10);
+        let wide_marker = fit_name_and_tail(name, None, 8, 10);
+
+        assert_eq!(
+            width(&wide_marker.name),
+            2,
+            "the wider fixed cost must leave the name only 2 cells"
+        );
+        assert_eq!(width(&narrow_marker.name), 8);
+        assert!(
+            narrow_marker.name.ends_with('…') && wide_marker.name.ends_with('…'),
+            "a cut name is marked with …, never silently clipped: {narrow_marker:?}"
+        );
+        assert_eq!(wide_marker.tail, None, "no tail was offered");
+    }
+
+    /// B4-10: the fixed cost alone can exceed the row, and the helper must not
+    /// wrap — `saturating_sub` yields 0 and the name disappears rather than
+    /// underflowing into a huge budget.
+    #[test]
+    fn fit_name_and_tail_saturates_when_the_fixed_cost_exceeds_the_row() {
+        let fitted = fit_name_and_tail("main", Some("  → origin/main"), 20, 8);
+        assert_eq!(fitted.name, "", "a name with no cells left is empty");
+        assert_eq!(fitted.tail, None);
+    }
 
     #[test]
     fn width_counts_cjk_glyphs_as_two_cells() {
