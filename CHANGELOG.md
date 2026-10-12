@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-13
+
+### Changed
+- 清零全库 25 条 rustdoc 断链（`cargo doc --no-deps` 的 `unresolved link` 25 → 0）：按 A–D 四类根因逐条复核后修复——`#[cfg(test)]` 目标与私有 fn 降级为纯文本、随重构漂移的模块路径重写为真实路径（`ui::remote` → `ui::components::remote`、`crate::App` → `crate::app::App`）、枚举变体补 `Self::` 限定、跨模块符号补全从 crate 根出发的全路径限定。未放宽任何可见性，`src/` 可执行代码 diff 为 0 行。
+- `src/main.rs` 新增 `#![deny(rustdoc::broken_intra_doc_links)]`，断链清零从一次性清理变为构建期门禁；`AGENTS.md` 「质量门禁」与「测试命令」同步登记该命令及其人工触发要求（本项目无 CI、无 `scripts/`，门禁仅在实际执行 `cargo doc` 时生效）。
+
+### Added
+- `AGENTS.md` 「代码审查维度」补位 6 条可执行验证动作（弹窗标题宽度 ≤ 80 cell、枚举/列集合注释的列数须等于数组 `const` 长度、新增 `pub(crate) fn` 须有生产调用方、影响断言真假的宿主环境条件分支须改为无条件断言、「承诺不改的文件」用 diff 空集验证、新增 rustdoc 内链须逐条验证目标存在且总数不高于基线）。
+
 ## [0.9.0] - 2026-10-12
 
 ### Added
