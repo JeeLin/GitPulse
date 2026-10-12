@@ -66,7 +66,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_repo(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("gitpulse-author-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("gitpulse-author-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -79,7 +80,9 @@ mod tests {
         // when the user has switched its identity, and keeps the global
         // fallback arm of the test from silently passing on a leaked value.
         config.set_str("user.name", "Local Name").unwrap();
-        config.set_str("user.email", "local@gitpulse.local").unwrap();
+        config
+            .set_str("user.email", "local@gitpulse.local")
+            .unwrap();
         repo
     }
 

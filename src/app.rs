@@ -1481,7 +1481,11 @@ impl App {
         // Guard on the index `submit_author_input` actually writes, not on
         // `repo_workspace_path()`: that one resolves `branch_repo.or(current_repo)`
         // and would validate a repository the submit path never touches.
-        if self.current_repo.filter(|i| *i < self.repos.len()).is_none() {
+        if self
+            .current_repo
+            .filter(|i| *i < self.repos.len())
+            .is_none()
+        {
             return;
         }
         self.author_input = crate::git::author_label(self.current_author());

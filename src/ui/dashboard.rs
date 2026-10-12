@@ -298,11 +298,7 @@ fn preferred_width(column: &Column) -> Option<usize> {
     match column {
         Column::Name => Some(NAME_CELLS),
         Column::Branch => Some(BRANCH_CELLS),
-        Column::Dirty
-        | Column::Sync
-        | Column::Warn
-        | Column::Remote
-        | Column::Author => None,
+        Column::Dirty | Column::Sync | Column::Warn | Column::Remote | Column::Author => None,
     }
 }
 
@@ -729,7 +725,10 @@ mod row_set_tests {
 
         // With room, it is back — the column is budgeted, not removed.
         let wide = repo_row(&repo, 120).to_string();
-        assert!(wide.contains("张三"), "author must render when it fits: {wide}");
+        assert!(
+            wide.contains("张三"),
+            "author must render when it fits: {wide}"
+        );
     }
 }
 
