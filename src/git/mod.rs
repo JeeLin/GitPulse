@@ -3,6 +3,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+mod author;
 mod batch;
 mod branch;
 mod commit;
@@ -12,6 +13,21 @@ pub(crate) mod history;
 mod remote;
 mod status;
 mod tag;
+
+// The identity plumbing (v0.9.0). `set_local_author` is `pub(crate)` so the
+// switch stays reachable from the `App` verbs without widening the module's
+// public surface — the UI reads the echo through `RepoInfo::author` and never
+// calls these directly. `read_author` needs no re-export: its only caller is
+// `status::query_status`, which reaches it through `super::author`.
+pub(crate) use author::set_local_author;
+/// The one-line form the commit popup title and the status row render:
+/// `名字 <邮箱>`, or the placeholder when no identity resolved (v0.9.0).
+pub(crate) fn author_label(author: Option<&status::AuthorInfo>) -> String {
+    match author {
+        Some(author) => format!("{} <{}>", author.name, author.email),
+        None => "(无本地配置)".to_string(),
+    }
+}
 
 pub use batch::{batch_fetch, batch_pull};
 pub use branch::{create_branch, delete_branch, list_branches, switch_branch, BranchInfo};
@@ -31,7 +47,7 @@ pub use history::{
 };
 pub use remote::{pull, push, push_all_tags, push_tag, remote_url};
 // part of the public Git API contract (M1 subtask 3)
-pub use status::{head_sha, query_status, remote_label, RepoInfo};
+pub use status::{head_sha, query_status, remote_label, AuthorInfo, RepoInfo};
 pub use tag::{create_tag, delete_tag, list_tags, TagInfo};
 
 /// Abbreviate an object id to the 7 hex characters `git log --oneline` shows.

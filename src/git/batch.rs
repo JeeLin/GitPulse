@@ -115,6 +115,7 @@ mod tests {
             remote: None,
             is_worktree: false,
             main_repo: None,
+            author: None,
         }
     }
 

@@ -69,6 +69,24 @@ pub struct RepoInfo {
     /// `None` for a main repository (standalone, or the root that owns its
     /// own worktrees) (checkpoint ③).
     pub main_repo: Option<PathBuf>,
+    /// Effective commit identity of this repository, or `None` when neither
+    /// `user.name` nor `user.email` resolves anywhere.
+    ///
+    /// This is an **echo** only: `super::commit` signs commits from the same
+    /// config lookup, so what the dashboard shows is what a commit here uses
+    /// (v0.9.0). `None` renders as `无` / `(无本地配置)` rather than failing
+    /// the row — an unreadable identity never makes a repository unlistable.
+    pub author: Option<AuthorInfo>,
+}
+
+/// The commit identity a repository echoes: the name git signs commits with
+/// and the email it pairs with it (v0.9.0).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorInfo {
+    /// `user.name` as git resolves it for this repository.
+    pub name: String,
+    /// `user.email` as git resolves it for this repository.
+    pub email: String,
 }
 
 /// Query the current status of a git repository.
@@ -80,6 +98,7 @@ pub fn query_status(repo_path: &Path) -> Result<RepoInfo> {
     let (ahead, behind) = compute_ahead_behind(&repo)?;
     let last_commit = resolve_last_commit(&repo)?;
     let remote = resolve_remote(&repo);
+    let author = super::author::read_author(repo_path);
 
     let name = repo_display_name(repo_path);
 
@@ -94,6 +113,7 @@ pub fn query_status(repo_path: &Path) -> Result<RepoInfo> {
         remote,
         is_worktree: false,
         main_repo: None,
+        author,
     })
 }
 
