@@ -222,6 +222,10 @@ const WARN_CELLS: usize = 4;
 /// Cells the remote-platform column holds — the longest known platform label
 /// (`Bitbucket`) plus the two-cell gap §6.1 puts before a status column.
 const REMOTE_CELLS: usize = 11;
+/// Cells the author column holds (v0.9.0): the `user.name` git resolves for
+/// this repository, ellipsized — the full `名字 <邮箱>` lives in the commit
+/// popup title, where there is room for it.
+const AUTHOR_CELLS: usize = 12;
 /// Cells the two high-priority columns reserve when the pane has room to spare
 /// (§5.4 表格列宽): name and branch identify the row, so they flex inside a floor
 /// instead of ever being dropped.
@@ -247,10 +251,10 @@ enum Priority {
     Low,
 }
 
-/// The data a repository row column renders — the six columns of §6.1:262's
-/// sample row (`名称/分支/↑2↓0/●3/⚠1/远端: GitHub`): dirty and warning stay
-/// split (no mental arithmetic), and the timestamp is not a row column at all —
-/// it lives in the preview panel instead.
+/// The data a repository row column renders — the seven columns of §6.1:262's
+/// sample row (`名称/分支/↑2↓0/●3/⚠1/远端: GitHub`) plus the author (v0.9.0):
+/// dirty and warning stay split (no mental arithmetic), and the timestamp is
+/// not a row column at all — it lives in the preview panel instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Column {
     /// Repository name.
@@ -265,22 +269,26 @@ enum Column {
     Warn,
     /// Fetch-remote platform (`远端: GitHub`), or `无` for a local-only repo.
     Remote,
+    /// Effective commit author (`user.name`), or `无` when nothing resolved
+    /// (v0.9.0) — the row-level echo of what a commit here would be signed as.
+    Author,
 }
 
 /// §5.4 column priority table for a repository row: an ordered slice of
 /// `(column, min_width, priority)` — every column's `min_width` (the cells it
 /// keeps while drawn) and its priority (whether it may be dropped when the row
 /// runs out of cells). Ordered high → low, so the renderer keeps a prefix of
-/// this slice while the row fits and cuts the tail: `Remote` goes before
-/// `Warn`, `Warn` before `Sync`, `Sync` before `Dirty`, and the two High
-/// columns never go at all.
-const REPO_COLUMNS: [(Column, usize, Priority); 6] = [
+/// this slice while the row fits and cuts the tail: `Author` goes before
+/// `Remote`, `Remote` before `Warn`, `Warn` before `Sync`, `Sync` before
+/// `Dirty`, and the two High columns never go at all.
+const REPO_COLUMNS: [(Column, usize, Priority); 7] = [
     (Column::Name, NAME_MIN, Priority::High),
     (Column::Branch, BRANCH_MIN, Priority::High),
     (Column::Dirty, DIRTY_CELLS, Priority::Low),
     (Column::Sync, SYNC_CELLS, Priority::Low),
     (Column::Warn, WARN_CELLS, Priority::Low),
     (Column::Remote, REMOTE_CELLS, Priority::Low),
+    (Column::Author, AUTHOR_CELLS, Priority::Low),
 ];
 
 /// The width a `High` column grows back to whenever the pane has cells to
@@ -290,7 +298,11 @@ fn preferred_width(column: &Column) -> Option<usize> {
     match column {
         Column::Name => Some(NAME_CELLS),
         Column::Branch => Some(BRANCH_CELLS),
-        Column::Dirty | Column::Sync | Column::Warn | Column::Remote => None,
+        Column::Dirty
+        | Column::Sync
+        | Column::Warn
+        | Column::Remote
+        | Column::Author => None,
     }
 }
 
@@ -395,6 +407,15 @@ fn repo_row(repo: &RepoInfo, budget: usize) -> Line<'static> {
         format!("远端: {}", git::remote_label(repo)),
         Style::default().fg(color::FG_MUTED),
     );
+    // v0.9.0: the author column echoes the `user.name` a commit here would be
+    // signed with. `无` when nothing resolved, matching `远端: 无` — an
+    // unconfigured repository is a normal row, not a failure. The name is
+    // ellipsized to the column so a long identity cannot eat the columns
+    // beside it (§5.4 单行永不换行).
+    let author_span = Span::styled(
+        cells::ellipsize(&author_name(repo), AUTHOR_CELLS),
+        Style::default().fg(color::FG_MUTED),
+    );
     let gap = cells::width("  ");
 
     // One payload per column of [`REPO_COLUMNS`], in table order.
@@ -409,6 +430,7 @@ fn repo_row(repo: &RepoInfo, budget: usize) -> Line<'static> {
             Column::Sync => sync_span.clone(),
             Column::Warn => warn_span.clone(),
             Column::Remote => remote_span.clone(),
+            Column::Author => author_span.clone(),
         }
     };
     // Cells a column costs while it is drawn whole: a High column at its
@@ -467,7 +489,7 @@ fn repo_row(repo: &RepoInfo, budget: usize) -> Line<'static> {
                 format!("{:>4}", dirty_count),
                 Style::default().fg(dirty_color),
             )),
-            Column::Sync | Column::Warn | Column::Remote => {
+            Column::Sync | Column::Warn | Column::Remote | Column::Author => {
                 spans.push(Span::raw("  "));
                 spans.push(payload(column));
             }
@@ -477,6 +499,15 @@ fn repo_row(repo: &RepoInfo, budget: usize) -> Line<'static> {
     // Belt-and-braces: even when a long name plus the floors cannot all fit,
     // the row never exceeds the pane (§5.4 单行永不换行).
     cells::fit_line(Line::from(spans), budget)
+}
+
+/// The name a repository row's `Author` column shows (v0.9.0): the `user.name`
+/// git resolves for this repository, or `无` when nothing resolved.
+fn author_name(repo: &RepoInfo) -> String {
+    repo.author
+        .as_ref()
+        .map(|author| author.name.clone())
+        .unwrap_or_else(|| "无".to_string())
 }
 
 /// How many [`REPO_COLUMNS`] entries are the High-priority heads — the count
@@ -642,6 +673,63 @@ mod row_set_tests {
         repo.remote = None;
         let text = repo_row(&repo, 120).to_string();
         assert!(text.contains("远端: 无"), "missing remote cell: {text}");
+    }
+
+    /// v0.9.0: the row echoes the identity a commit here is signed with.
+    /// Falsifiable: emptying the `author` field drops the name and this goes
+    /// red — the column is an echo, not decoration.
+    #[test]
+    fn repo_row_shows_author_when_local_config_set() {
+        let mut repo = row_repo();
+        repo.author = Some(crate::git::AuthorInfo {
+            name: "张三".to_string(),
+            email: "zhang@example.com".to_string(),
+        });
+
+        let text = repo_row(&repo, 120).to_string();
+
+        assert!(text.contains("张三"), "author name must render: {text}");
+    }
+
+    /// v0.9.0: an unconfigured repository shows `无` rather than an empty cell
+    /// — the same shape `远端: 无` uses, so a missing identity never reads as
+    /// a rendering bug.
+    #[test]
+    fn repo_row_renders_no_author_when_nothing_resolved() {
+        let repo = row_repo();
+        assert_eq!(repo.author, None);
+        let text = repo_row(&repo, 120).to_string();
+        assert!(text.contains("无"), "missing identity marker: {text}");
+    }
+
+    /// §5.4: `Author` is the lowest-priority column, so a narrow row drops it
+    /// *whole* before it shrinks the name (§5.4 低优先列先消失, 不是缩小).
+    /// Falsifiable: promoting `Author` above the other Low columns keeps it in
+    /// this budget and breaks the assertion.
+    #[test]
+    fn repo_row_drops_author_column_at_floor() {
+        let mut repo = row_repo();
+        repo.author = Some(crate::git::AuthorInfo {
+            name: "张三".to_string(),
+            email: "zhang@example.com".to_string(),
+        });
+
+        // A budget wide enough for the High columns and the status columns but
+        // not for another Low column: the author must disappear entirely.
+        let narrow = repo_row(&repo, 40).to_string();
+        assert!(
+            !narrow.contains("张三"),
+            "author must drop whole at a narrow budget: {narrow}"
+        );
+        // The row never exceeds its budget whatever it drops (§5.4).
+        assert!(
+            cells::width(&narrow) <= 40,
+            "row exceeded the budget: {narrow}"
+        );
+
+        // With room, it is back — the column is budgeted, not removed.
+        let wide = repo_row(&repo, 120).to_string();
+        assert!(wide.contains("张三"), "author must render when it fits: {wide}");
     }
 }
 

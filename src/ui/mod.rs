@@ -530,9 +530,16 @@ fn repo_state(app: &mut App, allow_discard: bool) -> repo::RepoState<'_> {
 }
 
 /// Repo arm of [`render`]: the file list plus its inline diff preview, plus
-/// the discard confirmation overlay when it is open.
+/// the identity-switch input overlay when it is open.
 fn render_repo_view(f: &mut Frame, content: Rect, app: &mut App) {
     repo::render_repo(f, content, repo_state(app, true));
+    // v0.9.0: the identity switch is a modal over the repo view, exactly like
+    // the commit popup is over `View::Commit` — same `render_input_overlay`
+    // geometry (convention 9), so the two single-line inputs read alike.
+    if app.show_author_input {
+        let input = app.author_input.clone();
+        render_input_overlay(f, content, "切换身份", &input, true);
+    }
 }
 
 /// Commit arm of [`render`]: repo view as background, commit input popup on
@@ -1152,6 +1159,7 @@ mod tests {
         diff_content: String,
         commit_message: String,
         show_discard_confirm: bool,
+        show_author_input: bool,
         show_branch_input: bool,
         show_branch_delete_confirm: bool,
         show_config_input: bool,
@@ -1208,6 +1216,7 @@ mod tests {
                 diff_content: app.diff_content.clone(),
                 commit_message: app.commit_message.clone(),
                 show_discard_confirm: app.show_discard_confirm,
+                show_author_input: app.show_author_input,
                 show_branch_input: app.show_branch_input,
                 show_branch_delete_confirm: app.show_branch_delete_confirm,
                 show_config_input: app.show_config_input,

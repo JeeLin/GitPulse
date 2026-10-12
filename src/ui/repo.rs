@@ -122,8 +122,11 @@ fn split_repo(content: Rect) -> (Rect, Option<Rect>) {
 ///
 /// The pairs are §6.2.1's 提示行视图段 verbatim, in §2.3's priority order, with
 /// the two keys that share one action folded together (`⏎ 查看diff`, `p/P`,
-/// `b/h/t`) so the view segment keeps its cells inside the 80-column line. The
-/// commit message input owns its own row, see [`crate::ui::commit::commit_hints`].
+/// `b/h/t`) so the view segment keeps its cells inside the 80-column line.
+/// `A 切换身份` (v0.9.0) sits in its own cap because it is a distinct key from
+/// `a` (stage-all): folding them would advertise a single cap for two verbs,
+/// and §2.3 requires every advertised cap to dispatch. The commit message
+/// input owns its own row, see [`crate::ui::commit::commit_hints`].
 fn key_hints(discard_confirm_open: bool) -> Line<'static> {
     if discard_confirm_open {
         // Shared row (G5): the y/n/Esc wording of the confirmation, matching
@@ -134,6 +137,7 @@ fn key_hints(discard_confirm_open: bool) -> Line<'static> {
             hint("⏎", "查看diff"),
             hint("s/u", "暂存"),
             hint("c", "提交"),
+            hint("A", "切换身份"),
             hint("p/P", "推送/拉取"),
             hint("b/h/t", "面板"),
         ])
@@ -921,6 +925,20 @@ mod tests {
         assert!(
             hint.contains("⏎查看diff"),
             "the head of the view segment stays: {hint}"
+        );
+    }
+
+    /// v0.9.0: the repo view advertises `A 切换身份` in its own cap. §2.3 makes
+    /// an advertised key a promise — `App::handle_repo_key` binds `Char('A')`,
+    /// and `every_advertised_key_on_every_screen_dispatches_an_action` presses
+    /// it. This pins the *copy*, so a rename cannot silently drop the verb.
+    #[test]
+    fn repo_hint_row_advertises_the_identity_switch() {
+        let terminal = render_hints_row(&repo_hints(false));
+        let text = row_compact(&terminal, terminal.backend().buffer().area.height - 1);
+        assert!(
+            text.contains("切换身份"),
+            "the repo hint row must advertise the identity switch: {text}"
         );
     }
 

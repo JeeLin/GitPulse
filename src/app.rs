@@ -600,6 +600,11 @@ pub struct App {
     pub diff_content: String,
     /// Single-line commit message being typed in the Commit view (convention 9).
     pub commit_message: String,
+    /// Single-line `名字 <邮箱>` being typed in the identity-switch input
+    /// (v0.9.0); `show_author_input` opens the modal.
+    pub author_input: String,
+    /// Whether the identity-switch input overlay is open (v0.9.0).
+    pub show_author_input: bool,
     /// Push/pull feedback; takes precedence over the normal status line.
     pub remote_status: Option<RemoteStatus>,
     /// Label of the running/last push or pull (`push` / `pull`).
@@ -692,6 +697,8 @@ impl App {
             show_discard_confirm: false,
             diff_content: String::new(),
             commit_message: String::new(),
+            author_input: String::new(),
+            show_author_input: false,
             remote_status: None,
             remote_op: "",
             receipt_op: "",
@@ -1461,6 +1468,65 @@ impl App {
     pub fn cancel_commit(&mut self) {
         self.view = View::Repo;
         self.commit_message.clear();
+    }
+
+    /// Open the single-line identity-switch input (v0.9.0, convention 9).
+    ///
+    /// `A` on the repo view. The buffer starts pre-filled with the identity
+    /// currently in effect, so "switch" is an edit rather than a re-type; a
+    /// repository with no identity starts empty. No-op when no repository is
+    /// open — there is nothing to switch, and the key is only advertised on a
+    /// screen where it can act (§2.3: a hint the row prints must dispatch).
+    pub fn open_author_input(&mut self) {
+        if self.repo_workspace_path().is_none() {
+            return;
+        }
+        self.author_input = crate::git::author_label(self.current_author());
+        // A resolved identity is what the user wants to keep editing; a
+        // placeholder is not something to copy into `.git/config`.
+        if self.author_input == crate::git::author_label(None) {
+            self.author_input.clear();
+        }
+        self.show_author_input = true;
+        self.show_discard_confirm = false;
+        self.status = None;
+    }
+
+    /// Cancel the identity-switch input, leaving the repository's
+    /// configuration untouched.
+    pub fn cancel_author_input(&mut self) {
+        self.show_author_input = false;
+        self.author_input.clear();
+    }
+
+    /// Write the typed `名字 <邮箱>` into the current repository's **local**
+    /// config (v0.9.0) and refresh it so the echo updates immediately.
+    ///
+    /// A parse failure or a git-side failure keeps the input open with the
+    /// typed text, per convention 9 — the reason lands on the status row
+    /// (§4.3: an operation result is transient, never a panel `error` state).
+    pub fn submit_author_input(&mut self) {
+        let Some((name, email)) = parse_author(&self.author_input) else {
+            self.set_error("格式：名字 <邮箱>");
+            return;
+        };
+        let Some(repo_idx) = self.current_repo.filter(|i| *i < self.repos.len()) else {
+            self.set_error(invalid_repo_msg("切换身份失败"));
+            return;
+        };
+        let repo_path = self.repos[repo_idx].path.clone();
+        match git::set_local_author(&repo_path, &name, &email) {
+            Ok(()) => {
+                // Re-read the repository so `RepoInfo::author` — and with it
+                // the dashboard column and the commit popup title — reflects
+                // the new identity on the next frame.
+                self.refresh_repo_status(repo_idx);
+                self.show_author_input = false;
+                self.author_input.clear();
+                self.set_info_unless_error(format!("✓ 已切换为 {name}"));
+            }
+            Err(e) => self.set_error(format!("切换身份失败: {e}")),
+        }
     }
 
     /// Stage-aware commit of `self.commit_message`; returns to the repo view.
@@ -3143,6 +3209,9 @@ impl App {
         if self.view == View::Commit {
             return Some(ModalKind::Input(InputSlot::Commit));
         }
+        if self.show_author_input {
+            return Some(ModalKind::Input(InputSlot::Author));
+        }
         if self.show_branch_input {
             return Some(ModalKind::Input(InputSlot::BranchCreate));
         }
@@ -3191,6 +3260,7 @@ impl App {
                         // Raced away between the two lookups: swallow.
                         _ => InputOutcome::Consumed,
                     },
+                    InputSlot::Author => input_modal_key(key, &mut self.author_input),
                 };
                 match (slot, outcome) {
                     (InputSlot::Commit, InputOutcome::Cancel) => self.cancel_commit(),
@@ -3201,6 +3271,8 @@ impl App {
                     (InputSlot::ConfigAdd, InputOutcome::Submit) => self.submit_config_add(),
                     (InputSlot::TagCreate, InputOutcome::Cancel) => self.cancel_tag_create(),
                     (InputSlot::TagCreate, InputOutcome::Submit) => self.submit_tag_create(),
+                    (InputSlot::Author, InputOutcome::Cancel) => self.cancel_author_input(),
+                    (InputSlot::Author, InputOutcome::Submit) => self.submit_author_input(),
                     (_, InputOutcome::Consumed) => {}
                 }
             }
@@ -3723,6 +3795,15 @@ impl App {
                 self.stage_all();
                 true
             }
+            // v0.9.0: `A` (shift + `a`) switches this repository's commit
+            // identity. It is a distinct `KeyCode` from `a` — ratatui reports
+            // them as separate events — so the two can coexist, but the
+            // precedent of B7-02 (`P`/`p` misrouted) means the binding is only
+            // advertised on a screen where it dispatches (§2.3).
+            KeyCode::Char('A') => {
+                self.open_author_input();
+                true
+            }
             // §6.2.1 KEYS: `d` = 丢弃选中（确认框）. `App::start_discard` only
             // arms the confirmation; the modal focus trap owns `y`/`n`, so the
             // destructive call itself cannot happen without that confirmation
@@ -4064,6 +4145,8 @@ enum InputSlot {
     ConfigAdd,
     /// The tag-create input.
     TagCreate,
+    /// The per-repo identity switch input (`名字 <邮箱>`, v0.9.0).
+    Author,
 }
 
 /// The confirmation dialog behind [`ModalKind::Confirm`].
@@ -4177,6 +4260,62 @@ fn jump_selection(state: &mut ListState, len: usize, head: bool) {
 /// between the commit flow, the panels and the create/delete paths.
 fn invalid_repo_msg(op: &str) -> String {
     format!("{op}: 仓库索引失效")
+}
+
+/// Split a single-line identity into `(name, email)` (v0.9.0).
+///
+/// The accepted shape is the one git itself writes: `名字 <邮箱>`, where the
+/// brackets are part of the syntax and may not be dropped. A name or an email
+/// that is empty, or an input missing either half, is not a signature — it
+/// returns `None` so the caller reports the format instead of storing a blank
+/// identity in `.git/config`.
+fn parse_author(input: &str) -> Option<(String, String)> {
+    let open = input.find('<')?;
+    let close = input.rfind('>')?;
+    if close < open {
+        return None;
+    }
+    let name = input[..open].trim();
+    let email = input[open + 1..close].trim();
+    // Trailing text after `>` is a typo, not a signature: accepting it would
+    // silently drop what the user typed, so the format is reported instead.
+    if name.is_empty() || email.is_empty() || !input[close + 1..].trim().is_empty() {
+        return None;
+    }
+    Some((name.to_string(), email.to_string()))
+}
+
+#[cfg(test)]
+mod parse_author_tests {
+    use super::parse_author;
+
+    #[test]
+    fn parses_the_name_and_email_shape_git_writes() {
+        assert_eq!(
+            parse_author("张三 <zhang@example.com>"),
+            Some(("张三".to_string(), "zhang@example.com".to_string()))
+        );
+        // Surrounding whitespace is not part of either half.
+        assert_eq!(
+            parse_author("  Alice  <  alice@example.com  >  "),
+            Some(("Alice".to_string(), "alice@example.com".to_string()))
+        );
+    }
+
+    /// Every rejected shape is one that would store a blank or half-formed
+    /// signature in `.git/config` — the failure the format check exists for.
+    #[test]
+    fn rejects_a_missing_or_half_formed_identity() {
+        assert_eq!(parse_author("张三"), None, "no email half");
+        assert_eq!(parse_author("zhang@example.com"), None, "no name half");
+        assert_eq!(parse_author("<zhang@example.com>"), None, "blank name");
+        assert_eq!(parse_author("张三 <>"), None, "blank email");
+        assert_eq!(parse_author("张三 <a@b.c> extra"), None, "trailing text");
+        assert_eq!(parse_author(""), None, "empty input");
+        // Reversed brackets never parse, so a typo cannot silently swap the
+        // name and the email.
+        assert_eq!(parse_author(">a@b.c< 张三"), None);
+    }
 }
 
 impl App {
@@ -4405,6 +4544,53 @@ mod tests {
         // dashboard can shrink the list under a cursor it has not re-clamped.
         app.current_repo = Some(9);
         assert_eq!(app.current_author(), None);
+    }
+
+    /// v0.9.0, subtask 3 end-to-end: the switch writes the local config and the
+    /// echo follows it. Drives the real `submit_author_input` → `query_status`
+    /// path, so dropping the `refresh_repo_status` call (or the local write)
+    /// turns this red rather than leaving a stale echo on screen.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn switch_author_writes_local_config_and_refreshes_the_echo() {
+        let dir = temp_dir("author-switch");
+        init_repo_with_commit(&dir);
+
+        let mut app = App::new(Config::default());
+        app.config.scan_dirs = vec![dir.clone()];
+        app.load_repos();
+        let idx = 0;
+        app.current_repo = Some(idx);
+
+        // A rejected line keeps the input open and reports the format (§4.3:
+        // the status row owns an operation result).
+        app.show_author_input = true;
+        app.author_input = "not-an-identity".to_string();
+        app.submit_author_input();
+        assert!(
+            app.show_author_input,
+            "a malformed identity must keep the input open"
+        );
+        assert!(app.status.as_ref().is_some_and(|s| s.is_error));
+        assert_eq!(
+            app.current_author().map(|a| a.name.clone()),
+            Some("GitPulse Test".to_string()),
+            "the rejected switch must leave the identity untouched"
+        );
+
+        // The accepted form writes local config and the echo re-reads it.
+        app.author_input = "新名字 <new@example.com>".to_string();
+        app.submit_author_input();
+        assert!(!app.show_author_input, "the input closes on success");
+        let author = app.current_author().expect("the switch resolved an author");
+        assert_eq!(author.name, "新名字");
+        assert_eq!(author.email, "new@example.com");
+
+        // The write really landed in this repository's local config, so a fresh
+        // `query_status` — and with it a commit — picks it up.
+        let fresh = crate::git::query_status(&dir).unwrap();
+        assert_eq!(fresh.author, app.repos[idx].author);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Sub-task 5 · checkpoint ⑭ regression nail: the *actual startup branch*
