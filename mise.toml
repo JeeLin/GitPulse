@@ -1,3 +1,9 @@
+[settings]
+# 交互式任务必须直连终端。mise 默认会新建进程组接管 stdin/stdout，
+# 导致 TUI 程序在 enable_raw_mode() 时收到 SIGTTOU 被内核挂起（ps 显示 T），
+# 表现为「运行后 TUI 一直没有出来」。raw 让任务直接继承当前终端。
+raw = true
+
 [tools]
 rust = "stable"
 
